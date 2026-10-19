@@ -2,6 +2,7 @@ package com.klisee.reloaded.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
@@ -50,6 +52,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -105,13 +108,21 @@ fun HomeScreen(
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        val hadGame = status is GameRepository.Status.Ready
         busy = true
         scope.launch {
             val result = repo.import(uri) { progress = it }
             busy = false
             progress = null
             status = repo.status()
-            snackbar.showSnackbar(result.fold({ "Juego instalado." }, { it.message ?: "No pude importar el juego." }))
+            snackbar.showSnackbar(
+                result.fold(
+                    {
+                        if (hadGame) "Juego actualizado. Tus partidas se conservaron." else "Juego instalado."
+                    },
+                    { it.message ?: "No pude importar el juego." },
+                ),
+            )
         }
     }
 
@@ -126,8 +137,13 @@ fun HomeScreen(
             TopAppBar(
                 title = { Text("Pokemon Reloaded", style = MaterialTheme.typography.titleLarge) },
                 actions = {
-                    IconButton(onClick = onLog) { Icon(Icons.Filled.Article, contentDescription = "Logs") }
-                    IconButton(onClick = onSettings) { Icon(Icons.Filled.Settings, contentDescription = "Ajustes") }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(end = 6.dp),
+                    ) {
+                        CircleIconButton(Icons.Filled.Article, "Logs", onLog)
+                        CircleIconButton(Icons.Filled.Settings, "Ajustes", onSettings)
+                    }
                 },
             )
         },
@@ -218,6 +234,19 @@ fun HomeScreen(
         }
     }
 }
+}
+
+/** A small top-bar action on its own dark disc, so the icon reads clearly over the page. */
+@Composable
+private fun CircleIconButton(icon: ImageVector, description: String, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(40.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape),
+    ) {
+        Icon(icon, contentDescription = description, modifier = Modifier.size(20.dp))
+    }
 }
 
 /**

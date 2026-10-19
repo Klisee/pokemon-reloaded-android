@@ -19,7 +19,7 @@
 use ramen::input::Key;
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering},
         Mutex,
     },
     time::{Duration, Instant},
@@ -80,8 +80,6 @@ pub const CHOICE: u8 = 32;
 /// attack diamond - none of your own Pokémon fights there - plus the ball, which is the key that
 /// room answers to for throwing. The flee (E), the bag and the rest stay where the map has them.
 pub const SAFARI: u8 = 64;
-/// One of the game's option lists (the start menu, the bag's action list, options...). They are
-/// walked with the movement keys and the entries are tapped directly, so only the joystick is left.
 pub const MENU_NAV: u8 = 128;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -119,7 +117,64 @@ pub struct Control {
 /// The joystick is not a button but is customised (and saved) the same way.
 pub const JOYSTICK_NAME: &str = "joystick";
 
-pub const CONTROLS: &[Control] = &[
+pub const CLASSIC_CONTROLS: &[Control] = &[
+    // Number keys (first row along the top). They are for the base game only: in battle those keys
+    // pick a party Pokémon, and that is what the SEL wheel below is for, so showing them there would
+    // only get in the way.
+    Control { name: "alpha1", key: Key::Alpha1, shape: Shape::Circle { cx: 0.300, cy: 0.055, r: 0.020 }, label: Label::Text("1"), contexts: SAFARI },
+    Control { name: "alpha2", key: Key::Alpha2, shape: Shape::Circle { cx: 0.372, cy: 0.055, r: 0.020 }, label: Label::Text("2"), contexts: SAFARI },
+    Control { name: "alpha3", key: Key::Alpha3, shape: Shape::Circle { cx: 0.444, cy: 0.055, r: 0.020 }, label: Label::Text("3"), contexts: SAFARI },
+    Control { name: "alpha4", key: Key::Alpha4, shape: Shape::Circle { cx: 0.516, cy: 0.055, r: 0.020 }, label: Label::Text("4"), contexts: SAFARI },
+    Control { name: "alpha5", key: Key::Alpha5, shape: Shape::Circle { cx: 0.588, cy: 0.055, r: 0.020 }, label: Label::Text("5"), contexts: SAFARI },
+    Control { name: "alpha6", key: Key::Alpha6, shape: Shape::Circle { cx: 0.660, cy: 0.055, r: 0.020 }, label: Label::Text("6"), contexts: SAFARI },
+    Control { name: "alpha7", key: Key::Alpha7, shape: Shape::Circle { cx: 0.732, cy: 0.055, r: 0.020 }, label: Label::Text("7"), contexts: WORLD },
+    Control { name: crate::field_controls::NAME, key: Key::Alpha1, shape: Shape::Circle { cx: 0.300, cy: 0.760, r: 0.038 }, label: Label::Text("SEL"), contexts: WORLD },
+    // Menu / misc keys (second row along the top).
+    Control { name: "space", key: Key::Space, shape: Shape::Circle { cx: 0.300, cy: 0.145, r: 0.022 }, label: Label::Text("PKM"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "o", key: Key::O, shape: Shape::Circle { cx: 0.372, cy: 0.145, r: 0.022 }, label: Label::Text("O"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "m", key: Key::M, shape: Shape::Circle { cx: 0.444, cy: 0.145, r: 0.022 }, label: Label::Text("M"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "e", key: Key::E, shape: Shape::Circle { cx: 0.516, cy: 0.145, r: 0.022 }, label: Label::Text("E"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "t", key: Key::T, shape: Shape::Circle { cx: 0.588, cy: 0.145, r: 0.022 }, label: Label::Text("T"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "l", key: Key::L, shape: Shape::Circle { cx: 0.660, cy: 0.145, r: 0.022 }, label: Label::Text("L"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "p", key: Key::P, shape: Shape::Circle { cx: 0.732, cy: 0.145, r: 0.022 }, label: Label::Text("P"), contexts: WORLD | BATTLE | SAFARI },
+    // Main actions, in the diamond a gamepad's face buttons use: the main one at the bottom, cancel
+    // to the right, and the other two on the left and on top. The cluster is about the size of the
+    // movement joystick and sits at the same height, so the two thumbs fall in the same place.
+    Control { name: "z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: WORLD | BATTLE | CHOICE },
+    Control { name: "x", key: Key::X, shape: Shape::Circle { cx: 0.933, cy: 0.700, r: 0.033 }, label: Label::Text("X"), contexts: WORLD | BATTLE | CHOICE | MENU_NAV },
+    Control { name: "c", key: Key::C, shape: Shape::Circle { cx: 0.797, cy: 0.700, r: 0.033 }, label: Label::Text("C"), contexts: WORLD | BATTLE },
+    Control { name: "v", key: Key::V, shape: Shape::Circle { cx: 0.865, cy: 0.549, r: 0.033 }, label: Label::Text("V"), contexts: WORLD | BATTLE },
+    // Secondary.
+    Control { name: "b", key: Key::B, shape: Shape::Circle { cx: 0.712, cy: 0.840, r: 0.026 }, label: Label::Text("B"), contexts: BATTLE | SAFARI },
+    Control { name: "s", key: Key::S, shape: Shape::Circle { cx: 0.712, cy: 0.700, r: 0.026 }, label: Label::Text("S"), contexts: BATTLE },
+    // Holding this opens the party wheel (see below): each slot is one Pokémon of the team.
+    Control { name: PARTY_NAME, key: Key::Alpha1, shape: Shape::Circle { cx: 0.300, cy: 0.760, r: 0.038 }, label: Label::Text("SEL"), contexts: BATTLE },
+    Control { name: "a", key: Key::A, shape: Shape::Circle { cx: 0.640, cy: 0.900, r: 0.024 }, label: Label::Text("A"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "n", key: Key::N, shape: Shape::Circle { cx: 0.640, cy: 0.760, r: 0.024 }, label: Label::Text("N"), contexts: WORLD | SAFARI },
+    // Menu keys.
+    Control { name: "return", key: Key::Return, shape: Shape::Circle { cx: 0.500, cy: 0.945, r: 0.032 }, label: Label::Text("OK"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: "escape", key: Key::Escape, shape: Shape::Circle { cx: 0.400, cy: 0.905, r: 0.026 }, label: Label::Text("ESC"), contexts: WORLD | BATTLE | SAFARI },
+    // While a dialogue box is open the overlay leaves only this one button, so the text and the
+    // portrait are not buried under anything else. Its position is measured from the game image (not
+    // the window), so it sits on the box whatever the screen's shape is. It sends the key the game
+    // advances dialogues with; a dialogue is only ever gone through forwards, so there is no cancel.
+    Control { name: "dialogo", key: Key::Z, shape: Shape::Circle { cx: 0.940, cy: 0.880, r: 0.024 }, label: Label::Text("Z"), contexts: DIALOG },
+    // The character picker of a new game: an arrow either side of the character, which is where the
+    // eye already is. They are the only controls on that screen.
+    Control { name: LEFT_ARROW_NAME, key: Key::LeftArrow, shape: Shape::Circle { cx: LEFT_ARROW_CX, cy: ARROW_CY, r: ARROW_R }, label: Label::Arrow(Dir::Left), contexts: CHARACTER },
+    Control { name: RIGHT_ARROW_NAME, key: Key::RightArrow, shape: Shape::Circle { cx: RIGHT_ARROW_CX, cy: ARROW_CY, r: ARROW_R }, label: Label::Arrow(Dir::Right), contexts: CHARACTER },
+    // The picker's own buttons, down the right edge: the screen is confirmed with enter and left
+    // with the key its own text names ("Pulsa X para cancelar"). Both sit above the dialogue box,
+    // clear of it, with the X set a little further up so the two do not crowd each other.
+    Control { name: "eleccion_ok", key: Key::Return, shape: Shape::Circle { cx: 0.932, cy: 0.600, r: 0.036 }, label: Label::Text("OK"), contexts: CHARACTER },
+    Control { name: "eleccion_atras", key: Key::X, shape: Shape::Circle { cx: 0.972, cy: 0.420, r: 0.028 }, label: Label::Text("X"), contexts: CHARACTER },
+    // TEMP: the key combination the game listens for as a trick. Its `key` is the first of the two;
+    // the pair is pressed together (see `control_key_down`). Centred along the very top, and drawn
+    // smaller than the rest because its label is a wide one.
+    Control { name: COMBO_BUTTON_NAME, key: Key::LeftControl, shape: Shape::Circle { cx: 0.500, cy: 0.060, r: 0.018 }, label: Label::Text("C+P"), contexts: CHARACTER },
+];
+/// Our own (new-style) catalogue, left as it was.
+pub const NEW_CONTROLS: &[Control] = &[
     // Number keys (first row along the top). They are for the base game only: in battle those keys
     // pick a party Pokémon, and that is what the SEL wheel below is for, so showing them there would
     // only get in the way.
@@ -172,6 +227,11 @@ pub const CONTROLS: &[Control] = &[
     // smaller than the rest because its label is a wide one.
     Control { name: COMBO_BUTTON_NAME, key: Key::LeftControl, shape: Shape::Circle { cx: 0.500, cy: 0.060, r: 0.018 }, label: Label::Text("C+P"), contexts: CHARACTER },
 ];
+/// The catalogue the active overlay draws and hit-tests.
+pub fn controls() -> &'static [Control] {
+    if overlay_style() == OverlayStyle::Classic { CLASSIC_CONTROLS } else { NEW_CONTROLS }
+}
+
 
 /// TEMP: the button that presses the game's trick combination. The game wants both keys held at the
 /// same time, so it is not an ordinary one-key control.
@@ -195,15 +255,7 @@ const CHARACTER_ROOM: i32 = 3;
 /// while each list is up, and nothing that is not one of them.
 const PREFERENCES_MODAL: i32 = 7744;
 const DIFFICULTY_MODAL: i32 = 7836;
-
-/// The game's yes/no question dialog (script 9673, `ShowDialogQuestion`). It is used for "¿Salir
-/// del juego?" and for "¿Deseas escapar del Pokémon Salvaje?", among others. It is answered by
-/// touching its Sí/No boxes, so the overlay steps aside while it is up.
 const QUESTION_MODAL: i32 = 9673;
-
-/// The game's option-list modal (script 7778, drawn by `DrawModalBase`). It is the start menu
-/// (Pokémon, Mochila, Pokédex...), the bag's action list and the options list. Confirmed on the
-/// device: the start menu reports this id.
 const LIST_MODAL: i32 = 7778;
 
 /// The most characters the picker offers at once: one while choosing the player, two while choosing
@@ -323,27 +375,146 @@ pub fn picker_reset() {
     PICKER_TARGET.store(0, Ordering::Relaxed);
 }
 
-/// The control's shape. Positions and sizes are built in and not customisable, so this is the table's
-/// own shape; the indirection stays because the renderer and the hit test share it.
+/// The control's shape, with whatever the player moved or resized it to (see [set_placement]) and the
+/// overall size of the new overlay on top. The renderer and the hit test share it, so what is drawn is
+/// what is touched.
 pub fn effective_shape(index: usize) -> Shape {
-    let control = &CONTROLS[index];
+    let classic = overlay_style() == OverlayStyle::Classic;
+    let control = &controls()[index];
+    // The classic overlay has its own per-context layout (the positions/tamaños editor).
+    if classic {
+        if let Some(entry) = layout_override(control.name) {
+            let scale = entry.scale * ui_scale();
+            return match control.shape {
+                Shape::Circle { r, .. } => Shape::Circle { cx: entry.x, cy: entry.y, r: r * scale },
+                Shape::Rect { w, h, .. } => Shape::Rect { cx: entry.x, cy: entry.y, w: w * scale, h: h * scale },
+            }
+        }
+    }
+    let mut shape = control.shape;
     // The picker's arrows sit beside the character, placed from where the game drew it: that way they
     // follow the sprite, on the player's screen and on the rival's, where the two characters are a
-    // good way apart.
-    if control.name == LEFT_ARROW_NAME || control.name == RIGHT_ARROW_NAME {
+    // good way apart. Once the player has placed an arrow by hand, their place wins.
+    if (control.name == LEFT_ARROW_NAME || control.name == RIGHT_ARROW_NAME)
+        && (classic || placement(control.name).is_none())
+    {
         let boxes = picker_boxes();
         let target = PICKER_TARGET.load(Ordering::Relaxed).min(boxes.len().saturating_sub(1));
         if let Some(&(x1, y1, x2, y2)) = boxes.get(target) {
             let cx = if control.name == LEFT_ARROW_NAME { x1 - ARROW_MARGIN } else { x2 + ARROW_MARGIN };
             // Kept inside the window, so a character drawn at the edge cannot push its arrow off it.
             let inside = |v: f32| v.clamp(ARROW_R, 1.0 - ARROW_R);
-            return Shape::Circle { cx: inside(cx), cy: inside((y1 + y2) / 2.0), r: ARROW_R }
+            shape = Shape::Circle { cx: inside(cx), cy: inside((y1 + y2) / 2.0), r: ARROW_R };
         }
     }
-    // Nothing character-sized was drawn - a screen that is not the picker, or a sprite that could not
-    // be measured - so the places built into the table are kept.
-    control.shape
+    // Our own overlay's saved placement applies only to the new style; the overall size applies to
+    // both, so the size slider works on the classic overlay too.
+    if !classic {
+        if let Some((cx, cy, scale)) = placement(control.name) {
+            shape = match shape {
+                Shape::Circle { r, .. } => Shape::Circle { cx, cy, r: r * scale },
+                Shape::Rect { w, h, .. } => Shape::Rect { cx, cy, w: w * scale, h: h * scale },
+            };
+        }
+    }
+    scale_shape(shape, ui_scale())
 }
+
+#[derive(Clone, Copy, Debug)]
+struct LayoutOverride {
+    context: u8,
+    name: &'static str,
+    x: f32,
+    y: f32,
+    scale: f32,
+    visible: bool,
+}
+
+static CLASSIC_LAYOUT: Mutex<Vec<LayoutOverride>> = Mutex::new(Vec::new());
+
+/// The launcher saves each real context independently. Unknown controls and contexts cannot
+/// introduce extra buttons. Invalid/missing files leave the original layout intact.
+pub fn load_layout(text: &str) {
+    let mut entries: Vec<LayoutOverride> = Vec::new();
+    if text.len() <= 65536 && text.lines().next() == Some("touch-layout-v1") {
+        for line in text.lines().skip(1) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() != 6 { continue }
+            let context = match fields[0] {
+                "world" => WORLD, "battle" => BATTLE, "dialog" => DIALOG, "character" => CHARACTER, "choice" => CHOICE, "safari" => SAFARI, "menu_nav" => MENU_NAV, _ => continue,
+            };
+            let name = if fields[1] == JOYSTICK_NAME && context & (WORLD | BATTLE | CHOICE | MENU_NAV) != 0 {
+                JOYSTICK_NAME
+            } else if let Some(c) = CLASSIC_CONTROLS.iter().find(|c| c.name == fields[1]) {
+                c.name
+            } else { continue };
+            let (Ok(x), Ok(y), Ok(scale)) = (fields[2].parse::<f32>(), fields[3].parse::<f32>(), fields[4].parse::<f32>()) else { continue };
+            if !x.is_finite() || !y.is_finite() || !scale.is_finite() { continue }
+            let visible = match fields[5] { "1" => true, "0" => false, _ => continue };
+            entries.retain(|e| e.context != context || e.name != name);
+            entries.push(LayoutOverride { context, name, x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0), scale: scale.clamp(0.5, 2.0), visible });
+        }
+    }
+    *CLASSIC_LAYOUT.lock().unwrap() = entries;
+}
+
+fn layout_override(name: &str) -> Option<LayoutOverride> {
+    let context = current_context();
+    CLASSIC_LAYOUT.lock().unwrap().iter().find(|entry| entry.context == context && entry.name == name).copied()
+        .or_else(|| profile_default(name, context))
+}
+
+fn profile_default(name: &str, context: u8) -> Option<LayoutOverride> {
+    let (name, x, y) = match (context, name) {
+        (WORLD, "space") => ("space", 0.300, 0.050),
+        (WORLD, "o") => ("o", 0.372, 0.050),
+        (WORLD, "m") => ("m", 0.444, 0.050),
+        (WORLD, "e") => ("e", 0.516, 0.050),
+        (WORLD, "t") => ("t", 0.588, 0.050),
+        (WORLD, "l") => ("l", 0.660, 0.050),
+        (WORLD, "p") => ("p", 0.732, 0.050),
+        (WORLD, "n") => ("n", 0.645, 0.720),
+        (WORLD, "a") => ("a", 0.645, 0.890),
+        (BATTLE, "space") => ("space", 0.042, 0.180),
+        (BATTLE, "o") => ("o", 0.096, 0.180),
+        (BATTLE, "e") => ("e", 0.148, 0.180),
+        // Level with the three on the left, clear of the party's status bars.
+        (BATTLE, "t") => ("t", 0.440, 0.180),
+        (BATTLE, "l") => ("l", 0.520, 0.180),
+        (BATTLE, "p") => ("p", 0.600, 0.180),
+        (BATTLE, "m") => ("m", 0.860, 0.330),
+        (BATTLE, "a") => ("a", 0.755, 0.448),
+        (BATTLE, "s") => ("s", 0.700, 0.650),
+        _ => return None,
+    };
+    Some(LayoutOverride {context, name, x, y, scale: 1.0, visible: true})
+}
+
+
+/// Geometry and hit testing share the same saved position and scale.
+
+
+/// Overall overlay opacity. At 100% the original artwork and colours are preserved.
+/// Kept separate from hit testing, so faint controls still accept the same touches.
+static OPACITY_PERCENT: AtomicU32 = AtomicU32::new(100);
+
+pub fn set_opacity_percent(percent: u32) {
+    OPACITY_PERCENT.store(percent.clamp(10, 100), Ordering::Relaxed);
+}
+
+pub fn opacity() -> f32 {
+    OPACITY_PERCENT.load(Ordering::Relaxed) as f32 / 100.0
+}
+
+/// Overlay vertices contain x, y, r, g, b, alpha, u, v. Fade all batches alike,
+/// including artwork, labels, the joystick and the party selector.
+pub fn apply_opacity(vertices: &mut [f32]) {
+    let alpha = opacity();
+    for vertex in vertices.chunks_exact_mut(8) {
+        vertex[5] *= alpha;
+    }
+}
+
 
 /// The rectangle the game image occupies in the window (normalised), as the renderer last presented
 /// it. Dialogue controls are placed inside it, so the button lands on the dialogue box whatever the
@@ -363,7 +534,15 @@ fn viewport() -> (f32, f32, f32, f32) {
 /// image, because it has to sit on the dialogue box the game draws.
 pub fn window_shape(index: usize) -> Shape {
     let shape = effective_shape(index);
-    if CONTROLS[index].contexts & DIALOG == 0 {
+    let classic = overlay_style() == OverlayStyle::Classic;
+    let placed = if classic {
+        layout_override(controls()[index].name).is_some()
+    } else {
+        placement(controls()[index].name).is_some()
+    };
+    // A control the player placed by hand is already in window coordinates; only the built-in ones
+    // that ride on the game image (the dialogue button) are moved with it.
+    if controls()[index].contexts & DIALOG == 0 || placed {
         return shape
     }
     let (vx, vy, vw, vh) = viewport();
@@ -373,9 +552,34 @@ pub fn window_shape(index: usize) -> Shape {
     }
 }
 
+pub fn window_shape_for(index: usize, ww: f32, wh: f32) -> Shape {
+    let shape = window_shape(index);
+    if overlay_style() != OverlayStyle::Classic { return shape }
+    if ww <= 0.0 || wh <= 0.0 || layout_override(controls()[index].name).is_none() { return shape }
+    match shape {
+        Shape::Circle { cx, cy, r } => {
+            let aspect = control_art_aspect(controls()[index].name).unwrap_or(1.0);
+            let rx = r.min(0.49 / aspect).min(0.49 * wh / ww);
+            let margin = rx * aspect;
+            let ry = rx * ww / wh;
+            Shape::Circle { cx: cx.clamp(margin, 1.0 - margin), cy: cy.clamp(ry, 1.0 - ry), r: rx }
+        },
+        Shape::Rect { cx, cy, w, h } => {
+            let (w, h) = (w.min(0.98), h.min(0.98));
+            Shape::Rect { cx: cx.clamp(w / 2.0, 1.0 - w / 2.0), cy: cy.clamp(h / 2.0, 1.0 - h / 2.0), w, h }
+        },
+    }
+}
+
 /// The inverse: a point in window coordinates, expressed in a control's own coordinates.
 pub fn control_point(index: usize, nx: f32, ny: f32) -> (f32, f32) {
-    if CONTROLS[index].contexts & DIALOG == 0 {
+    let classic = overlay_style() == OverlayStyle::Classic;
+    let placed = if classic {
+        layout_override(controls()[index].name).is_some()
+    } else {
+        placement(controls()[index].name).is_some()
+    };
+    if controls()[index].contexts & DIALOG == 0 || placed {
         return (nx, ny)
     }
     let (vx, vy, vw, vh) = viewport();
@@ -384,7 +588,31 @@ pub fn control_point(index: usize, nx: f32, ny: f32) -> (f32, f32) {
 
 /// Looks a control up by its name.
 pub fn index_of(name: &str) -> Option<usize> {
-    CONTROLS.iter().position(|control| control.name == name)
+    controls().iter().position(|control| control.name == name)
+}
+
+/// Where a control sits when the player has not moved it. Used when the saved layout only carries a
+/// size, and by the launcher's editor as its starting point.
+pub fn default_center(name: &str) -> Option<(f32, f32)> {
+    if name == MOVEMENT_NAME {
+        return Some((JOYSTICK_CX, JOYSTICK_CY));
+    }
+    controls().iter().find(|control| control.name == name).map(|control| match control.shape {
+        Shape::Circle { cx, cy, .. } => (cx, cy),
+        Shape::Rect { cx, cy, .. } => (cx, cy),
+    })
+}
+
+/// How big a control is when the player has not resized it.
+pub fn default_size(name: &str) -> f32 {
+    if name == MOVEMENT_NAME {
+        return 1.0;
+    }
+    let size = controls().iter().find(|control| control.name == name).map(|control| match control.shape {
+        Shape::Circle { r, .. } => r,
+        Shape::Rect { w, .. } => w,
+    });
+    size.unwrap_or(0.03)
 }
 
 /// The room the emulator reported, or -1 before the first frame.
@@ -497,13 +725,13 @@ fn log_state_change(room: i32) {
         return
     }
     let (window_w, window_h) = ramen::platform::android::window_size();
-    let active = (0..CONTROLS.len()).filter(|index| is_active(*index)).count();
-    eprintln!("[overlay] sala {} -> grupo {} | ventana {}x{} | {} de {} activos", room, group, window_w, window_h, active, CONTROLS.len());
+    let active = (0..controls().len()).filter(|index| is_active(*index)).count();
+    eprintln!("[overlay] sala {} -> grupo {} | ventana {}x{} | {} de {} activos", room, group, window_w, window_h, active, controls().len());
     // Every control, one per line, so a report of "buttons missing" can be checked against what the
     // overlay actually decided: which key, where it was put, how big it is, and whether it counted
     // as visible. Normalised coordinates are fractions of the window, so they can be compared
     // between devices of any size.
-    for (index, control) in CONTROLS.iter().enumerate() {
+    for (index, control) in controls().iter().enumerate() {
         // The shape actually in use, not the table's: a control that is moved to follow the game (the
         // picker's arrows) has to be reported where it really is.
         let (at, size) = match effective_shape(index) {
@@ -557,7 +785,7 @@ pub fn current_context() -> u8 {
         return MENU
     }
     // The game's option lists are navigated with the joystick and the entries are touched directly.
-    if modal_id() == LIST_MODAL {
+    if modal_id() == LIST_MODAL || crate::touch_navigation::bag_open() {
         return MENU_NAV
     }
     match ROOM.load(Ordering::Relaxed) {
@@ -612,8 +840,6 @@ pub fn pad_active() -> bool {
     PAD_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// True while one of the game's information windows is up. The whole overlay steps aside: its
-/// buttons would be drawn over the page and would still send keys to the game behind it.
 static INFO_WINDOW_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_info_window(open: bool) {
@@ -625,20 +851,33 @@ pub fn info_window_open() -> bool {
 }
 
 pub fn is_active(index: usize) -> bool {
-    if pad_active() || info_window_open() || CONTROLS[index].contexts & current_context() == 0 {
+    if overlay_style() == OverlayStyle::None {
+        return false
+    }
+    let classic = overlay_style() == OverlayStyle::Classic;
+    if classic {
+        if current_context() == WORLD && controls()[index].name.starts_with("alpha") { return false }
+        if controls()[index].name == crate::field_controls::NAME && current_context() != WORLD { return false }
+        if controls()[index].name == PARTY_NAME && current_context() != BATTLE { return false }
+        if layout_override(controls()[index].name).is_some_and(|entry| !entry.visible) { return false }
+    }
+    if pad_active() || info_window_open()
+        || (controls()[index].contexts & current_context() == 0
+            && !(classic && layout_override(controls()[index].name).is_some()))
+    {
         return false
     }
     // The picker's trick button opens the whole roster once, and then has done its job: it is taken
     // away rather than left over the screen for the rest of the game. It comes back with the next new
     // game (see [set_room]).
-    if CONTROLS[index].name == COMBO_BUTTON_NAME && COMBO_USED.load(Ordering::Relaxed) {
+    if controls()[index].name == COMBO_BUTTON_NAME && COMBO_USED.load(Ordering::Relaxed) {
         return false
     }
     // The picker's own controls belong to the moment the game is showing the characters to choose
     // from. With any of its modals up - the name dialog, the question it asks to check the data, a
     // summary - nothing of the picker belongs on top: those screens are gone through with the game's
     // own keyboard and buttons.
-    if CONTROLS[index].contexts & CHARACTER != 0 {
+    if current_context() == CHARACTER && controls()[index].contexts & CHARACTER != 0 {
         if modal_open() {
             return false
         }
@@ -648,26 +887,34 @@ pub fn is_active(index: usize) -> bool {
         // would hop about, so they sit that one out. The rest of the controls stay put: they do not
         // follow anything.
         let candidates = picker_boxes().len();
-        if matches!(CONTROLS[index].label, Label::Arrow(_)) && !(1..=PICKER_MAX_CHARACTERS).contains(&candidates) {
+        if matches!(controls()[index].label, Label::Arrow(_)) && !(1..=PICKER_MAX_CHARACTERS).contains(&candidates) {
             return false
         }
     }
     true
 }
 
-/// The joystick drives the arrow keys, which is how the game's menus (the ones that still show
-/// controls) and the overworld are navigated.
-pub fn joystick_active() -> bool {
-    !pad_active()
+/// The movement control (joystick or D-pad) drives the arrow keys, which is how the game's menus (the
+/// ones that still show controls) and the overworld are navigated.
+pub fn movement_active() -> bool {
+    if overlay_style() == OverlayStyle::Classic { return joystick_active() }
+    overlay_style() != OverlayStyle::None
+        && !pad_active()
         && !info_window_open()
-        && joystick_visible()
+        && current_context() & (WORLD | BATTLE | CHOICE | MENU_NAV) != 0
+}
+
+/// The joystick drives the arrow keys. Used by the classic overlay.
+pub fn joystick_active() -> bool {
+    !pad_active() && !info_window_open() && joystick_visible()
+        && overlay_style() != OverlayStyle::None
         && current_context() & (WORLD | BATTLE | CHOICE | MENU_NAV) != 0
 }
 
 /// Returns the index of the control containing the point, if any. The point is normalised, but the
 /// test is done in pixels so the touchable area matches what is drawn on a screen that is not square.
 pub fn hit(nx: f32, ny: f32, ww: f32, wh: f32) -> Option<usize> {
-    CONTROLS
+    controls()
         .iter()
         .enumerate()
         .position(|(index, control)| is_active(index) && control_contains(index, control.name, nx, ny, ww, wh))
@@ -677,8 +924,8 @@ pub fn hit(nx: f32, ny: f32, ww: f32, wh: f32) -> Option<usize> {
 /// picture was actually drawn into, so a wide label is as touchable as it is painted instead of only
 /// inside the little circle its key is defined with. The rest keep their own shape's test.
 fn control_contains(index: usize, name: &str, nx: f32, ny: f32, ww: f32, wh: f32) -> bool {
-    let shape = window_shape(index);
-    if let Some(aspect) = art_aspect(name) {
+    let shape = window_shape_for(index, ww, wh);
+    if let Some(aspect) = control_art_aspect(name) {
         let (cx, cy, half) = match shape {
             Shape::Circle { cx, cy, r } => (cx, cy, r * ww),
             Shape::Rect { cx, cy, w, h } => (cx, cy, (w * ww + h * wh) / 4.0),
@@ -689,10 +936,10 @@ fn control_contains(index: usize, name: &str, nx: f32, ny: f32, ww: f32, wh: f32
     contains(shape, nx, ny, ww, wh)
 }
 
-/// How opaque the controls that have their own artwork are drawn (1 solid, lower lets the game show
-/// through). Read from the launcher's `controls.conf` at startup. Controls drawn as plain shapes and
-/// the joystick are not affected.
-static SPRITE_OPACITY: Mutex<f32> = Mutex::new(1.0);
+/// The shape each control's artwork was painted in (width over height), as the renderer packed it.
+/// Empty until the skin is loaded, and only used to widen the touch area of a picture that is not as
+/// tall as it is wide.
+static SPRITE_OPACITY: Mutex<f32> = Mutex::new(0.5);
 
 pub fn set_sprite_opacity(value: f32) {
     *SPRITE_OPACITY.lock().unwrap() = value.clamp(0.05, 1.0);
@@ -700,6 +947,107 @@ pub fn set_sprite_opacity(value: f32) {
 
 pub fn sprite_opacity() -> f32 {
     *SPRITE_OPACITY.lock().unwrap()
+}
+
+/// Which overlay the player wants drawn.
+#[derive(Clone, Copy, PartialEq)]
+pub enum OverlayStyle {
+    /// The new, semi-transparent controls drawn as smooth shapes. This is the default.
+    New,
+    /// The original dynamic controls: the pixel-art skin when it is there, plain shapes otherwise.
+    Classic,
+    /// No on-screen controls at all; the game is played with a pad or by touching the game itself.
+    None,
+}
+
+static STYLE: AtomicU8 = AtomicU8::new(1);
+
+pub fn set_overlay_style(style: OverlayStyle) {
+    STYLE.store(
+        match style {
+            OverlayStyle::New => 0,
+            OverlayStyle::Classic => 1,
+            OverlayStyle::None => 2,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+pub fn overlay_style() -> OverlayStyle {
+    match STYLE.load(Ordering::Relaxed) {
+        1 => OverlayStyle::Classic,
+        2 => OverlayStyle::None,
+        _ => OverlayStyle::New,
+    }
+}
+
+/// What drives the arrow keys: the analog joystick or a four-way pad.
+#[derive(Clone, Copy, PartialEq)]
+pub enum MoveMode {
+    Joystick,
+    Dpad,
+}
+
+static MOVE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_move_mode(mode: MoveMode) {
+    MOVE.store(if mode == MoveMode::Dpad { 1 } else { 0 }, Ordering::Relaxed);
+}
+
+pub fn move_mode() -> MoveMode {
+    // Moderno always moves with the joystick; the choice only exists for the classic look.
+    if crate::touch_appearance::settings().style == crate::touch_appearance::Style::Modern {
+        return MoveMode::Joystick
+    }
+    if MOVE.load(Ordering::Relaxed) == 1 {
+        MoveMode::Dpad
+    } else {
+        MoveMode::Joystick
+    }
+}
+
+/// The name the movement control (joystick or D-pad) is saved under, both in the layout and in the
+/// launcher's editor. It is not one of [controls()]: it is drawn and hit-tested on its own.
+pub const MOVEMENT_NAME: &str = "dpad";
+
+/// Where the player moved and resized a control, keyed by its [Control::name]. Only the entries the
+/// player actually touched are stored, so the rest keep the places built into the table.
+static NEW_LAYOUT: Mutex<Vec<(String, f32, f32, f32)>> = Mutex::new(Vec::new());
+
+pub fn set_placement(name: &str, cx: f32, cy: f32, scale: f32) {
+    let mut layout = NEW_LAYOUT.lock().unwrap();
+    if let Some(entry) = layout.iter_mut().find(|entry| entry.0 == name) {
+        *entry = (name.to_string(), cx, cy, scale);
+    } else {
+        layout.push((name.to_string(), cx, cy, scale));
+    }
+}
+
+pub fn clear_layout() {
+    NEW_LAYOUT.lock().unwrap().clear();
+}
+
+fn placement(name: &str) -> Option<(f32, f32, f32)> {
+    NEW_LAYOUT.lock().unwrap().iter().find(|entry| entry.0 == name).map(|entry| (entry.1, entry.2, entry.3))
+}
+
+/// A size multiplier applied to every control of the new overlay.
+static UI_SCALE: Mutex<f32> = Mutex::new(1.0);
+
+pub fn set_ui_scale(scale: f32) {
+    *UI_SCALE.lock().unwrap() = scale.clamp(0.3, 3.0);
+}
+
+pub fn ui_scale() -> f32 {
+    *UI_SCALE.lock().unwrap()
+}
+
+/// Multiplies the size part of a shape, leaving its centre where it is.
+fn scale_shape(shape: Shape, scale: f32) -> Shape {
+    match shape {
+        Shape::Circle { cx, cy, r } => Shape::Circle { cx, cy, r: r * scale },
+        Shape::Rect { cx, cy, w, h } => Shape::Rect { cx, cy, w: w * scale, h: h * scale },
+    }
 }
 
 /// The shape each control's artwork was painted in (width over height), as the renderer packed it.
@@ -713,13 +1061,14 @@ pub fn set_art_aspect(name: &'static str, aspect: f32) {
     aspects.push((name, aspect));
 }
 
-fn art_aspect(name: &str) -> Option<f32> {
+pub fn control_art_aspect(name: &str) -> Option<f32> {
     ART_ASPECTS.lock().unwrap().iter().find(|(known, _)| *known == name).map(|(_, aspect)| *aspect)
 }
 
-static PRESSED: AtomicU32 = AtomicU32::new(0);
+static PRESSED: AtomicU64 = AtomicU64::new(0);
 
 pub fn set_pressed(index: usize, pressed: bool) {
+    if is_pressed(index) != pressed { crate::touch_appearance::set_pressed(index, pressed); }
     if pressed {
         PRESSED.fetch_or(1 << index, Ordering::Relaxed);
     } else {
@@ -734,11 +1083,11 @@ pub fn is_pressed(index: usize) -> bool {
 /// Controls that are pressed but no longer valid, so the caller can release their keys instead of
 /// leaving one stuck down when the game changes state.
 pub fn stale_pressed() -> Vec<usize> {
-    (0..CONTROLS.len()).filter(|&index| is_pressed(index) && !is_active(index)).collect()
+    (0..controls().len()).filter(|&index| is_pressed(index) && !is_active(index)).collect()
 }
 
 // ---------------------------------------------------------------------------------------------
-// Movement joystick. It presses the arrow keys depending on which way the stick is pushed.
+// Movement (joystick or D-pad). It presses the arrow keys depending on which way it is pushed.
 
 pub const JOYSTICK_CX: f32 = 0.135;
 pub const JOYSTICK_CY: f32 = 0.700;
@@ -747,38 +1096,73 @@ pub const JOYSTICK_R: f32 = 0.200;
 /// Dead zone, as a fraction of the radius, before a direction registers.
 pub const JOYSTICK_DEAD: f32 = 0.35;
 
+/// The movement control's centre, in normalised coordinates.
+pub fn movement_center() -> (f32, f32) {
+    if overlay_style() == OverlayStyle::Classic { return joystick_center() }
+    placement(MOVEMENT_NAME).map(|(cx, cy, _)| (cx, cy)).unwrap_or((JOYSTICK_CX, JOYSTICK_CY))
+}
+
+/// Radius as a fraction of the window height.
+pub fn movement_radius() -> f32 {
+    if overlay_style() == OverlayStyle::Classic { return joystick_radius() }
+    let scale = placement(MOVEMENT_NAME).map(|(_, _, scale)| scale).unwrap_or(1.0);
+    JOYSTICK_R * scale * ui_scale()
+}
+
 /// The joystick's centre, in normalised coordinates.
 pub fn joystick_center() -> (f32, f32) {
-    (JOYSTICK_CX, JOYSTICK_CY)
+    layout_override(JOYSTICK_NAME).map_or((JOYSTICK_CX, JOYSTICK_CY), |entry| (entry.x, entry.y))
+}
+
+pub fn joystick_center_in_window(ww: f32, wh: f32) -> (f32, f32) {
+    let (cx, cy) = joystick_center();
+    if ww <= 0.0 || wh <= 0.0 || layout_override(JOYSTICK_NAME).is_none() { return (cx, cy) }
+    let ry = (joystick_radius() * 1.05).min(0.49);
+    let rx = (ry * wh / ww).min(0.49);
+    (cx.clamp(rx, 1.0 - rx), cy.clamp(ry, 1.0 - ry))
 }
 
 /// Radius as a fraction of the window height.
 pub fn joystick_radius() -> f32 {
-    JOYSTICK_R
+    JOYSTICK_R * layout_override(JOYSTICK_NAME).map_or(1.0, |entry| entry.scale)
 }
 
 pub fn joystick_visible() -> bool {
-    true
+    layout_override(JOYSTICK_NAME).map_or(true, |entry| entry.visible)
 }
 
-pub fn joystick_hit(nx: f32, ny: f32, ww: f32, wh: f32) -> bool {
-    if !joystick_active() {
+pub fn movement_hit(nx: f32, ny: f32, ww: f32, wh: f32) -> bool {
+    if !movement_active() {
         return false
     }
-    let (cx, cy) = joystick_center();
-    let r = joystick_radius() * wh;
+    let (cx, cy) = if overlay_style() == OverlayStyle::Classic { joystick_center_in_window(ww, wh) } else { movement_center() };
+    let r = if overlay_style() == OverlayStyle::Classic { joystick_radius() } else { movement_radius() } * wh;
     let dx = (nx - cx) * ww;
     let dy = (ny - cy) * wh;
     dx * dx + dy * dy <= r * r
 }
 
-/// `[up, down, left, right]` to hold for a stick at (nx, ny).
-pub fn joystick_dirs(nx: f32, ny: f32, ww: f32, wh: f32) -> [bool; 4] {
-    let (cx, cy) = joystick_center();
-    let r = joystick_radius() * wh;
-    let dx = (nx - cx) * ww;
-    let dy = (ny - cy) * wh;
-    stick_dirs(dx / r, dy / r)
+/// `[up, down, left, right]` to hold for the movement control at (nx, ny).
+pub fn movement_dirs(nx: f32, ny: f32, ww: f32, wh: f32) -> [bool; 4] {
+    let classic = overlay_style() == OverlayStyle::Classic;
+    let (cx, cy) = if classic { joystick_center_in_window(ww, wh) } else { movement_center() };
+    let r = if classic { joystick_radius() } else { movement_radius() } * wh;
+    let dx = (nx - cx) * ww / r;
+    let dy = (ny - cy) * wh / r;
+    // The D-pad is four discrete zones, not an analog stick: the strongest arm wins and the centre
+    // does nothing. That is what makes it feel (and light up) like a real cross.
+    if move_mode() == MoveMode::Dpad {
+        const DPAD_DEAD: f32 = 0.26;
+        if dx.abs().max(dy.abs()) < DPAD_DEAD {
+            return [false; 4]
+        }
+        return if dx.abs() > dy.abs() {
+            [false, false, dx < 0.0, dx > 0.0]
+        } else {
+            [dy < 0.0, dy > 0.0, false, false]
+        }
+    }
+    stick_dirs(dx, dy)
 }
 
 /// Which directions a stick pushed by (dx, dy) is asking for: up, down, left, right. Both are in
@@ -794,14 +1178,32 @@ pub fn stick_dirs(dx: f32, dy: f32) -> [bool; 4] {
 }
 
 /// The stick's offset from its centre, in units of its radius (for drawing the knob).
-static JOYSTICK_OFFSET: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
+static MOVEMENT_OFFSET: Mutex<(f32, f32)> = Mutex::new((0.0, 0.0));
 
-pub fn set_joystick_offset(dx: f32, dy: f32) {
-    *JOYSTICK_OFFSET.lock().unwrap() = (dx, dy);
+pub fn set_movement_offset(dx: f32, dy: f32) {
+    *MOVEMENT_OFFSET.lock().unwrap() = (dx, dy);
 }
 
-pub fn joystick_offset() -> (f32, f32) {
-    *JOYSTICK_OFFSET.lock().unwrap()
+pub fn movement_offset() -> (f32, f32) {
+    *MOVEMENT_OFFSET.lock().unwrap()
+}
+
+/// Which directions the movement control is pressing right now, so the D-pad can light up the arm.
+static MOVE_DIRS: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_move_dirs(dirs: [bool; 4]) {
+    let mut bits = 0u32;
+    for (i, on) in dirs.iter().enumerate() {
+        if *on {
+            bits |= 1 << i;
+        }
+    }
+    MOVE_DIRS.store(bits, Ordering::Relaxed);
+}
+
+pub fn move_dirs() -> [bool; 4] {
+    let bits = MOVE_DIRS.load(Ordering::Relaxed);
+    [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0]
 }
 
 /// Point-in-shape, in pixels so it matches what is drawn.
@@ -859,7 +1261,7 @@ static WHEEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 static WHEEL_SEL: AtomicI32 = AtomicI32::new(-1);
 
 pub fn wheel_open() -> bool {
-    WHEEL.load(Ordering::Relaxed)
+    WHEEL.load(Ordering::Relaxed) && index_of(PARTY_NAME).is_some_and(is_active)
 }
 
 pub fn wheel_selected() -> i32 {
@@ -935,4 +1337,19 @@ pub fn wheel_item_at(nx: f32, ny: f32, ww: f32, wh: f32) -> Option<usize> {
         }
     }
     best
+}
+
+#[cfg(test)]
+pub fn expire_context_grace() {
+    *DIALOGUE.seen.lock().unwrap() = None;
+    *MODAL_OPEN.seen.lock().unwrap() = None;
+}
+
+/// Different visible controls may share a key after adding buttons to another profile.
+pub fn control_keys(index: usize) -> [Option<Key>; 2] {
+    if controls()[index].name == COMBO_BUTTON_NAME { [Some(Key::LeftControl),Some(Key::P)] }
+    else { [Some(controls()[index].key),None] }
+}
+pub fn key_held_by_buttons(key: Key) -> bool {
+    (0..controls().len()).any(|i| is_pressed(i) && control_keys(i).contains(&Some(key)))
 }

@@ -20,8 +20,11 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Opacity
 import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAlt
@@ -40,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +66,7 @@ fun SettingsScreen(
     onLog: () -> Unit,
     onAbout: () -> Unit,
     onControls: () -> Unit,
+    onTouchSettings: () -> Unit,
     onMySaves: () -> Unit,
     onUpdateFound: (Update.Release) -> Unit,
     bottomBar: @Composable () -> Unit = {},
@@ -72,7 +77,6 @@ fun SettingsScreen(
     var status by remember(revision) { mutableStateOf(repo.status()) }
     var keepScreenOn by remember { mutableStateOf(prefs.keepScreenOn) }
     var keepAspect by remember { mutableStateOf(prefs.keepAspect) }
-    var touchOpacity by remember { mutableStateOf(prefs.touchOpacity) }
     var checking by remember { mutableStateOf(false) }
     val appVersion = remember {
         runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty()
@@ -151,29 +155,25 @@ fun SettingsScreen(
                 )
             }
 
+            SettingsGroup("Controles tactiles") {
+                NavRow(
+                    icon = Icons.Filled.Tune,
+                    title = "Controles tactiles",
+                    subtitle = "Estilo, movimiento, transparencia y editores",
+                    items = 1,
+                    index = 0,
+                    onClick = onTouchSettings,
+                )
+            }
+
             SettingsGroup("Mando") {
                 NavRow(
                     icon = Icons.Filled.SportsEsports,
-                    title = "Controles",
+                    title = "Mando",
                     subtitle = "Elige que boton del mando hace cada tecla, y pruebalo",
                     items = 1,
                     index = 0,
                     onClick = onControls,
-                )
-            }
-
-            SettingsGroup("Controles tactiles") {
-                SliderRow(
-                    icon = Icons.Filled.Opacity,
-                    title = "Opacidad de los botones",
-                    subtitle = "Bajala para que los botones con sprite tapen menos el juego",
-                    value = touchOpacity,
-                    items = 1,
-                    index = 0,
-                    onValueChange = {
-                        touchOpacity = it
-                        prefs.touchOpacity = it
-                    },
                 )
             }
 

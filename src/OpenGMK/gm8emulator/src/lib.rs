@@ -26,6 +26,10 @@ mod android_main;
 /// The on-screen touch controls and their customisable layout. Built on every target so the
 /// `dump_layout` example can turn the built-in layout into the file the launcher app draws.
 pub mod touch_controls;
+pub mod touch_appearance;
+pub mod touch_skin;
+pub mod field_controls;
+pub mod touch_navigation;
 
 mod main_impl;
 

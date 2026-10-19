@@ -1935,6 +1935,9 @@ impl Game {
     /// one.
     #[cfg(target_os = "android")]
     pub(crate) fn sync_overlay(&self) {
+        // The touch overlay tells taps from drags in the bag by knowing which room/modal it is in.
+        let room_name = self.assets.rooms.get_asset(self.room.id).map(|r| r.name.to_string().to_ascii_lowercase()).unwrap_or_default();
+        crate::touch_navigation::report(self.room.id, self.modal_system(), room_name.contains("mochila") || room_name.contains("bagroom"));
         crate::touch_controls::set_room(self.room.id);
         crate::touch_controls::set_dialogue(self.dialogue_open());
         crate::touch_controls::set_box_open(self.inside_box());

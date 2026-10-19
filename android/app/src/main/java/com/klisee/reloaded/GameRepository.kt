@@ -461,11 +461,50 @@ class GameRepository(private val context: Context) {
             error("El zip no trae el .exe y la carpeta data/.")
         }
 
-        gameDir.deleteRecursively()
+        // Carry the player's data across an update: the folders the game's own migration tells you
+        // to keep. They are copied aside before the old install is swapped out and merged back into
+        // the new one, so importing a new version no longer costs anyone their saves.
+        val saved = File(files, "game.saves")
+        saved.deleteRecursively()
+        var kept = 0
+        if (gameDir.isDirectory) {
+            for (folder in saveFolders) {
+                val source = File(gameDir, "data/$folder")
+                if (!source.isDirectory) continue
+                val dest = File(saved, folder)
+                runCatching { source.copyRecursively(dest, overwrite = true) }
+                if (dest.isDirectory) kept += dest.walkTopDown().count { it.isFile }
+            }
+        }
+        trace("import: conservados $kept ficheros de partidas y datos del jugador")
+
+        // Swap the folders instead of erasing the old install first: if the last move fails, the
+        // previous game (and its saves) is still on disk to fall back to.
+        val previous = File(files, "game.old")
+        previous.deleteRecursively()
+        val movedAside = gameDir.isDirectory && gameDir.renameTo(previous)
+        if (gameDir.isDirectory) gameDir.deleteRecursively()
         if (!staging.renameTo(gameDir)) {
+            if (movedAside) {
+                gameDir.deleteRecursively()
+                previous.renameTo(gameDir)
+            }
             staging.deleteRecursively()
+            saved.deleteRecursively()
             error("No pude mover el juego a su carpeta definitiva.")
         }
+        previous.deleteRecursively()
+
+        // Put the player's data back. Anything the new version ships in those folders wins, so an
+        // update never reverts the game's own files; a save is only added when it is missing.
+        for (folder in saveFolders) {
+            val source = File(saved, folder)
+            if (!source.isDirectory) continue
+            val dest = File(gameDir, "data/$folder")
+            dest.mkdirs()
+            runCatching { source.copyRecursively(dest, overwrite = false) }
+        }
+        saved.deleteRecursively()
         metaFile.writeText(
             JSONObject()
                 .put("version", version ?: "")

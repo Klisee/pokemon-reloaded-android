@@ -146,6 +146,7 @@ fn load_video() {
 fn load_controls() {
     let path = PathBuf::from(format!("/data/data/{}/files/controls.conf", PACKAGE_DIR));
     let mut buttons = HashMap::new();
+    crate::touch_controls::set_sprite_opacity(1.0);
     if let Ok(text) = fs::read_to_string(&path) {
         eprintln!("[pad] leyendo {}", path.display());
         for line in text.lines() {
@@ -157,14 +158,12 @@ fn load_controls() {
             let Some((name, value)) = line.split_once('=') else { continue };
             if name.trim() == "stick" {
                 STICK_ENABLED.store(value.trim() != "0", std::sync::atomic::Ordering::Relaxed);
+            } else if name.trim() == "opacity" {
+                if let Ok(opacity) = value.trim().parse::<f32>() { crate::touch_controls::set_sprite_opacity(opacity); }
             } else if name.trim() == "pad" {
                 // A pad was connected when the game started, so start with the controls out of the
                 // way; touching the screen brings them back.
                 crate::touch_controls::set_pad_active(value.trim() != "0");
-            } else if name.trim() == "opacity" {
-                if let Ok(opacity) = value.trim().parse::<f32>() {
-                    crate::touch_controls::set_sprite_opacity(opacity);
-                }
             } else if let (Ok(code), Some(key)) = (name.trim().parse::<AKeyCode>(), parse_key(value.trim())) {
                 buttons.insert(code, key);
             }
@@ -174,6 +173,88 @@ fn load_controls() {
     if let Ok(mut map) = MAPPED_BUTTONS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
         *map = buttons;
     }
+}
+
+/// Reads the overlay the launcher's editor left behind: the style, what drives the movement, the
+/// overall size and where each control sits. Best effort: with no file, the built-in defaults are used.
+fn load_touch() {
+    let path = PathBuf::from(format!("/data/data/{}/files/touch.conf", PACKAGE_DIR));
+    let Ok(text) = fs::read_to_string(&path) else { return };
+    eprintln!("[overlay] leyendo {}", path.display());
+    crate::touch_controls::clear_layout();
+    let mut positions: Vec<(String, f32, f32)> = Vec::new();
+    let mut sizes: Vec<(String, f32)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue
+        }
+        let Some((name, value)) = line.split_once('=') else { continue };
+        let (name, value) = (name.trim(), value.trim());
+        match name {
+            "style" => crate::touch_controls::set_overlay_style(match value {
+                "classic" => crate::touch_controls::OverlayStyle::Classic,
+                "none" => crate::touch_controls::OverlayStyle::None,
+                _ => crate::touch_controls::OverlayStyle::New,
+            }),
+            "move" => crate::touch_controls::set_move_mode(if value == "dpad" {
+                crate::touch_controls::MoveMode::Dpad
+            } else {
+                crate::touch_controls::MoveMode::Joystick
+            }),
+            "scale" => {
+                if let Ok(scale) = value.parse::<f32>() {
+                    crate::touch_controls::set_ui_scale(scale);
+                }
+            },
+            "opacity" => {
+                if let Ok(opacity) = value.parse::<f32>() {
+                    crate::touch_controls::set_sprite_opacity(opacity);
+                }
+            },
+            _ => {
+                if let Some(target) = name.strip_prefix("pos.") {
+                    let mut parts = value.split(',');
+                    if let (Some(cx), Some(cy)) = (parts.next(), parts.next()) {
+                        if let (Ok(cx), Ok(cy)) = (cx.trim().parse::<f32>(), cy.trim().parse::<f32>()) {
+                            positions.push((target.to_string(), cx, cy));
+                        }
+                    }
+                } else if let Some(target) = name.strip_prefix("size.") {
+                    if let Ok(scale) = value.parse::<f32>() {
+                        sizes.push((target.to_string(), scale));
+                    }
+                }
+            },
+        }
+    }
+    for (name, cx, cy) in &positions {
+        let scale = sizes.iter().find(|(other, _)| other == name).map(|(_, scale)| *scale).unwrap_or(1.0);
+        crate::touch_controls::set_placement(name, *cx, *cy, scale);
+    }
+    for (name, scale) in &sizes {
+        if positions.iter().any(|(other, _, _)| other == name) {
+            continue
+        }
+        let (cx, cy) = crate::touch_controls::default_center(name).unwrap_or((0.5, 0.5));
+        crate::touch_controls::set_placement(name, cx, cy, *scale);
+    }
+    let style = match crate::touch_controls::overlay_style() {
+        crate::touch_controls::OverlayStyle::New => "new",
+        crate::touch_controls::OverlayStyle::Classic => "classic",
+        crate::touch_controls::OverlayStyle::None => "none",
+    };
+    let movement = match crate::touch_controls::move_mode() {
+        crate::touch_controls::MoveMode::Joystick => "joystick",
+        crate::touch_controls::MoveMode::Dpad => "dpad",
+    };
+    eprintln!(
+        "[overlay] estilo={} move={} escala={} controles={}",
+        style,
+        movement,
+        crate::touch_controls::ui_scale(),
+        positions.len().max(sizes.len())
+    );
 }
 
 /// The key names the control screen can write into `controls.conf`.
@@ -209,9 +290,9 @@ fn stick_update(x: f32, y: f32) {
         let bit = 1u32 << index;
         let was = state & bit != 0;
         if *held && !was {
-            android::push_input(ramen::platform::android::InputEvent::KeyDown { key: JOYSTICK_KEYS[index], text: None });
+            android::push_input(ramen::platform::android::InputEvent::KeyDown { key: MOVEMENT_KEYS[index], text: None });
         } else if !*held && was {
-            android::push_input(ramen::platform::android::InputEvent::KeyUp { key: JOYSTICK_KEYS[index] });
+            android::push_input(ramen::platform::android::InputEvent::KeyUp { key: MOVEMENT_KEYS[index] });
         }
         if *held {
             state |= bit;
@@ -237,7 +318,7 @@ fn axis_value(motion: &android_activity::input::MotionEvent, axis: Axis) -> f32 
 
 fn stick_release() {
     let state = STICK_STATE.swap(0, std::sync::atomic::Ordering::Relaxed);
-    for (index, key) in JOYSTICK_KEYS.iter().enumerate() {
+    for (index, key) in MOVEMENT_KEYS.iter().enumerate() {
         if state & (1 << index) != 0 {
             android::push_input(ramen::platform::android::InputEvent::KeyUp { key: *key });
         }
@@ -257,45 +338,46 @@ static POINTER_CONTROLS: Mutex<Option<HashMap<i32, usize>>> = Mutex::new(None);
 
 /// The pointer the party wheel is following, if any.
 static WHEEL_PTR: Mutex<Option<i32>> = Mutex::new(None);
+static FIELD_POINTER: Mutex<Option<(i32,usize)>> = Mutex::new(None);
 
 /// Sends a key as a quick tap. The engine defers the release to the end of the poll, so the game
 /// still sees it as pressed.
 fn tap_key(key: ramen::input::Key) {
+    if crate::touch_controls::key_held_by_buttons(key) || joystick_holds(key) { return }
     android::push_input(ramen::platform::android::InputEvent::KeyDown { key, text: None });
     android::push_input(ramen::platform::android::InputEvent::KeyUp { key });
 }
 
+fn joystick_holds(key: Key) -> bool {
+    let state=MOVEMENT_STATE.load(std::sync::atomic::Ordering::Relaxed);
+    MOVEMENT_KEYS.iter().enumerate().any(|(i,k)| *k==key && state & (1<<i)!=0)
+}
+
 fn control_key_down(index: usize) {
-    crate::touch_controls::set_pressed(index, true);
-    // TEMP: the trick combination needs both keys held at once, so it is not one key like the rest.
-    if crate::touch_controls::CONTROLS[index].name == crate::touch_controls::COMBO_BUTTON_NAME {
-        for key in [Key::LeftControl, Key::P] {
-            android::push_input(ramen::platform::android::InputEvent::KeyDown { key, text: None });
+    use crate::touch_controls as tc;
+    if tc::controls()[index].name == "o" && matches!(tc::current_context(),tc::WORLD|tc::BATTLE|tc::SAFARI) {crate::touch_navigation::arm_bag();}
+    else {crate::touch_navigation::disarm_bag();}
+    let keys=tc::control_keys(index);
+    let held=keys.map(|key| key.is_some_and(|key| tc::key_held_by_buttons(key) || joystick_holds(key)));
+    tc::set_pressed(index,true);
+    for (i,key) in keys.into_iter().enumerate() {
+        if let Some(key)=key.filter(|_| !held[i]) {
+            match key {Key::LeftArrow=>tc::picker_step(-1),Key::RightArrow=>tc::picker_step(1),_=>{}}
+            android::push_input(ramen::platform::android::InputEvent::KeyDown {key,text:None});
         }
-        // It has done its job: it takes itself away until the next new game.
-        crate::touch_controls::set_combo_used();
-        return
     }
-    let key = crate::touch_controls::CONTROLS[index].key;
-    // On the character picker the overlay's arrows travel with the game's own selection, so the
-    // buttons stay around the character the player is on rather than around the first one.
-    match key {
-        Key::LeftArrow => crate::touch_controls::picker_step(-1),
-        Key::RightArrow => crate::touch_controls::picker_step(1),
-        _ => {},
-    }
-    android::push_input(ramen::platform::android::InputEvent::KeyDown { key, text: None });
+    if tc::controls()[index].name==tc::COMBO_BUTTON_NAME {tc::set_combo_used();}
 }
 
 fn control_key_up(index: usize) {
-    crate::touch_controls::set_pressed(index, false);
-    if crate::touch_controls::CONTROLS[index].name == crate::touch_controls::COMBO_BUTTON_NAME {
-        for key in [Key::LeftControl, Key::P] {
-            android::push_input(ramen::platform::android::InputEvent::KeyUp { key });
+    use crate::touch_controls as tc;
+    if !tc::is_pressed(index) {return}
+    tc::set_pressed(index,false);
+    for key in tc::control_keys(index).into_iter().flatten() {
+        if !tc::key_held_by_buttons(key) && !joystick_holds(key) {
+            android::push_input(ramen::platform::android::InputEvent::KeyUp {key});
         }
-        return
     }
-    android::push_input(ramen::platform::android::InputEvent::KeyUp { key: crate::touch_controls::CONTROLS[index].key });
 }
 
 /// Pointers whose press was swallowed to bring the on-screen controls back, so that their release
@@ -304,7 +386,17 @@ static SWALLOWED_INPUTS: Mutex<Option<std::collections::HashSet<i32>>> = Mutex::
 
 /// A touch on an on-screen control presses the key that control maps to; any other touch is
 /// forwarded to the game as a mouse, exactly as before.
+fn touch_feedback() {
+    if !crate::touch_appearance::settings().haptics { return }
+    with_activity(|env, class| {
+        env.call_static_method(class, "touchControlPressed", "()V", &[])?;
+        Ok(())
+    });
+}
+
 fn pointer_down(id: i32, x: f32, y: f32) {
+    // A new gesture cannot inherit a swallowed Up from an Android cancellation.
+    if let Some(ids)=SWALLOWED_INPUTS.lock().unwrap().as_mut(){ids.remove(&id);}
     let (w, h) = android::window_size();
     let (wf, hf) = (w as f32, h as f32);
     // The first touch after using a pad only brings the controls back. It must not also land in the
@@ -314,29 +406,47 @@ fn pointer_down(id: i32, x: f32, y: f32) {
         SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);
         return
     }
-    let on_joystick = wf > 0.0 && hf > 0.0 && crate::touch_controls::joystick_hit(x / wf, y / hf, wf, hf);
+    let on_movement = wf > 0.0 && hf > 0.0 && crate::touch_controls::movement_hit(x / wf, y / hf, wf, hf);
     // Any *other* touch while the party wheel is up cancels it - but not the movement stick: while
     // walking the player keeps touching and lifting it, and that must not close the wheel.
-    if crate::touch_controls::wheel_open() && *WHEEL_PTR.lock().unwrap() != Some(id) && !on_joystick {
+    if crate::touch_controls::wheel_open() && *WHEEL_PTR.lock().unwrap() != Some(id) && !on_movement {
         crate::touch_controls::set_wheel_open(false);
         WHEEL_PTR.lock().unwrap().take();
     }
-    if on_joystick {
-        *JOYSTICK_PTR.lock().unwrap() = Some(id);
-        joystick_update(x, y);
+    if on_movement {
+        *MOVEMENT_PTR.lock().unwrap() = Some(id);
+        movement_update(x, y);
         return
     }
     let hit = if w > 0 && h > 0 { crate::touch_controls::hit(x / wf, y / hf, wf, hf) } else { None };
+    if hit.is_some_and(|i|crate::touch_controls::controls()[i].name==crate::field_controls::NAME){
+        crate::field_controls::toggle();touch_feedback();
+        SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);return
+    }
+    if crate::field_controls::open(){
+        if let Some(slot)=crate::field_controls::item_at(x,y,wf,hf){let mut owner=FIELD_POINTER.lock().unwrap();if owner.is_none(){*owner=Some((id,slot));touch_feedback();}}
+        SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);return
+    }
+    if hit.is_none()&&crate::touch_navigation::active(){
+        if !crate::touch_navigation::begin(id,x,y,hf){SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);}return
+    }
     match hit {
         Some(index) => {
-            if crate::touch_controls::CONTROLS[index].name == crate::touch_controls::PARTY_NAME {
+            if crate::touch_controls::controls()[index].name == crate::touch_controls::PARTY_NAME {
                 // Holding it opens the party wheel instead of pressing a key of its own.
                 crate::touch_controls::set_wheel_open(true);
                 *WHEEL_PTR.lock().unwrap() = Some(id);
             } else {
-                control_key_down(index);
-                POINTER_CONTROLS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, index);
+                let first = {
+                    let mut pointers = POINTER_CONTROLS.lock().unwrap();
+                    let pointers = pointers.get_or_insert_with(HashMap::new);
+                    let first = !pointers.values().any(|held| *held == index);
+                    pointers.insert(id, index);
+                    first
+                };
+                if first { control_key_down(index); }
             }
+            touch_feedback();
         },
         None => {
             // The game asks for text through its own dialog, and touching it opens the system
@@ -351,7 +461,17 @@ fn pointer_down(id: i32, x: f32, y: f32) {
 }
 
 fn pointer_up(id: i32, x: f32, y: f32) {
-    if WHEEL_PTR.lock().unwrap().take() == Some(id) {
+    if crate::touch_navigation::owns(id){
+        if let Some((x,y))=crate::touch_navigation::end(id,x,y){android::push_input(ramen::platform::android::InputEvent::PointerMoved{x,y});}return
+    }
+    let selected={let mut owner=FIELD_POINTER.lock().unwrap();if owner.is_some_and(|(pointer,_)|pointer==id){owner.take().map(|(_,slot)|slot)}else{None}};
+    if let Some(slot)=selected{let(w,h)=android::window_size();if crate::field_controls::open()&&crate::field_controls::item_at(x,y,w as f32,h as f32)==Some(slot){tap_key(crate::field_controls::KEYS[slot]);crate::field_controls::close();}}
+
+    let closes_wheel = {
+        let mut owner = WHEEL_PTR.lock().unwrap();
+        if *owner == Some(id) { *owner = None; true } else { false }
+    };
+    if closes_wheel {
         // The key only goes out now, on the release, and only if a slot was picked. Letting go over
         // the middle of the wheel, or letting go without moving at all, sends nothing.
         let selected = crate::touch_controls::wheel_selected();
@@ -364,13 +484,16 @@ fn pointer_up(id: i32, x: f32, y: f32) {
     if SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).remove(&id) {
         return
     }
-    if is_joystick_pointer(id) {
-        joystick_release();
+    if is_movement_pointer(id) {
+        movement_release();
         return
     }
     let index = POINTER_CONTROLS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&id);
     match index {
-        Some(index) => control_key_up(index),
+        Some(index) => {
+            let still_held = POINTER_CONTROLS.lock().unwrap().as_ref().is_some_and(|p| p.values().any(|held| *held == index));
+            if !still_held { control_key_up(index); }
+        },
         None => mouse_up(id, x, y),
     }
 }
@@ -450,46 +573,59 @@ fn pointer_is_control(id: i32) -> bool {
     POINTER_CONTROLS.lock().unwrap().as_ref().map(|m| m.contains_key(&id)).unwrap_or(false)
 }
 
-// --- Movement joystick -------------------------------------------------------------------
+// --- Movement (joystick or D-pad) ---------------------------------------------------------
 
-/// Pointer id currently driving the joystick, if any.
-static JOYSTICK_PTR: Mutex<Option<i32>> = Mutex::new(None);
-/// Which arrow keys the joystick is holding (bit 0 up, 1 down, 2 left, 3 right).
-static JOYSTICK_STATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Pointer id currently driving the movement control, if any.
+static MOVEMENT_PTR: Mutex<Option<i32>> = Mutex::new(None);
+/// Which arrow keys the movement control is holding (bit 0 up, 1 down, 2 left, 3 right).
+static MOVEMENT_STATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-const JOYSTICK_KEYS: [Key; 4] = [Key::UpArrow, Key::DownArrow, Key::LeftArrow, Key::RightArrow];
+const MOVEMENT_KEYS: [Key; 4] = [Key::UpArrow, Key::DownArrow, Key::LeftArrow, Key::RightArrow];
 
-fn is_joystick_pointer(id: i32) -> bool {
-    *JOYSTICK_PTR.lock().unwrap() == Some(id)
+fn is_movement_pointer(id: i32) -> bool {
+    *MOVEMENT_PTR.lock().unwrap() == Some(id)
 }
 
-/// Presses/releases the arrow keys so they match where the stick is being pushed.
-fn joystick_update(x: f32, y: f32) {
+/// Presses/releases the arrow keys so they match where the movement control is being pushed.
+fn movement_update(x: f32, y: f32) {
+    crate::touch_navigation::disarm_bag();
     use std::sync::atomic::Ordering;
     let (w, h) = android::window_size();
     let (wf, hf) = (w as f32, h as f32);
     if wf <= 0.0 || hf <= 0.0 {
         return
     }
-    let dirs = crate::touch_controls::joystick_dirs(x / wf, y / hf, wf, hf);
-    let mut state = JOYSTICK_STATE.load(Ordering::Relaxed);
+    let dirs = crate::touch_controls::movement_dirs(x / wf, y / hf, wf, hf);
+    crate::touch_controls::set_move_dirs(dirs);
+    let mut state = MOVEMENT_STATE.load(Ordering::Relaxed);
+    let mut new_direction = false;
     for (i, &on) in dirs.iter().enumerate() {
         let bit = 1u32 << i;
         if on != (state & bit != 0) {
             if on {
-                android::push_input(ramen::platform::android::InputEvent::KeyDown { key: JOYSTICK_KEYS[i], text: None });
+                if !crate::touch_controls::key_held_by_buttons(MOVEMENT_KEYS[i]) {
+                    android::push_input(ramen::platform::android::InputEvent::KeyDown { key: MOVEMENT_KEYS[i], text: None });
+                }
+                new_direction = true;
                 state |= bit;
             } else {
-                android::push_input(ramen::platform::android::InputEvent::KeyUp { key: JOYSTICK_KEYS[i] });
+                if !crate::touch_controls::key_held_by_buttons(MOVEMENT_KEYS[i]) {
+                    android::push_input(ramen::platform::android::InputEvent::KeyUp { key: MOVEMENT_KEYS[i] });
+                }
                 state &= !bit;
             }
         }
     }
-    JOYSTICK_STATE.store(state, Ordering::Relaxed);
+    MOVEMENT_STATE.store(state, Ordering::Relaxed);
+    // The D-pad gives a short tap each time a direction is marked; the analog stick stays silent.
+    if new_direction && crate::touch_controls::move_mode() == crate::touch_controls::MoveMode::Dpad {
+        touch_feedback();
+    }
 
     // Clamp the drawn knob to the ring.
-    let (jcx, jcy) = crate::touch_controls::joystick_center();
-    let r = crate::touch_controls::joystick_radius() * hf;
+    let classic = crate::touch_controls::overlay_style() == crate::touch_controls::OverlayStyle::Classic;
+    let (jcx, jcy) = if classic { crate::touch_controls::joystick_center_in_window(wf, hf) } else { crate::touch_controls::movement_center() };
+    let r = if classic { crate::touch_controls::joystick_radius() } else { crate::touch_controls::movement_radius() } * hf;
     let mut dx = (x - jcx * wf) / r;
     let mut dy = (y - jcy * hf) / r;
     let len = (dx * dx + dy * dy).sqrt();
@@ -497,19 +633,40 @@ fn joystick_update(x: f32, y: f32) {
         dx /= len;
         dy /= len;
     }
-    crate::touch_controls::set_joystick_offset(dx, dy);
+    crate::touch_controls::set_movement_offset(dx, dy);
 }
 
-fn joystick_release() {
+fn movement_release() {
     use std::sync::atomic::Ordering;
-    let state = JOYSTICK_STATE.swap(0, Ordering::Relaxed);
+    crate::touch_controls::set_move_dirs([false; 4]);
+    let state = MOVEMENT_STATE.swap(0, Ordering::Relaxed);
     for i in 0..4 {
-        if state & (1 << i) != 0 {
-            android::push_input(ramen::platform::android::InputEvent::KeyUp { key: JOYSTICK_KEYS[i] });
+        if state & (1 << i) != 0 && !crate::touch_controls::key_held_by_buttons(MOVEMENT_KEYS[i]) {
+            android::push_input(ramen::platform::android::InputEvent::KeyUp { key: MOVEMENT_KEYS[i] });
         }
     }
-    crate::touch_controls::set_joystick_offset(0.0, 0.0);
-    *JOYSTICK_PTR.lock().unwrap() = None;
+    crate::touch_controls::set_movement_offset(0.0, 0.0);
+    *MOVEMENT_PTR.lock().unwrap() = None;
+}
+
+fn release_touch_profile() {
+    let held = POINTER_CONTROLS.lock().unwrap().take().unwrap_or_default();
+    let mut swallowed = SWALLOWED_INPUTS.lock().unwrap();
+    let ids = swallowed.get_or_insert_with(std::collections::HashSet::new);
+    for (id, index) in held {
+        control_key_up(index);
+        ids.insert(id);
+    }
+    if let Some(id) = *MOVEMENT_PTR.lock().unwrap() { ids.insert(id); }
+    movement_release();
+    if let Some(id) = WHEEL_PTR.lock().unwrap().take() { ids.insert(id); }
+    crate::touch_controls::set_wheel_open(false);
+    crate::field_controls::close();
+    if let Some((id,_))=FIELD_POINTER.lock().unwrap().take(){ids.insert(id);}
+    if let Some(id)=crate::touch_navigation::cancel(){ids.insert(id);}
+    if let Some((x,y))=crate::touch_navigation::cancel_pointer(){
+        android::push_input(ramen::platform::android::InputEvent::PointerUp{x,y,button:0});
+    }
 }
 
 /// The pointer the current action refers to, if it is valid.
@@ -586,6 +743,8 @@ fn translate(event: &InputEvent) {
                 MotionAction::Move | MotionAction::HoverMove => {
                     let wheel_ptr = *WHEEL_PTR.lock().unwrap();
                     for p in motion.pointers() {
+                        if SWALLOWED_INPUTS.lock().unwrap().as_ref().is_some_and(|ids|ids.contains(&p.pointer_id())){continue}
+                        if crate::touch_navigation::moved(p.pointer_id(),p.x(),p.y()){continue}
                         if wheel_ptr == Some(p.pointer_id()) {
                             let (w, h) = android::window_size();
                             let (wf, hf) = (w as f32, h as f32);
@@ -596,20 +755,17 @@ fn translate(event: &InputEvent) {
                                 let picked = crate::touch_controls::wheel_item_at(p.x() / wf, p.y() / hf, wf, hf);
                                 crate::touch_controls::set_wheel_selected(picked.map(|i| i as i32).unwrap_or(-1));
                             }
-                        } else if is_joystick_pointer(p.pointer_id()) {
-                            joystick_update(p.x(), p.y());
+                        } else if is_movement_pointer(p.pointer_id()) {
+                            movement_update(p.x(), p.y());
                         } else if !pointer_is_control(p.pointer_id()) {
                             android::push_input(ramen::platform::android::InputEvent::PointerMoved { x: p.x(), y: p.y() });
                         }
                     }
                 },
                 MotionAction::Cancel => {
-                    // A cancelled gesture must not leave the wheel up forever.
-                    if crate::touch_controls::wheel_open() {
-                        crate::touch_controls::set_wheel_open(false);
-                        WHEEL_PTR.lock().unwrap().take();
-                    }
-                    joystick_release();
+                    release_touch_profile();
+                    if let Some(ids)=SWALLOWED_INPUTS.lock().unwrap().as_mut(){ids.clear();}
+                    movement_release();
                     let ids: Vec<i32> =
                         POINTER_CONTROLS.lock().unwrap().as_ref().map(|m| m.keys().copied().collect()).unwrap_or_default();
                     for id in ids {
@@ -985,9 +1141,12 @@ pub fn android_entry(app: AndroidApp) {
     // Panics then land in the same log, with a backtrace.
     std::env::set_var("RUST_BACKTRACE", "1");
 
-    // The pad layout and the video mode are read once, before any input can arrive.
+    // The pad layout, the touch overlay and the video mode are read once, before any input can arrive.
     load_controls();
+    load_touch();
     load_video();
+    crate::touch_controls::load_layout(&fs::read_to_string(format!("/data/data/{}/files/touch-layout.conf", PACKAGE_DIR)).unwrap_or_default());
+    crate::touch_appearance::load(&fs::read_to_string(format!("/data/data/{}/files/touch-appearance.conf", PACKAGE_DIR)).unwrap_or_default());
 
     publish_window(&app);
 
@@ -1039,11 +1198,21 @@ pub fn android_entry(app: AndroidApp) {
     });
 
     let mut destroying = false;
+    let mut input_context = crate::touch_controls::current_context();
+    let mut input_identity=crate::touch_navigation::identity();
     let mut ime_check = Instant::now();
     let mut text_entry_was_open = false;
     loop {
         if game_over.load(std::sync::atomic::Ordering::SeqCst) || destroying {
             break
+        }
+        let context = crate::touch_controls::current_context();
+        let identity=crate::touch_navigation::identity();
+        if context!=input_context || identity!=input_identity {release_touch_profile();input_context=context;input_identity=identity;}
+        if let Some(key)=crate::touch_navigation::next_key(){tap_key(key);}
+        if let Some((down,x,y))=crate::touch_navigation::next_pointer(){
+            use ramen::platform::android::InputEvent;
+            android::push_input(if down {InputEvent::PointerDown{x,y,button:0}} else {InputEvent::PointerUp{x,y,button:0}});
         }
         // When the game moves to another state, drop the keys of controls that are no longer shown
         // so none of them stays stuck down.

@@ -253,11 +253,14 @@ struct SkinSlot {
     /// Width over height of the artwork, so a picture that is not square is not stretched into one
     /// when it is drawn. Most of the artwork is square and this makes no difference for it.
     aspect: f32,
+    custom: bool,
+    context: u8,
+    has_art: bool,
 }
 
 /// How many control images the overlay can carry. Everything a control needs is one slot.
 #[cfg(target_os = "android")]
-const MAX_SKIN_SLOTS: usize = 32;
+const MAX_SKIN_SLOTS: usize = 96;
 
 /// Side of each party sprite's square cell in the strip the overlay keeps for them.
 #[cfg(target_os = "android")]
@@ -284,14 +287,22 @@ struct Overlay {
 
 #[cfg(target_os = "android")]
 impl Overlay {
+    fn slot(&self,name:&str)->Option<&SkinSlot>{
+        let context=crate::touch_controls::current_context();
+        self.slots.iter().flatten().find(|s|s.name==name&&s.context==context).or_else(||self.slots.iter().flatten().find(|s|s.name==name&&s.context==0))
+    }
     /// Where a control's artwork sits in the packed texture, if it has any.
     fn art(&self, name: &str) -> Option<[f32; 4]> {
-        self.slots.iter().flatten().find(|slot| slot.name == name).map(|slot| slot.uv)
+        self.slot(name).filter(|slot|slot.has_art).map(|slot|slot.uv)
+    }
+
+    fn custom_art(&self, name: &str) -> bool {
+        self.slot(name).is_some_and(|slot|slot.custom)
     }
 
     /// The shape of a control's artwork, so it can be drawn as it was painted.
     fn art_aspect(&self, name: &str) -> Option<f32> {
-        self.slots.iter().flatten().find(|slot| slot.name == name).map(|slot| slot.aspect)
+        self.slot(name).map(|slot|slot.aspect)
     }
 }
 
@@ -937,57 +948,76 @@ fn load_skin(gl: &gl::Gl) -> (GLuint, [Option<SkinSlot>; MAX_SKIN_SLOTS]) {
     let mut slots: [Option<SkinSlot>; MAX_SKIN_SLOTS] = [None; MAX_SKIN_SLOTS];
     // Same folder the launcher writes `controls.conf` and `layout.conf` to.
     let dir = format!("/data/data/{}/files", "com.klisee.reloaded");
-    let mut images: Vec<(&'static str, image::RgbaImage)> = Vec::new();
+    let mut images: Vec<(&'static str, image::RgbaImage, bool, u8, bool)> = Vec::new();
+    let load = |name: &str, fallback: &str| {
+        image::open(format!("{}/touch-sprites-active/{}.png", dir, name)).ok().map(|img| (img,true))
+            .or_else(|| image::open(format!("{}/{}", dir, fallback)).ok().map(|img| (img,false)))
+    };
     for (name, file) in [
         ("joystick", "joystick-base.png"),
         ("joystick-knob", "joystick-knob.png"),
         // The honeycomb the party wheel puts its slots in, and the border that marks the picked one.
         ("selector", "seleccionarpokemon.png"),
         ("selection", "bordeseleccionar.png"),
+        ("field-selector", "field-selector.png"),
     ] {
-        if let Ok(img) = image::open(format!("{}/{}", dir, file)) {
-            images.push((name, img.to_rgba8()));
+        if let Some((img, custom)) = load(name, file) {
+            images.push((name, img.to_rgba8(), custom,0,true));
         }
     }
-    for control in crate::touch_controls::CONTROLS {
-        if let Ok(img) = image::open(format!("{}/{}.png", dir, control.name)) {
-            images.push((control.name, img.to_rgba8()));
+    for control in crate::touch_controls::controls() {
+        // The bundled aspect defines input geometry even with an imported picture.
+        if !matches!(control.name,"p"|"l"|"t"|"e"|"pkmn"|"sel_world"|"a"|"m"|"n"|"s"|"space") { if let Ok((w,h)) = image::image_dimensions(format!("{}/{}.png",dir,control.name)) {
+            crate::touch_controls::set_art_aspect(control.name,w as f32 / h.max(1) as f32);
+        }}
+        if let Some((img, custom)) = load(control.name, &format!("{}.png",control.name)) {
+            let mut image = img.to_rgba8();
+            if let Some(tint) = crate::touch_appearance::settings().tint {
+                for pixel in image.pixels_mut() { crate::touch_appearance::tint_pixel(&mut pixel.0, tint); }
+            }
+            images.push((control.name, image, custom,0,true));
         }
     }
+    for(prefix,context)in[("world",crate::touch_controls::WORLD),("battle",crate::touch_controls::BATTLE)]{
+        for name in["m","e","p","l","t","space","a"]{
+            let original=std::path::Path::new(&format!("{}/touch-sprites-active/{}__{}.original",dir,prefix,name)).is_file();
+            let scoped=format!("{}/touch-sprites-active/{}__{}.png",dir,prefix,name);
+            let bundled=format!("{}/{}__{}.png",dir,prefix,name);
+            let legacy=format!("{}/touch-sprites-active/{}.png",dir,name);
+            let (file,custom)=if !original && std::path::Path::new(&scoped).is_file(){(scoped,true)}
+                else if !original && std::path::Path::new(&legacy).is_file(){continue}
+                else if std::path::Path::new(&bundled).is_file(){(bundled,false)}
+                else if original{(format!("{}/{}.png",dir,name),false)}else{continue};
+            if let Ok(img)=image::open(file){
+                let mut img=img.to_rgba8();
+                if let Some(tint)=crate::touch_appearance::settings().tint{for pixel in img.pixels_mut(){crate::touch_appearance::tint_pixel(&mut pixel.0,tint);}}
+                images.push((name,img,custom,context,true));
+            }else if original{images.push((name,image::RgbaImage::new(1,1),false,context,false));}
+        }
+    }
+    images.sort_by_key(|(_,img,_,_,_)|std::cmp::Reverse(img.height()));
     if images.is_empty() {
         eprintln!("[overlay] sin arte pixel para los controles; se usan las formas dibujadas");
         return (0, slots)
     }
-    let height = images.iter().map(|(_, img)| img.height()).max().unwrap_or(1).max(1);
-    let width: u32 = images.iter().map(|(_, img)| img.width()).sum::<u32>().max(1);
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    let mut x = 0u32;
-    for (index, (name, img)) in images.iter().enumerate() {
-        let row = (img.width() * 4) as usize;
+    let sizes: Vec<_> = images.iter().map(|(_,img,_,_,_)| (img.width(),img.height())).collect();
+    let mut gpu_limit=0;
+    unsafe {gl.GetIntegerv(gl::MAX_TEXTURE_SIZE,&mut gpu_limit);}
+    let Some((width,height,positions))=crate::touch_skin::atlas_layout(&sizes,(gpu_limit.max(1) as u32).min(2048)) else {
+        eprintln!("[overlay] arte demasiado grande; se usan las formas dibujadas");
+        return (0,slots)
+    };
+    let mut pixels=vec![0u8;(width*height*4) as usize];
+    for (index,(name,img,custom,context,has_art)) in images.iter().enumerate() {
+        let (x,top)=positions[index];let row=(img.width()*4) as usize;
         for y in 0..img.height() as usize {
-            let src = y * row;
-            let dst = ((y as u32 * width + x) * 4) as usize;
-            pixels[dst..dst + row].copy_from_slice(&img.as_raw()[src..src + row]);
+            let src=y*row;let dst=(((top+y as u32)*width+x)*4) as usize;
+            pixels[dst..dst+row].copy_from_slice(&img.as_raw()[src..src+row]);
         }
-        if index < MAX_SKIN_SLOTS {
-            slots[index] = Some(SkinSlot {
-                name,
-                aspect: img.width() as f32 / img.height().max(1) as f32,
-                uv: [
-                    x as f32 / width as f32,
-                    0.0,
-                    (x + img.width()) as f32 / width as f32,
-                    img.height() as f32 / height as f32,
-                ],
-            });
-        }
-        x += img.width();
-    }
-    // Tell the overlay the shape each picture was painted in, so its touch area follows the drawn
-    // rectangle instead of the small circle the control's key is defined with: a wide label like the
-    // character picker's is then tappable across its whole width.
-    for slot in slots.iter().flatten() {
-        crate::touch_controls::set_art_aspect(slot.name, slot.aspect);
+        if index<MAX_SKIN_SLOTS {slots[index]=Some(SkinSlot {name,custom:*custom,context:*context,has_art:*has_art,
+            aspect:img.width() as f32/img.height().max(1) as f32,
+            uv:[x as f32/width as f32,top as f32/height as f32,(x+img.width()) as f32/width as f32,(top+img.height()) as f32/height as f32],
+        });}
     }
     unsafe {
         let mut texture = 0;
@@ -1013,6 +1043,115 @@ fn load_skin(gl: &gl::Gl) -> (GLuint, [Option<SkinSlot>; MAX_SKIN_SLOTS]) {
         eprintln!("[overlay] arte pixel de los controles cargado ({} imagenes, {}x{})", images.len(), width, height);
         (texture, slots)
     }
+}
+
+/// The clean text labels the launcher draws with a real sans-serif face. They live in their own
+/// texture so they can be sampled with LINEAR filtering without blurring the pixel-art controls.
+static LABEL_TEX: std::sync::Mutex<GLuint> = std::sync::Mutex::new(0);
+static LABELS: std::sync::Mutex<Vec<(String, [f32; 4], f32)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(target_os = "android")]
+fn label_file(text: &str) -> String {
+    let mut name = String::from("label_");
+    for c in text.chars() {
+        name.push(if c.is_ascii_alphanumeric() { c } else { '_' });
+    }
+    name.push_str(".png");
+    name
+}
+
+/// Packs the label images the launcher left in `files/touch-labels`, one slot per label text.
+#[cfg(target_os = "android")]
+fn load_label_skin(gl: &gl::Gl) -> GLuint {
+    let dir = "/data/data/com.klisee.reloaded/files/touch-labels";
+    let mut texts: Vec<&'static str> = Vec::new();
+    for control in crate::touch_controls::CLASSIC_CONTROLS {
+        if let crate::touch_controls::Label::Text(text) = control.label {
+            if !texts.contains(&text) {
+                texts.push(text);
+            }
+        }
+    }
+    let mut images: Vec<(&'static str, image::RgbaImage)> = Vec::new();
+    for text in texts {
+        if let Ok(img) = image::open(format!("{}/{}", dir, label_file(text))) {
+            images.push((text, img.to_rgba8()));
+        }
+    }
+    if images.is_empty() {
+        return 0
+    }
+    let height = images.iter().map(|(_, img)| img.height()).max().unwrap_or(1).max(1);
+    let width: u32 = images.iter().map(|(_, img)| img.width()).sum::<u32>().max(1);
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let mut slots: Vec<(String, [f32; 4], f32)> = Vec::new();
+    let mut x = 0u32;
+    for (text, img) in &images {
+        let row = (img.width() * 4) as usize;
+        for y in 0..img.height() as usize {
+            let src = y * row;
+            let dst = (((y as u32) * width + x) * 4) as usize;
+            pixels[dst..dst + row].copy_from_slice(&img.as_raw()[src..src + row]);
+        }
+        slots.push((
+            (*text).to_string(),
+            [
+                x as f32 / width as f32,
+                0.0,
+                (x + img.width()) as f32 / width as f32,
+                img.height() as f32 / height as f32,
+            ],
+            img.width() as f32 / img.height().max(1) as f32,
+        ));
+        x += img.width();
+    }
+    unsafe {
+        let mut texture = 0;
+        gl.GenTextures(1, &mut texture);
+        gl.BindTexture(gl::TEXTURE_2D, texture);
+        gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as _);
+        gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as _);
+        gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as _);
+        gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as _);
+        gl.TexImage2D(
+            gl::TEXTURE_2D,
+            0,
+            gl::RGBA as _,
+            width as _,
+            height as _,
+            0,
+            gl::RGBA,
+            gl::UNSIGNED_BYTE,
+            pixels.as_ptr().cast(),
+        );
+        *LABEL_TEX.lock().unwrap() = texture;
+        *LABELS.lock().unwrap() = slots;
+        eprintln!("[overlay] etiquetas limpias cargadas ({} textos, {}x{})", images.len(), width, height);
+        texture
+    }
+}
+
+#[cfg(target_os = "android")]
+fn label_art(text: &str) -> Option<([f32; 4], f32)> {
+    LABELS.lock().unwrap().iter().find(|(known, _, _)| known == text).map(|(_, uv, aspect)| (*uv, *aspect))
+}
+
+#[cfg(target_os = "android")]
+fn label_texture() -> GLuint {
+    *LABEL_TEX.lock().unwrap()
+}
+
+/// Pushes a label as a texture quad, capped so a wide label still fits inside its button.
+#[cfg(target_os = "android")]
+fn push_label_sprite(out: &mut Vec<f32>, ww: f32, wh: f32, cx: f32, cy: f32, half_h: f32, uv: [f32; 4], aspect: f32) {
+    let max_w = half_h * 3.0;
+    let mut hh = half_h;
+    let mut hw = hh * aspect;
+    if hw > max_w {
+        hh *= max_w / hw;
+        hw = max_w;
+    }
+    push_sprite(out, ww, wh, cx - hw, cy - hh, cx + hw, cy + hh, uv[0], uv[1], uv[2], uv[3]);
 }
 
 /// Creates the strip the party's six sprites go in: one square cell each, transparent to start with.
@@ -1097,6 +1236,17 @@ fn push_vertex(out: &mut Vec<f32>, ww: f32, wh: f32, x: f32, y: f32, col: [f32; 
     out.extend_from_slice(&[x / ww * 2.0 - 1.0, 1.0 - y / wh * 2.0, col[0], col[1], col[2], col[3], 0.0, 0.0]);
 }
 
+/// Transforms only the drawing; touch areas and key dispatch remain independent.
+#[cfg(target_os = "android")]
+fn transform_touch_vertices(vertices: &mut [f32], center: (f32, f32), scale: f32, brightness: f32) {
+    let (cx, cy) = (center.0*2.0-1.0, 1.0-center.1*2.0);
+    for vertex in vertices.chunks_exact_mut(8) {
+        vertex[0] = cx + (vertex[0]-cx)*scale;
+        vertex[1] = cy + (vertex[1]-cy)*scale;
+        for value in &mut vertex[2..5] { *value *= brightness; }
+    }
+}
+
 /// Pushes a textured quad, used for the pixel-art control artwork. The colour is white, so the
 /// sprite comes through as drawn.
 #[cfg(target_os = "android")]
@@ -1112,10 +1262,9 @@ fn push_sprite(
     v1: f32,
     u2: f32,
     v2: f32,
-    alpha: f32,
 ) {
     let mut corner = |x: f32, y: f32, u: f32, v: f32| {
-        out.extend_from_slice(&[x / ww * 2.0 - 1.0, 1.0 - y / wh * 2.0, 1.0, 1.0, 1.0, alpha, u, v]);
+        out.extend_from_slice(&[x / ww * 2.0 - 1.0, 1.0 - y / wh * 2.0, 1.0, 1.0, 1.0, 1.0, u, v]);
     };
     corner(x1, y1, u1, v1);
     corner(x2, y1, u2, v1);
@@ -1236,6 +1385,363 @@ fn push_text(out: &mut Vec<f32>, ww: f32, wh: f32, text: &str, cx: f32, cy: f32,
     }
 }
 
+// --- New overlay style: smooth, semi-transparent shapes. All geometry, so it stays crisp at any size
+// and needs no artwork.
+
+#[cfg(target_os = "android")]
+fn lerp_col(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
+}
+
+#[cfg(target_os = "android")]
+fn with_alpha(mut col: [f32; 4], alpha: f32) -> [f32; 4] {
+    col[3] *= alpha;
+    col
+}
+
+/// The outline of a rounded rectangle, walked clockwise so it can be drawn as a fan from the centre.
+#[cfg(target_os = "android")]
+fn round_rect_outline(cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> Vec<(f32, f32)> {
+    const SEG: usize = 5;
+    let r = r.min(hw).min(hh).max(0.0);
+    let corners = [
+        (cx + hw - r, cy - hh + r, -90.0_f32),
+        (cx + hw - r, cy + hh - r, 0.0),
+        (cx - hw + r, cy + hh - r, 90.0),
+        (cx - hw + r, cy - hh + r, 180.0),
+    ];
+    let mut points = Vec::with_capacity(4 * (SEG + 1));
+    for (ax, ay, start) in corners {
+        for i in 0..=SEG {
+            let a = (start + 90.0 * i as f32 / SEG as f32).to_radians();
+            points.push((ax + r * a.cos(), ay + r * a.sin()));
+        }
+    }
+    points
+}
+
+/// A filled rounded rectangle with a vertical gradient (top colour down to bottom colour).
+#[cfg(target_os = "android")]
+fn push_round_rect(
+    out: &mut Vec<f32>,
+    ww: f32,
+    wh: f32,
+    cx: f32,
+    cy: f32,
+    hw: f32,
+    hh: f32,
+    r: f32,
+    top: [f32; 4],
+    bottom: [f32; 4],
+) {
+    if hw <= 0.0 || hh <= 0.0 {
+        return
+    }
+    let points = round_rect_outline(cx, cy, hw, hh, r);
+    let mid = lerp_col(top, bottom, 0.5);
+    let span = (2.0 * hh).max(0.0001);
+    let n = points.len();
+    for i in 0..n {
+        let (x0, y0) = points[i];
+        let (x1, y1) = points[(i + 1) % n];
+        let c0 = lerp_col(top, bottom, (y0 - (cy - hh)) / span);
+        let c1 = lerp_col(top, bottom, (y1 - (cy - hh)) / span);
+        push_vertex(out, ww, wh, cx, cy, mid);
+        push_vertex(out, ww, wh, x0, y0, c0);
+        push_vertex(out, ww, wh, x1, y1, c1);
+    }
+}
+
+/// A filled circle with a vertical gradient, for the joystick and the D-pad's centre.
+#[cfg(target_os = "android")]
+fn push_gradient_circle(out: &mut Vec<f32>, ww: f32, wh: f32, cx: f32, cy: f32, r: f32, top: [f32; 4], bottom: [f32; 4]) {
+    if r <= 0.0 {
+        return
+    }
+    const SEG: usize = 40;
+    let mid = lerp_col(top, bottom, 0.5);
+    let span = (2.0 * r).max(0.0001);
+    for i in 0..SEG {
+        let a0 = i as f32 / SEG as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / SEG as f32 * std::f32::consts::TAU;
+        let (x0, y0) = (cx + r * a0.cos(), cy + r * a0.sin());
+        let (x1, y1) = (cx + r * a1.cos(), cy + r * a1.sin());
+        let c0 = lerp_col(top, bottom, (y0 - (cy - r)) / span);
+        let c1 = lerp_col(top, bottom, (y1 - (cy - r)) / span);
+        push_vertex(out, ww, wh, cx, cy, mid);
+        push_vertex(out, ww, wh, x0, y0, c0);
+        push_vertex(out, ww, wh, x1, y1, c1);
+    }
+}
+
+/// A round, soft button: shadow, light rim, gradient fill and its label.
+#[cfg(target_os = "android")]
+fn push_soft_button(
+    out: &mut Vec<f32>,
+    ww: f32,
+    wh: f32,
+    cx: f32,
+    cy: f32,
+    hw: f32,
+    hh: f32,
+    pressed: bool,
+    label: crate::touch_controls::Label,
+    opacity: f32,
+) {
+    let radius = hw.min(hh) * 0.44;
+    let shadow = with_alpha([0.0, 0.0, 0.0, 0.32], opacity);
+    let rim = with_alpha([1.0, 1.0, 1.0, 0.40], opacity);
+    let (top, bottom) = if pressed {
+        (with_alpha([1.0, 0.90, 0.35, 0.85], opacity), with_alpha([0.95, 0.60, 0.05, 0.85], opacity))
+    } else {
+        (with_alpha([0.20, 0.23, 0.34, 0.50], opacity), with_alpha([0.09, 0.10, 0.16, 0.34], opacity))
+    };
+    let ink = if pressed {
+        [0.16, 0.10, 0.0, 0.95]
+    } else {
+        with_alpha([0.97, 0.98, 1.0, 0.96], opacity)
+    };
+    // The shadow sits a touch lower and a touch bigger, so the button reads as floating.
+    push_round_rect(out, ww, wh, cx, cy + hh * 0.10, hw * 1.06, hh * 1.06, radius, shadow, shadow);
+    // The rim, then the fill on top of it.
+    push_round_rect(out, ww, wh, cx, cy, hw * 1.09, hh * 1.09, radius * 1.09, rim, rim);
+    push_round_rect(out, ww, wh, cx, cy, hw, hh, radius, top, bottom);
+    match label {
+        crate::touch_controls::Label::Text(text) => {
+            let len = text.chars().count().max(1) as f32;
+            let px = (hh * 0.46).min(hw * 1.5 / (len * 4.0)).max(1.0);
+            push_text(out, ww, wh, text, cx, cy, px, ink);
+        },
+        crate::touch_controls::Label::Arrow(dir) => push_arrow(out, ww, wh, cx, cy, hh * 0.5, dir, ink),
+        crate::touch_controls::Label::None => {},
+    }
+}
+
+/// The joystick of the new overlay: a soft translucent ring with a knob that follows the thumb.
+#[cfg(target_os = "android")]
+fn push_soft_joystick(out: &mut Vec<f32>, ww: f32, wh: f32, cx: f32, cy: f32, r: f32, ox: f32, oy: f32, opacity: f32) {
+    let shadow = with_alpha([0.0, 0.0, 0.0, 0.28], opacity);
+    let rim = with_alpha([1.0, 1.0, 1.0, 0.28], opacity);
+    let top = with_alpha([0.22, 0.25, 0.36, 0.44], opacity);
+    let bottom = with_alpha([0.09, 0.10, 0.16, 0.30], opacity);
+    push_gradient_circle(out, ww, wh, cx, cy + r * 0.05, r * 1.03, shadow, shadow);
+    push_gradient_circle(out, ww, wh, cx, cy, r, top, bottom);
+    push_ring(out, ww, wh, cx, cy, r, 3.0, rim);
+    let (kx, ky) = (cx + ox * r * 0.62, cy + oy * r * 0.62);
+    let kr = r * 0.42;
+    push_gradient_circle(
+        out,
+        ww,
+        wh,
+        kx,
+        ky,
+        kr,
+        with_alpha([0.82, 0.87, 1.0, 0.55], opacity),
+        with_alpha([0.52, 0.58, 0.85, 0.42], opacity),
+    );
+    push_ring(out, ww, wh, kx, ky, kr, 2.5, with_alpha([1.0, 1.0, 1.0, 0.50], opacity));
+}
+
+/// The D-pad of the new overlay: a soft translucent cross with four arrows.
+#[cfg(target_os = "android")]
+fn push_soft_dpad(out: &mut Vec<f32>, ww: f32, wh: f32, cx: f32, cy: f32, r: f32, opacity: f32) {
+    use crate::touch_controls::Dir;
+    let shadow = with_alpha([0.0, 0.0, 0.0, 0.26], opacity);
+    let rim = with_alpha([1.0, 1.0, 1.0, 0.32], opacity);
+    let top = with_alpha([0.20, 0.23, 0.34, 0.46], opacity);
+    let bottom = with_alpha([0.09, 0.10, 0.16, 0.32], opacity);
+    let arm = r * 1.02;
+    let thick = r * 0.38;
+    let radius = r * 0.30;
+    push_round_rect(out, ww, wh, cx, cy + r * 0.07, arm * 1.05, thick * 1.12, radius, shadow, shadow);
+    push_round_rect(out, ww, wh, cx, cy + r * 0.07, thick * 1.12, arm * 1.05, radius, shadow, shadow);
+    push_round_rect(out, ww, wh, cx, cy, arm * 1.05, thick * 1.10, radius, rim, rim);
+    push_round_rect(out, ww, wh, cx, cy, thick * 1.10, arm * 1.05, radius, rim, rim);
+    push_round_rect(out, ww, wh, cx, cy, arm, thick, radius * 0.95, top, bottom);
+    push_round_rect(out, ww, wh, cx, cy, thick, arm, radius * 0.95, top, bottom);
+    push_gradient_circle(out, ww, wh, cx, cy, thick * 0.92, top, bottom);
+    let ink = with_alpha([0.97, 0.98, 1.0, 0.95], opacity);
+    push_arrow(out, ww, wh, cx, cy - r * 0.62, r * 0.30, Dir::Up, ink);
+    push_arrow(out, ww, wh, cx, cy + r * 0.62, r * 0.30, Dir::Down, ink);
+    push_arrow(out, ww, wh, cx - r * 0.62, cy, r * 0.30, Dir::Left, ink);
+    push_arrow(out, ww, wh, cx + r * 0.62, cy, r * 0.30, Dir::Right, ink);
+}
+
+/// A modern control: a dark translucent disc with a soft rim, an inner ring and its label. Wide
+/// labels become a rounded pill instead of being squeezed into a circle.
+#[cfg(target_os = "android")]
+fn push_modern_control(
+    out: &mut Vec<f32>,
+    ww: f32,
+    wh: f32,
+    shape: crate::touch_controls::Shape,
+    pressed: bool,
+    aspect: Option<f32>,
+    tint: Option<[f32; 3]>,
+) -> (f32, f32, f32) {
+    let (cx, cy, r) = match shape {
+        crate::touch_controls::Shape::Circle { cx, cy, r } => (cx * ww, cy * wh, r * ww),
+        crate::touch_controls::Shape::Rect { cx, cy, w, h } => (cx * ww, cy * wh, (w * ww + h * wh) / 4.0),
+    };
+    let aspect = aspect.unwrap_or(1.0);
+    // The chosen colour multiplies the button greys, so the discs take its hue and stay translucent.
+    let t = tint.unwrap_or([1.0, 1.0, 1.0]);
+    let shade = |g: f32, a: f32| [t[0] * g, t[1] * g, t[2] * g, a];
+    let base = if pressed { shade(0.30, 0.50) } else { shade(0.20, 0.38) };
+    let groove = if pressed { shade(0.15, 0.54) } else { shade(0.115, 0.42) };
+    let raised = if pressed { shade(0.36, 0.48) } else { shade(0.26, 0.40) };
+    let inner = if pressed { shade(0.33, 0.50) } else { shade(0.235, 0.40) };
+    let ink = if pressed { [0.98, 0.98, 1.0, 0.98] } else { [0.62, 0.62, 0.65, 0.95] };
+    push_circle(out, ww, wh, cx, cy, r * 1.06, [0.0, 0.0, 0.0, 0.22]);
+    if (aspect - 1.0).abs() > 0.12 {
+        let hw = r * aspect;
+        push_round_rect(out, ww, wh, cx, cy, hw * 1.05, r * 1.05, r * 0.46, groove, groove);
+        push_round_rect(out, ww, wh, cx, cy, hw, r, r * 0.40, base, base);
+        push_round_rect(out, ww, wh, cx, cy, hw * 0.92, r * 0.92, r * 0.36, groove, groove);
+        push_round_rect(out, ww, wh, cx, cy, hw * 0.86, r * 0.86, r * 0.34, raised, raised);
+        push_round_rect(out, ww, wh, cx, cy, hw * 0.74, r * 0.74, r * 0.30, groove, groove);
+        push_round_rect(out, ww, wh, cx, cy, hw * 0.66, r * 0.66, r * 0.26, inner, inner);
+    } else {
+        push_circle(out, ww, wh, cx, cy, r, base);
+        push_ring(out, ww, wh, cx, cy, r * 0.92, (r * 0.05).max(2.0), groove);
+        push_ring(out, ww, wh, cx, cy, r * 0.82, (r * 0.055).max(2.0), raised);
+        push_ring(out, ww, wh, cx, cy, r * 0.70, (r * 0.04).max(2.0), groove);
+        push_circle(out, ww, wh, cx, cy, r * 0.62, inner);
+        push_ring(out, ww, wh, cx, cy, r * 0.995, (r * 0.02).max(1.0), shade(0.36, 0.20));
+    }
+    let _ = ink;
+    (cx, cy, r)
+}
+
+#[cfg(target_os = "android")]
+fn poly_dir(from: (f32, f32), to: (f32, f32)) -> (f32, f32) {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let len = (dx * dx + dy * dy).sqrt().max(0.0001);
+    (dx / len, dy / len)
+}
+
+/// The outline of a rounded cross, walked in order, so the D-pad reads as one clean shape.
+#[cfg(target_os = "android")]
+fn plus_points(cx: f32, cy: f32, arm: f32, thick: f32, radius: f32) -> Vec<(f32, f32)> {
+    let corners = [
+        (cx - thick, cy - arm), (cx + thick, cy - arm), (cx + thick, cy - thick), (cx + arm, cy - thick),
+        (cx + arm, cy + thick), (cx + thick, cy + thick), (cx + thick, cy + arm), (cx - thick, cy + arm),
+        (cx - thick, cy + thick), (cx - arm, cy + thick), (cx - arm, cy - thick), (cx - thick, cy - thick),
+    ];
+    let n = corners.len();
+    let mut points = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let p = corners[i];
+        let prev = corners[(i + n - 1) % n];
+        let next = corners[(i + 1) % n];
+        let d1 = poly_dir(p, prev);
+        let d2 = poly_dir(p, next);
+        let a = (p.0 + d1.0 * radius, p.1 + d1.1 * radius);
+        let b = (p.0 + d2.0 * radius, p.1 + d2.1 * radius);
+        for s in 0..=3 {
+            let t = s as f32 / 3.0;
+            let u = 1.0 - t;
+            points.push((u * u * a.0 + 2.0 * u * t * p.0 + t * t * b.0, u * u * a.1 + 2.0 * u * t * p.1 + t * t * b.1));
+        }
+    }
+    points
+}
+
+/// Fills a polygon as a fan from (cx, cy), with a vertical gradient.
+#[cfg(target_os = "android")]
+fn push_polygon(out: &mut Vec<f32>, ww: f32, wh: f32, points: &[(f32, f32)], cx: f32, cy: f32, top: [f32; 4], bottom: [f32; 4]) {
+    if points.len() < 3 {
+        return
+    }
+    let min_y = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+    let max_y = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+    let span = (max_y - min_y).max(0.0001);
+    let mid = lerp_col(top, bottom, 0.5);
+    for i in 0..points.len() {
+        let p0 = points[i];
+        let p1 = points[(i + 1) % points.len()];
+        let c0 = lerp_col(top, bottom, (p0.1 - min_y) / span);
+        let c1 = lerp_col(top, bottom, (p1.1 - min_y) / span);
+        push_vertex(out, ww, wh, cx, cy, mid);
+        push_vertex(out, ww, wh, p0.0, p0.1, c0);
+        push_vertex(out, ww, wh, p1.0, p1.1, c1);
+    }
+}
+
+/// The modern movement control: a clean translucent disc with a single rounded cross that lights up
+/// the arm being pressed, or a knob that follows the thumb (joystick).
+#[cfg(target_os = "android")]
+fn push_modern_movement(out: &mut Vec<f32>, ww: f32, wh: f32, cx: f32, cy: f32, r: f32, ox: f32, oy: f32, dpad: bool, tint: Option<[f32; 3]>) {
+    use crate::touch_controls::Dir;
+    let t = tint.unwrap_or([1.0, 1.0, 1.0]);
+    let shade = |g: f32, a: f32| [t[0] * g, t[1] * g, t[2] * g, a];
+    let disc = shade(0.21, 0.36);
+    let edge = shade(0.34, 0.18);
+    let outline = shade(0.10, 0.66);
+    let fill = shade(0.30, 0.55);
+    let ink = shade(0.62, 0.80);
+    push_circle(out, ww, wh, cx, cy, r * 1.05, [0.0, 0.0, 0.0, 0.18]);
+    push_circle(out, ww, wh, cx, cy, r, disc);
+    push_ring(out, ww, wh, cx, cy, r * 0.995, (r * 0.02).max(1.0), edge);
+    if dpad {
+        let arm = r * 0.74;
+        let thick = r * 0.255;
+        let radius = r * 0.13;
+        let border = r * 0.065;
+        // A slightly larger cross behind the fill gives a continuous dark outline: no stroke seams
+        // at the corners, which is what made the previous version look hatched.
+        let outer = plus_points(cx, cy, arm + border, thick + border, radius + border * 0.6);
+        push_polygon(out, ww, wh, &outer, cx, cy, outline, outline);
+        let points = plus_points(cx, cy, arm, thick, radius);
+        push_polygon(out, ww, wh, &points, cx, cy, fill, fill);
+        let dirs = crate::touch_controls::move_dirs();
+        let arms = [(0.0_f32, -1.0_f32), (0.0, 1.0), (-1.0, 0.0), (1.0, 0.0)];
+        // Light only the pressed arm, from its tip to the centre (never across it), then its arrow
+        // goes dark so it reads as pressed.
+        for (i, (dx, dy)) in arms.iter().enumerate() {
+            if !dirs[i] {
+                continue
+            }
+            // Fill the arm from its tip down to the edge of the central square, so it stops at the
+            // junction instead of reaching the centre.
+            let outer = (arm + thick) / 2.0;
+            let inner = (arm - thick) / 2.0;
+            let (ax, ay, hw, hh) = if *dx < 0.0 {
+                (cx - outer, cy, inner, thick)
+            } else if *dx > 0.0 {
+                (cx + outer, cy, inner, thick)
+            } else if *dy < 0.0 {
+                (cx, cy - outer, thick, inner)
+            } else {
+                (cx, cy + outer, thick, inner)
+            };
+            push_round_rect(out, ww, wh, ax, ay, hw, hh, radius * 0.8, [t[0]*0.5+0.5, t[1]*0.5+0.5, t[2]*0.5+0.5, 0.92], [t[0]*0.45+0.55, t[1]*0.45+0.55, t[2]*0.45+0.55, 0.92]);
+        }
+        for (i, (dx, dy)) in arms.iter().enumerate() {
+            let color = if dirs[i] { shade(0.14, 0.95) } else { ink };
+            let dir = match i {
+                0 => Dir::Up,
+                1 => Dir::Down,
+                2 => Dir::Left,
+                _ => Dir::Right,
+            };
+            push_arrow(out, ww, wh, cx + dx * r * 0.45, cy + dy * r * 0.45, r * 0.115, dir, color);
+        }
+    } else {
+        let (kx, ky) = (cx + ox * r * 0.52, cy + oy * r * 0.52);
+        let kr = r * 0.34;
+        push_circle(out, ww, wh, kx, ky, kr * 1.06, [0.0, 0.0, 0.0, 0.22]);
+        push_circle(out, ww, wh, kx, ky, kr, shade(0.27, 0.55));
+        push_ring(out, ww, wh, kx, ky, kr, (r * 0.04).max(2.0), shade(0.40, 0.50));
+    }
+}
+
 #[cfg(target_os = "android")]
 impl RendererImpl {
     /// Builds (once) the tiny program used to draw the touch controls over the frame.
@@ -1308,6 +1814,7 @@ impl RendererImpl {
             );
 
             let (skin, slots) = load_skin(&self.gl);
+            load_label_skin(&self.gl);
             let party = create_party_texture(&self.gl);
 
             let mut vao = 0;
@@ -1348,7 +1855,12 @@ impl RendererImpl {
         let mut sprites: Vec<f32> = Vec::new();
         // The party's sprites come from a texture of their own, so they travel in their own batch.
         let mut party_sprites: Vec<f32> = Vec::new();
-        for (i, c) in touch_controls::CONTROLS.iter().enumerate() {
+        // The clean label atlas always travels in its own batch, because it is sampled with LINEAR.
+        let mut label_sprites: Vec<f32> = Vec::new();
+        let style = touch_controls::overlay_style();
+        let opacity = touch_controls::sprite_opacity();
+        let appearance = crate::touch_appearance::settings();
+        for (i, c) in touch_controls::controls().iter().enumerate() {
             if !touch_controls::is_active(i) {
                 continue
             }
@@ -1358,87 +1870,112 @@ impl RendererImpl {
                 continue
             }
             let pressed = touch_controls::is_pressed(i);
-            let (fill, border, ink) = if pressed {
-                ([1.0, 0.80, 0.10, 0.55], [1.0, 1.0, 0.70, 0.95], [0.10, 0.10, 0.10, 0.95])
-            } else {
-                ([0.10, 0.10, 0.16, 0.28], [1.0, 1.0, 1.0, 0.60], [1.0, 1.0, 1.0, 0.90])
+            let (visual_scale, brightness) = crate::touch_appearance::visual(i);
+            let plain_start = verts.len();
+            let sprite_start = sprites.len();
+            let center = match touch_controls::window_shape_for(i, ww, wh) {
+                touch_controls::Shape::Circle { cx, cy, .. } | touch_controls::Shape::Rect { cx, cy, .. } => (cx, cy),
             };
-            if let Some(uv) = overlay.art(c.name) {
-                // A control with its own artwork is drawn as that sprite, sized by its height: every
-                // button comes out exactly as tall as a square one (the X), whatever shape it was
-                // painted in, and a wide label simply reaches further sideways instead of being
-                // squashed down to fit inside the control.
-                let (cx, cy, half) = match touch_controls::window_shape(i) {
-                    touch_controls::Shape::Circle { cx, cy, r } => (cx * ww, cy * wh, r * ww),
-                    touch_controls::Shape::Rect { cx, cy, w, h } => (cx * ww, cy * wh, (w * ww + h * wh) / 4.0),
-                };
-                let aspect = overlay.art_aspect(c.name).unwrap_or(1.0);
-                let (half_w, half_h) = (half * aspect, half);
-                // The picker arrows are not buttons: they stay solid whatever the artwork opacity is.
-                let alpha = if c.name == "flecha" { 1.0 } else { touch_controls::sprite_opacity() };
-                push_sprite(
-                    &mut sprites,
-                    ww,
-                    wh,
-                    cx - half_w,
-                    cy - half_h,
-                    cx + half_w,
-                    cy + half_h,
-                    uv[0],
-                    uv[1],
-                    uv[2],
-                    uv[3],
-                    alpha,
-                );
-                continue;
+            // Moderno: the artwork we already had, drawn semi-transparent.
+            if appearance.style == crate::touch_appearance::Style::Modern {
+                if let Some(uv) = overlay.art(c.name) {
+                    let (cx, cy, half) = match touch_controls::window_shape_for(i, ww, wh) {
+                        touch_controls::Shape::Circle { cx, cy, r } => (cx * ww, cy * wh, r * ww),
+                        touch_controls::Shape::Rect { cx, cy, w, h } => (cx * ww, cy * wh, (w * ww + h * wh) / 4.0),
+                    };
+                    let aspect = overlay.art_aspect(c.name).unwrap_or(1.0);
+                    let (half_w, half_h) = (half * aspect, half);
+                    push_sprite(&mut sprites, ww, wh, cx - half_w, cy - half_h, cx + half_w, cy + half_h, uv[0], uv[1], uv[2], uv[3]);
+                    for v in sprites[sprite_start..].chunks_exact_mut(8) {
+                        v[5] *= touch_controls::sprite_opacity();
+                        if let Some(t) = appearance.tint {
+                            v[2] *= t[0];
+                            v[3] *= t[1];
+                            v[4] *= t[2];
+                        }
+                    }
+                    transform_touch_vertices(&mut sprites[sprite_start..], center, visual_scale, brightness);
+                    continue;
+                }
             }
-            match touch_controls::window_shape(i) {
-                touch_controls::Shape::Rect { cx, cy, w, h } => {
-                    let (cx, cy) = (cx * ww, cy * wh);
-                    let (w, h) = (w * ww, h * wh);
-                    let (x1, y1, x2, y2) = (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0);
-                    push_quad(&mut verts, ww, wh, x1, y1, x2, y2, fill);
-                    let t = 3.0;
-                    push_quad(&mut verts, ww, wh, x1, y1, x2, y1 + t, border);
-                    push_quad(&mut verts, ww, wh, x1, y2 - t, x2, y2, border);
-                    push_quad(&mut verts, ww, wh, x1, y1, x1 + t, y2, border);
-                    push_quad(&mut verts, ww, wh, x2 - t, y1, x2, y2, border);
-                    if let touch_controls::Label::Arrow(dir) = c.label {
-                        push_arrow(&mut verts, ww, wh, cx, cy, h * 0.26, dir, ink);
+            // Clasico: our soft discs, and the fallback for a Modern control without artwork.
+            let (lcx, lcy, lr) = push_modern_control(
+                &mut verts,
+                ww,
+                wh,
+                touch_controls::window_shape_for(i, ww, wh),
+                pressed,
+                touch_controls::control_art_aspect(c.name),
+                appearance.tint,
+            );
+            match c.label {
+                touch_controls::Label::Text(text) => {
+                    if let Some((uv, aspect)) = label_art(text) {
+                        push_label_sprite(&mut label_sprites, ww, wh, lcx, lcy, lr * 0.42, uv, aspect);
+                    } else {
+                        push_text(&mut verts, ww, wh, text, lcx, lcy, lr * 0.28, [0.72, 0.72, 0.76, 0.92]);
                     }
                 },
-                touch_controls::Shape::Circle { cx, cy, r } => {
-                    let (cx, cy, r) = (cx * ww, cy * wh, r * ww);
-                    push_circle(&mut verts, ww, wh, cx, cy, r, fill);
-                    push_ring(&mut verts, ww, wh, cx, cy, r, 3.0, border);
-                    if let touch_controls::Label::Text(text) = c.label {
-                        push_text(&mut verts, ww, wh, text, cx, cy, r * 0.24, ink);
-                    }
-                },
+                touch_controls::Label::Arrow(dir) => push_arrow(&mut verts, ww, wh, lcx, lcy, lr * 0.5, dir, [0.72, 0.72, 0.76, 0.92]),
+                touch_controls::Label::None => {},
+            }
+            transform_touch_vertices(&mut verts[plain_start..], center, visual_scale, brightness);
+        }
+        if !label_sprites.is_empty() {
+            let factor = touch_controls::sprite_opacity();
+            for v in label_sprites.chunks_exact_mut(8) {
+                v[5] *= factor;
             }
         }
 
+        if crate::field_controls::open(){
+            if let Some(uv)=overlay.art("field-selector"){
+                let(x,y,w,h)=crate::field_controls::rect(ww,wh);let start=sprites.len();
+                push_sprite(&mut sprites,ww,wh,x,y,x+w,y+h,uv[0],uv[1],uv[2],uv[3]);
+                for v in sprites[start..].chunks_exact_mut(8){v[5]*=touch_controls::sprite_opacity();}
+            }
+        }
         // Movement joystick: the pixel-art base with the knob on top that follows the thumb, or the
         // drawn ring when the artwork is not available.
-        if touch_controls::joystick_active() {
-            let (jcx, jcy) = touch_controls::joystick_center();
+        if touch_controls::movement_active() {
+            let (jcx, jcy) = touch_controls::joystick_center_in_window(ww, wh);
             let (cx, cy) = (jcx * ww, jcy * wh);
             let r = touch_controls::joystick_radius() * wh;
-            let (ox, oy) = touch_controls::joystick_offset();
-            if let (Some(base), Some(knob)) = (overlay.art("joystick"), overlay.art("joystick-knob")) {
-                // The artwork is a square panel with the knob at its centre. The panel is sized so it
-                // encloses the joystick's circle, and the knob keeps the share of the image it has.
-                let half = r * 1.05;
-                push_sprite(&mut sprites, ww, wh, cx - half, cy - half, cx + half, cy + half, base[0], base[1], base[2], base[3], 1.0);
-                let (kx, ky) = (cx + ox * r * 0.72, cy + oy * r * 0.72);
-                let kh = r * 0.88;
-                push_sprite(&mut sprites, ww, wh, kx - kh, ky - kh, kx + kh, ky + kh, knob[0], knob[1], knob[2], knob[3], 1.0);
-            } else {
-                push_circle(&mut verts, ww, wh, cx, cy, r, [0.10, 0.10, 0.16, 0.22]);
-                push_ring(&mut verts, ww, wh, cx, cy, r, 4.0, [1.0, 1.0, 1.0, 0.45]);
-                let (kx, ky) = (cx + ox * r * 0.72, cy + oy * r * 0.72);
-                push_circle(&mut verts, ww, wh, kx, ky, r * 0.40, [0.85, 0.85, 0.92, 0.50]);
-                push_ring(&mut verts, ww, wh, kx, ky, r * 0.40, 3.0, [1.0, 1.0, 1.0, 0.75]);
+            let (ox, oy) = touch_controls::movement_offset();
+            let mut drew_sprite = false;
+            // Moderno draws the joystick artwork, semi-transparent.
+            if appearance.style == crate::touch_appearance::Style::Modern {
+                if let (Some(base), Some(knob)) = (overlay.art("joystick"), overlay.art("joystick-knob")) {
+                    let start = sprites.len();
+                    let half = r * 1.05;
+                    push_sprite(&mut sprites, ww, wh, cx - half, cy - half, cx + half, cy + half, base[0], base[1], base[2], base[3]);
+                    let (kx, ky) = (cx + ox * r * 0.72, cy + oy * r * 0.72);
+                    let kh = r * 0.88;
+                    push_sprite(&mut sprites, ww, wh, kx - kh, ky - kh, kx + kh, ky + kh, knob[0], knob[1], knob[2], knob[3]);
+                    for v in sprites[start..].chunks_exact_mut(8) {
+                        v[5] *= touch_controls::sprite_opacity();
+                        if let Some(t) = appearance.tint {
+                            v[2] *= t[0];
+                            v[3] *= t[1];
+                            v[4] *= t[2];
+                        }
+                    }
+                    drew_sprite = true;
+                }
+            }
+            if !drew_sprite {
+                push_modern_movement(
+                    &mut verts,
+                    ww,
+                    wh,
+                    cx,
+                    cy,
+                    r,
+                    ox,
+                    oy,
+                    touch_controls::move_mode() == touch_controls::MoveMode::Dpad,
+                    appearance.tint,
+                );
             }
         }
 
@@ -1453,7 +1990,7 @@ impl RendererImpl {
             if let Some(uv) = overlay.art("selector") {
                 let half = radius / touch_controls::SELECTOR_SLOT_DISTANCE;
                 let tall = half * touch_controls::SELECTOR_ASPECT;
-                push_sprite(&mut sprites, ww, wh, cx - half, cy - tall, cx + half, cy + tall, uv[0], uv[1], uv[2], uv[3], 1.0);
+                push_sprite(&mut sprites, ww, wh, cx - half, cy - tall, cx + half, cy + tall, uv[0], uv[1], uv[2], uv[3]);
             }
             let selection = overlay.art("selection");
             let cell = 1.0 / touch_controls::PICKER_SLOTS as f32;
@@ -1463,7 +2000,7 @@ impl RendererImpl {
                     let x0 = index as f32 * cell;
                     // Just inside the hexagon, so the sprite reads as sitting in it.
                     let inner = radius * 0.42;
-                    push_sprite(&mut party_sprites, ww, wh, ix - inner, iy - inner, ix + inner, iy + inner, x0, 0.0, x0 + cell, 1.0, 1.0);
+                    push_sprite(&mut party_sprites, ww, wh, ix - inner, iy - inner, ix + inner, iy + inner, x0, 0.0, x0 + cell, 1.0);
                 }
                 if selected == index as i32 {
                     // The border is one hexagon, sized to the artwork's own so it nests inside the
@@ -1471,13 +2008,13 @@ impl RendererImpl {
                     if let Some(uv) = selection {
                         let wide = radius * 0.55;
                         let tall = wide * 1.155;
-                        push_sprite(&mut sprites, ww, wh, ix - wide, iy - tall, ix + wide, iy + tall, uv[0], uv[1], uv[2], uv[3], 1.0);
+                        push_sprite(&mut sprites, ww, wh, ix - wide, iy - tall, ix + wide, iy + tall, uv[0], uv[1], uv[2], uv[3]);
                     }
                 }
             }
         }
 
-        if verts.is_empty() && sprites.is_empty() && party_sprites.is_empty() {
+        if verts.is_empty() && sprites.is_empty() && party_sprites.is_empty() && label_sprites.is_empty() {
             return
         }
         unsafe {
@@ -1526,6 +2063,12 @@ impl RendererImpl {
                 gl.BindTexture(gl::TEXTURE_2D, overlay.skin);
                 gl.BufferData(gl::ARRAY_BUFFER, (sprites.len() * 4) as _, sprites.as_ptr().cast(), gl::STREAM_DRAW);
                 gl.DrawArrays(gl::TRIANGLES, 0, (sprites.len() / 8) as i32);
+            }
+            if !label_sprites.is_empty() {
+                // The clean label atlas, sampled with LINEAR so the text stays smooth.
+                gl.BindTexture(gl::TEXTURE_2D, label_texture());
+                gl.BufferData(gl::ARRAY_BUFFER, (label_sprites.len() * 4) as _, label_sprites.as_ptr().cast(), gl::STREAM_DRAW);
+                gl.DrawArrays(gl::TRIANGLES, 0, (label_sprites.len() / 8) as i32);
             }
             if !party_sprites.is_empty() {
                 // The game's own sprites, which live in their own strip.

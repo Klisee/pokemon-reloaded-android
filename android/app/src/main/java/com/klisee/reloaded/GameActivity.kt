@@ -32,6 +32,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 private const val TAG = "ReloadedIme"
 
 class GameActivity : NativeActivity() {
+    private val touchFeedback by lazy { TouchFeedback(this) }
+    private val touchPreferences by lazy { Preferences(this) }
 
     /** The 1x1 view the system keyboard types into. What it receives goes straight to the engine. */
     private var imeAnchor: EditText? = null
@@ -177,6 +179,17 @@ class GameActivity : NativeActivity() {
     external fun nativeImeInset(height: Int)
 
     companion object {
+        /** Called from the engine when a touch control is pressed, to make it vibrate. */
+        @JvmStatic
+        fun touchControlPressed() {
+            val activity = instance ?: return
+            activity.runOnUiThread {
+                if (!activity.isFinishing && !activity.isDestroyed && activity.hasWindowFocus()) {
+                    activity.touchFeedback.press(activity.window.decorView, activity.touchPreferences.touchAppearance)
+                }
+            }
+        }
+
         init {
             // These are declared as `native` methods on this class, so the JVM has to find their
             // `Java_com_klisee_reloaded_GameActivity_*` symbols in the library. The emulator loads

@@ -43,7 +43,7 @@ import com.klisee.reloaded.installUpdate
 import kotlinx.coroutines.launch
 
 /** Screens reached from a tab rather than being tabs themselves. */
-private enum class Pushed { About, Controls, MySaves }
+private enum class Pushed { About, Controls, TouchSettings, TouchLayout, MySaves }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -175,6 +175,8 @@ fun App(repo: GameRepository, prefs: Preferences) {
             filesDir = context.filesDir,
             onBack = { pushed = null },
         )
+        Pushed.TouchSettings -> TouchSettingsScreen(prefs = prefs, onBack = { pushed = null })
+        Pushed.TouchLayout -> TouchLayoutScreen(prefs = prefs, onBack = { pushed = null })
         Pushed.MySaves -> MySavesScreen(repo = repo, onBack = { pushed = null })
         null -> Box(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
@@ -201,6 +203,7 @@ fun App(repo: GameRepository, prefs: Preferences) {
                         onLog = { scope.launch { pagerState.animateScrollToPage(Tab.Log.ordinal) } },
                         onAbout = { pushed = Pushed.About },
                         onControls = { pushed = Pushed.Controls },
+                        onTouchSettings = { pushed = Pushed.TouchSettings },
                         onMySaves = { pushed = Pushed.MySaves },
                         onUpdateFound = { update = it },
                     )

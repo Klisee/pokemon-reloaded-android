@@ -82,10 +82,11 @@ object Blog {
             }
             ?.ifEmpty { null }
         val published = entry.optJSONObject("published")?.optString("\$t")?.take(10)
+        val links = downloadLinks(html)
         return Post(
             title = title,
-            version = newestVersion(html),
-            links = downloadLinks(html),
+            version = newestVersion(title, links),
+            links = links,
             postUrl = postUrl,
             published = published,
             images = images(html),
@@ -93,10 +94,18 @@ object Blog {
         )
     }
 
-    /** The newest `x.y.z` mentioned in the post (the title alone is often one patch behind). */
-    private fun newestVersion(html: String): String? =
-        BETA_VERSION.findAll(html).map { it.groupValues[1] }.maxWithOrNull(::compareVersions)
-            ?: VERSION.findAll(html).map { it.value }.maxWithOrNull(::compareVersions)
+    /**
+     * The version the post is actually offering, taken only from its title and its download links.
+     *
+     * Scanning the whole body was wrong: an announcement can mention the next version in passing
+     * ("seguimos con la próxima versión, TLB 1.9.3") and the launcher would offer that unreleased
+     * version as a download. A release always names it in the title or beside the download link.
+     */
+    private fun newestVersion(title: String, links: List<Link>): String? {
+        val text = (listOf(title) + links.map { it.label }).joinToString(" ")
+        return BETA_VERSION.findAll(text).map { it.groupValues[1] }.maxWithOrNull(::compareVersions)
+            ?: VERSION.findAll(text).map { it.value }.maxWithOrNull(::compareVersions)
+    }
 
     private fun compareVersions(a: String, b: String): Int {
         val left = a.split('.').map { it.toIntOrNull() ?: 0 }
