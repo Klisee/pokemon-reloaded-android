@@ -18,7 +18,7 @@ import java.io.File
 object TouchLabels {
     /** Every label the classic catalogue can show (arrows are drawn as triangles, not text). */
     private val LABELS = listOf(
-        "1", "2", "3", "4", "5", "6", "7",
+        "1", "2", "3", "4", "5", "6", "7", "8",
         "PKM", "SEL", "ESC", "OK", "C+P",
         "O", "M", "E", "T", "L", "P",
         "Z", "X", "C", "V", "B", "S", "A", "N",
