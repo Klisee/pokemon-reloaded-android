@@ -39,6 +39,8 @@ pub const EGL_CONTEXT_CLIENT_VERSION: c_int = 0x3098;
 pub const EGL_SURFACE_TYPE: c_int = 0x3033;
 pub const EGL_WINDOW_BIT: c_int = 0x0004;
 pub const EGL_NONE: c_int = 0x3038;
+/// Reported by `eglGetError` after a call that found the context gone (EGL 1.5).
+pub const EGL_CONTEXT_LOST: c_uint = 0x300E;
 
 extern "C" {
     fn eglGetDisplay(display_id: *mut c_void) -> EGLDisplay;
@@ -65,6 +67,7 @@ extern "C" {
     fn eglDestroySurface(display: EGLDisplay, surface: EGLSurface) -> c_uint;
     fn eglDestroyContext(display: EGLDisplay, context: EGLContext) -> c_uint;
     fn eglTerminate(display: EGLDisplay) -> c_uint;
+    fn eglGetError() -> c_uint;
 }
 
 thread_local! {
@@ -113,6 +116,28 @@ pub struct Gl {
 }
 
 static GL: std::sync::Mutex<Option<Gl>> = std::sync::Mutex::new(None);
+
+/// Set when the driver reports that the context is gone. There is no way to rebuild the context in
+/// place: every texture, program, buffer and the atlases the game holds by id belong to the old one.
+/// The session is ended instead, so the engine starts again from scratch with a fresh context.
+static CONTEXT_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the context was lost. Checked by the game loop before drawing another frame.
+pub fn context_lost() -> bool {
+    CONTEXT_LOST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Notes an EGL failure; only `EGL_CONTEXT_LOST` is fatal, the rest are transient.
+fn note_egl_error(what: &str) {
+    let error = unsafe { eglGetError() };
+    if error == EGL_CONTEXT_LOST {
+        CONTEXT_LOST.store(true, std::sync::atomic::Ordering::SeqCst);
+        eprintln!("[gl] contexto EGL perdido en {}; se reiniciara la sesion", what);
+    } else if error != 0x3000 {
+        // Not fatal, but worth having in the log when a frame does not reach the screen.
+        eprintln!("[gl] {} fallo (EGL error 0x{:04X})", what, error);
+    }
+}
 
 // SAFETY: the handles are only ever reached through the mutex above, one thread at a time, and the
 // EGL calls made here are the ones EGL allows across threads. Nothing else can touch them.
@@ -208,11 +233,14 @@ pub unsafe fn bind_surface() {
     if gl.bound == gl.surface {
         return
     }
-    if gl.surface == EGL_NO_SURFACE {
-        eglMakeCurrent(gl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, gl.context);
+    let bound = if gl.surface == EGL_NO_SURFACE {
+        eglMakeCurrent(gl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, gl.context)
     } else {
-        eglMakeCurrent(gl.display, gl.surface, gl.surface, gl.context);
         eglSwapInterval(gl.display, gl.swap_interval as c_int);
+        eglMakeCurrent(gl.display, gl.surface, gl.surface, gl.context)
+    };
+    if bound == 0 {
+        note_egl_error("eglMakeCurrent");
     }
     gl.bound = gl.surface;
 }
@@ -229,6 +257,8 @@ impl PlatformImpl {
             return Err("Android no ha entregado una ventana nativa".into())
         }
 
+        // A new session starts with a fresh context, so any loss noted earlier no longer applies.
+        CONTEXT_LOST.store(false, std::sync::atomic::Ordering::Relaxed);
         let display = eglGetDisplay(EGL_NO_DISPLAY);
         if display == EGL_NO_DISPLAY {
             return Err("eglGetDisplay fallo".into())
@@ -374,7 +404,9 @@ impl PlatformImpl {
         let Ok(slot) = GL.lock() else { return };
         let Some(gl) = slot.as_ref() else { return };
         if gl.surface != EGL_NO_SURFACE {
-            eglSwapBuffers(gl.display, gl.surface);
+            if eglSwapBuffers(gl.display, gl.surface) == 0 {
+                note_egl_error("eglSwapBuffers");
+            }
         }
     }
 

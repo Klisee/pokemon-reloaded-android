@@ -2084,6 +2084,14 @@ impl Game {
 
         #[cfg(target_os = "android")]
         {
+            // The driver lost the context (rare, usually a GPU reset). Every GL object the game
+            // holds belongs to the old one, so the only safe recovery is a new session: end this
+            // one cleanly instead of drawing garbage or dying on the first GL error.
+            if crate::render::opengl::egl::context_lost() {
+                eprintln!("[gl] contexto perdido: terminando la sesion para reconstruir el renderer");
+                self.scene_change = Some(SceneChange::End);
+                return Ok(())
+            }
             if !crate::render::opengl::egl::has_surface() {
                 return Ok(())
             }
