@@ -16,6 +16,7 @@ val keystoreProperties = Properties().apply {
 //   ./build.sh assembleRelease -PtargetAbi=armeabi-v7a
 //   ./build.sh assembleRelease -PtargetAbi=x86_64
 // after building the same ABI with cargo-ndk (the error below prints the exact command).
+val appVersion = "0.3.5"
 val targetAbi = providers.gradleProperty("targetAbi").orElse("arm64-v8a").get()
 val rustTarget = when (targetAbi) {
     "arm64-v8a" -> "aarch64-linux-android"
@@ -48,7 +49,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 11
-        versionName = "0.3.5"
+        versionName = appVersion
         ndk { abiFilters += targetAbi }
     }
 
@@ -87,6 +88,17 @@ android {
 }
 
 tasks.named("preBuild") { dependsOn(copyEmulatorSo) }
+
+// Name every release APK after the full ABI (arm64-v8a, not just "arm64"), so the files that come
+// out of the build are the ones that get published.
+androidComponents {
+    onVariants { variant ->
+        if (variant.buildType != "release") return@onVariants
+        variant.outputs.forEach { output ->
+            output.outputFileName.set("pokemon-reloaded-$appVersion-$targetAbi.apk")
+        }
+    }
+}
 
 dependencies {
     implementation("androidx.core:core-ktx:1.19.0")
