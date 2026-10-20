@@ -1337,7 +1337,8 @@ fn free_bytes_on(path: &Path) -> Option<u64> {
         if libc::statvfs(path_c.as_ptr(), &mut stats) != 0 {
             return None
         }
-        Some(stats.f_bavail * u64::from(stats.f_frsize))
+        // `statvfs` widens these fields on 64-bit targets and keeps them 32-bit on armv7.
+        Some(stats.f_bavail as u64 * stats.f_frsize as u64)
     }
 }
 

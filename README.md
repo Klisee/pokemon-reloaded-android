@@ -107,15 +107,23 @@ Y por ir haciendo, sin orden:
 
 ## Compilar
 
+Cada arquitectura lleva su propio APK (el motor es nativo). `arm64-v8a` es la de por defecto:
+
 ```
 # El motor (Rust) y su .so para Android
 cd src/OpenGMK
 cargo ndk -t arm64-v8a --platform 29 build -p gm8emulator --release
+cargo ndk -t armeabi-v7a --platform 29 build -p gm8emulator --release
+cargo ndk -t x86_64 --platform 29 build -p gm8emulator --release
 
-# La app
+# La app: un APK por arquitectura
 cd ../../android
 ./build.sh :app:assembleRelease
+./build.sh :app:assembleRelease -PtargetAbi=armeabi-v7a
+./build.sh :app:assembleRelease -PtargetAbi=x86_64
 ```
+
+El workflow `.github/workflows/build-apks.yml` compila las tres en CI al publicar un tag.
 
 ## Créditos
 

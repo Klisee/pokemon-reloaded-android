@@ -12,16 +12,24 @@ val keystoreProperties = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 
-// The emulator is a Rust cdylib produced by cargo-ndk:
-//   cd src/OpenGMK && cargo ndk -t arm64-v8a --platform 29 build -p gm8emulator --release
-// Copy it into jniLibs before packaging, refusing a missing or zeroed-out (unclean shutdown) .so.
-val emulatorSo = rootProject.file("../src/OpenGMK/target/aarch64-linux-android/release/libgm8emulator.so")
-val jniLibDir = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
+// One APK per architecture. arm64-v8a is the default; the others are built with
+//   ./build.sh assembleRelease -PtargetAbi=armeabi-v7a
+//   ./build.sh assembleRelease -PtargetAbi=x86_64
+// after building the same ABI with cargo-ndk (the error below prints the exact command).
+val targetAbi = providers.gradleProperty("targetAbi").orElse("arm64-v8a").get()
+val rustTarget = when (targetAbi) {
+    "arm64-v8a" -> "aarch64-linux-android"
+    "armeabi-v7a" -> "armv7-linux-androideabi"
+    "x86_64" -> "x86_64-linux-android"
+    else -> error("ABI no soportada: $targetAbi")
+}
+val emulatorSo = rootProject.file("../src/OpenGMK/target/$rustTarget/release/libgm8emulator.so")
+val jniLibDir = layout.projectDirectory.dir("src/main/jniLibs/$targetAbi")
 val copyEmulatorSo by tasks.registering {
     inputs.file(emulatorSo).withPropertyName("emulatorSo").optional()
     outputs.dir(jniLibDir)
     doLast {
-        if (!emulatorSo.isFile) error("falta ${emulatorSo}; compila con: cargo ndk -t arm64-v8a --platform 29 build -p gm8emulator --release")
+        if (!emulatorSo.isFile) error("falta ${emulatorSo}; compila con: cargo ndk -t $targetAbi --platform 29 build -p gm8emulator --release")
         val magic = emulatorSo.inputStream().use { it.readNBytes(4) }
         if (magic.size < 4 || magic[0] != 0x7F.toByte() || magic[1] != 'E'.code.toByte() || magic[2] != 'L'.code.toByte() || magic[3] != 'F'.code.toByte()) {
             error("${emulatorSo} no es un ELF valido (¿quedó a cero tras un corte?)")
@@ -41,7 +49,7 @@ android {
         targetSdk = 36
         versionCode = 11
         versionName = "0.3.5"
-        ndk { abiFilters += "arm64-v8a" }
+        ndk { abiFilters += targetAbi }
     }
 
     signingConfigs {
