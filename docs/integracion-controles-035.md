@@ -1,20 +1,24 @@
-# Integración de controles 0.3.5-touch en 0.3.6
+# Integración de controles táctiles 0.3.5-touch en el port 0.3.6
 
-**Rama de trabajo:** `integracion-controles-touch-035` (no modificar `main`).
+**Base:** rama `main` del port 0.3.6 de Klisee, sin sobrescribir los cambios modernos.
+**Fuente:** `pokemon-reloaded-android-0.3.5-touch-V-corregida.zip`, basado en `v0.3.5` (`d88580669426f357a5c782e51a5c3b834c6f7eb3`).
 
-## Ya incorporado
+## Funciones integradas
 
-- Botón de tecla `8` configurable en el perfil de exploración, a la izquierda de PKM. Incluido en los catálogos de Android (`TouchLayouts.kt`) y Rust (`touch_controls.rs`).
-- Botón `Z` en navegación/mochila, manteniendo `X` y joystick en ese contexto.
-- Texto de la pantalla de configuración actualizado.
+- Botón **8** en Exploración: a la izquierda de PKM, configuración de posición y tamaño, etiqueta para tema clásico, sprite `alpha8.png`.
+- **Mochila/Navegación:** joystick, Z y X disponibles; se conservan los gestos de las listas.
+- **Caja del PC:** un toque breve sigue siendo clic izquierdo, mantener un dedo fijo durante 1 segundo provoca clic derecho; mover el dedo cancela el clic largo y permite arrastrar desde la celda original. Multitouch, cancelación y pérdida de foco sueltan/cancelan entrada.
+- **Sprites modernos originales** de Z, X, C, V corregida, base y palanca del joystick. Conserva la personalización por usuario; originales editables de alta resolución están en `artwork-source/touch-update`.
+- **Verificación:** `verification/touch_tests.rs` y `android/app/src/test/java/com/klisee/reloaded/TouchUpdateTest.kt`, más herramientas de preparación de sprites.
+- **Firma:** si falta una clave release, la compilación release no usa la firma debug; el responsable del port puede firmarla con su propia clave.
 
-## Por integrar desde `pokemon-reloaded-android-0.3.5-touch-V-corregida.zip`
+## Preservación del proyecto
 
-- Los **PNG originales**, en especial la `V` corregida, `Z`, `X`, `C`, `joystick-base`, `joystick-knob` y `alpha8`. Esta rama todavía **no contiene estos binarios**. Mientras tanto, el botón 8 utiliza el renderizador de texto existente.
-- `src/OpenGMK/gm8emulator/src/box_touch.rs`: pulsación larga de un segundo en caja PC para clic derecho, con manejo de arrastre, multitouch, cancelación y pruebas.
-- Integrar su uso en `android_main.rs` y la declaración del módulo, preservando los cambios de la versión 0.3.6 (audio, foco, empaquetado, etc.).
-- Pruebas de compilación Android + Rust y validación en teléfono con el juego instalado.
+Se comparó el ZIP con la base oficial 0.3.5: 387 archivos coincidían, se importaron cambios puntuales y se conservaron los avances de 0.3.6 (motor Android, audio, Gradle, actualizaciones, etc.).
+La versión sigue siendo 0.3.6; `versionCode` y la firma final deberán revisarse antes de una publicación oficial.
 
-No reemplazar en bloque los archivos `android_main.rs`, `GameActivity.kt`, `build.gradle.kts` ni otros modificados por Klisee después de 0.3.5; hacer merge selectivo.
+## Validación pendiente
 
-**Estado:** parcial; no abrir Pull Request al repositorio original ni presentar APK como compilada antes de completar integración y pruebas.
+**Esta integración no se ha compilado ni probado físicamente en Android en esta conversación.**
+Se incluyen pruebas automatizadas para revisión; hace falta ejecutarlas, construir la APK con el SDK/NDK del proyecto y comprobar en el teléfono la mochila, el equipo, la caja del PC, la V, la persistencia de controles, la vibración y los gestos multitouch.
+La APK oficial solo puede actualizarse con la firma que administra el creador.
