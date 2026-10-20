@@ -53,21 +53,31 @@ class GameActivity : NativeActivity() {
 
     override fun onResume() {
         super.onResume()
-        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_GAME)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build(),
-            )
-            .setOnAudioFocusChangeListener(focusListener)
-            .build()
-        focusRequest = request
-        audioManager.requestAudioFocus(request)
+        // Ask once the window is actually on screen: some Android versions reject a focus request
+        // made during onResume, and a denied request must never take the game down with it.
+        window.decorView.post { requestAudioFocus() }
+    }
+
+    private fun requestAudioFocus() {
+        if (focusRequest != null) return
+        runCatching {
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_GAME)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build(),
+                )
+                .setOnAudioFocusChangeListener(focusListener)
+                .build()
+            if (audioManager.requestAudioFocus(request) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                focusRequest = request
+            }
+        }
     }
 
     override fun onPause() {
-        focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        runCatching { focusRequest?.let { audioManager.abandonAudioFocusRequest(it) } }
         focusRequest = null
         super.onPause()
     }
