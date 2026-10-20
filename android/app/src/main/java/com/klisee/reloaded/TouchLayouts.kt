@@ -39,7 +39,7 @@ object TouchLayouts {
         TouchControlSpec("alpha5", "5", 0.588f, 0.055f, 0.020f, setOf(TouchProfile.SAFARI), null, aspect = 1.000000f),
         TouchControlSpec("alpha6", "6", 0.660f, 0.055f, 0.020f, setOf(TouchProfile.SAFARI), null, aspect = 1.000000f),
         TouchControlSpec("alpha7", "7", 0.732f, 0.055f, 0.020f, setOf(TouchProfile.WORLD), null),
-        TouchControlSpec("alpha8", "8", 0.228f, 0.050f, 0.022f, setOf(TouchProfile.WORLD), "alpha8.png"),
+        TouchControlSpec("alpha8", "8", 0.228f, 0.050f, 0.022f, setOf(TouchProfile.WORLD), null),
         TouchControlSpec("sel_world", "SEL", 0.300f, 0.760f, 0.038f, setOf(TouchProfile.WORLD), "sel_world.png"),
         TouchControlSpec("space", "PKM", 0.300f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "space.png", aspect = 1.000000f),
         TouchControlSpec("o", "O", 0.372f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "o.png", aspect = 1.000000f),
