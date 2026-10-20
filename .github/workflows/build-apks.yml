@@ -74,7 +74,7 @@ jobs:
         shell: bash
         run: |
           SO="src/OpenGMK/target/${{ matrix.rust }}/release/libgm8emulator.so"
-          APK="android/app/build/outputs/apk/release/app-release.apk"
+          APK="$(ls android/app/build/outputs/apk/release/pokemon-reloaded-*-${{ matrix.abi }}.apk)"
           test -s "$SO"
           test -s "$APK"
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h "$SO"
@@ -87,5 +87,5 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/release/*.apk
             src/OpenGMK/target/${{ matrix.rust }}/release/libgm8emulator.so
