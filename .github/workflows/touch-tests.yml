@@ -1,0 +1,29 @@
+name: Touch controls tests
+
+on:
+  push:
+    branches:
+      - integracion-controles-touch-035
+    paths:
+      - "src/OpenGMK/gm8emulator/src/**"
+      - "verification/**"
+      - ".github/workflows/touch-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-touch-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test touch profiles, mappings and geometry
+        run: |
+          rustc --edition=2021 --test verification/touch_tests.rs -o /tmp/touch-tests
+          /tmp/touch-tests --test-threads=1
+      - name: Test PC box long-press, drag and cancellation
+        run: |
+          rustc --edition=2021 --test src/OpenGMK/gm8emulator/src/box_touch.rs -o /tmp/box-touch-tests
+          /tmp/box-touch-tests --test-threads=1
