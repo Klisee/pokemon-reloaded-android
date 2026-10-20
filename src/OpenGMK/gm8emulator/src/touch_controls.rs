@@ -130,6 +130,7 @@ pub const CLASSIC_CONTROLS: &[Control] = &[
     Control { name: "alpha7", key: Key::Alpha7, shape: Shape::Circle { cx: 0.732, cy: 0.055, r: 0.020 }, label: Label::Text("7"), contexts: WORLD },
     Control { name: crate::field_controls::NAME, key: Key::Alpha1, shape: Shape::Circle { cx: 0.300, cy: 0.760, r: 0.038 }, label: Label::Text("SEL"), contexts: WORLD },
     // Menu / misc keys (second row along the top).
+    Control { name: "alpha8", key: Key::Alpha8, shape: Shape::Circle { cx: 0.228, cy: 0.050, r: 0.022 }, label: Label::Text("8"), contexts: WORLD },
     Control { name: "space", key: Key::Space, shape: Shape::Circle { cx: 0.300, cy: 0.145, r: 0.022 }, label: Label::Text("PKM"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "o", key: Key::O, shape: Shape::Circle { cx: 0.372, cy: 0.145, r: 0.022 }, label: Label::Text("O"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "m", key: Key::M, shape: Shape::Circle { cx: 0.444, cy: 0.145, r: 0.022 }, label: Label::Text("M"), contexts: WORLD | BATTLE | SAFARI },
@@ -140,7 +141,7 @@ pub const CLASSIC_CONTROLS: &[Control] = &[
     // Main actions, in the diamond a gamepad's face buttons use: the main one at the bottom, cancel
     // to the right, and the other two on the left and on top. The cluster is about the size of the
     // movement joystick and sits at the same height, so the two thumbs fall in the same place.
-    Control { name: "z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: WORLD | BATTLE | CHOICE },
+    Control { name: "z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: WORLD | BATTLE | CHOICE | MENU_NAV },
     Control { name: "x", key: Key::X, shape: Shape::Circle { cx: 0.933, cy: 0.700, r: 0.033 }, label: Label::Text("X"), contexts: WORLD | BATTLE | CHOICE | MENU_NAV },
     Control { name: "c", key: Key::C, shape: Shape::Circle { cx: 0.797, cy: 0.700, r: 0.033 }, label: Label::Text("C"), contexts: WORLD | BATTLE },
     Control { name: "v", key: Key::V, shape: Shape::Circle { cx: 0.865, cy: 0.549, r: 0.033 }, label: Label::Text("V"), contexts: WORLD | BATTLE },
@@ -184,6 +185,7 @@ pub const NEW_CONTROLS: &[Control] = &[
     Control { name: "alpha5", key: Key::Alpha5, shape: Shape::Circle { cx: 0.516, cy: 0.055, r: 0.020 }, label: Label::Text("5"), contexts: WORLD | SAFARI },
     Control { name: "alpha7", key: Key::Alpha7, shape: Shape::Circle { cx: 0.588, cy: 0.055, r: 0.020 }, label: Label::Text("7"), contexts: WORLD | SAFARI },
     // Menu / misc keys (second row along the top).
+    Control { name: "alpha8", key: Key::Alpha8, shape: Shape::Circle { cx: 0.228, cy: 0.050, r: 0.022 }, label: Label::Text("8"), contexts: WORLD },
     Control { name: "space", key: Key::Space, shape: Shape::Circle { cx: 0.300, cy: 0.145, r: 0.022 }, label: Label::Text("PKM"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "o", key: Key::O, shape: Shape::Circle { cx: 0.372, cy: 0.145, r: 0.022 }, label: Label::Text("O"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "m", key: Key::M, shape: Shape::Circle { cx: 0.444, cy: 0.145, r: 0.022 }, label: Label::Text("M"), contexts: WORLD | BATTLE | SAFARI },
@@ -194,7 +196,7 @@ pub const NEW_CONTROLS: &[Control] = &[
     // Main actions, in the diamond a gamepad's face buttons use: the main one at the bottom, cancel
     // to the right, and the other two on the left and on top. The cluster is about the size of the
     // movement joystick and sits at the same height, so the two thumbs fall in the same place.
-    Control { name: "z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: WORLD | BATTLE | CHOICE },
+    Control { name: "z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: WORLD | BATTLE | CHOICE | MENU_NAV },
     Control { name: "x", key: Key::X, shape: Shape::Circle { cx: 0.933, cy: 0.700, r: 0.033 }, label: Label::Text("X"), contexts: WORLD | BATTLE | CHOICE | MENU_NAV },
     Control { name: "c", key: Key::C, shape: Shape::Circle { cx: 0.797, cy: 0.700, r: 0.033 }, label: Label::Text("C"), contexts: WORLD | BATTLE },
     Control { name: "v", key: Key::V, shape: Shape::Circle { cx: 0.865, cy: 0.549, r: 0.033 }, label: Label::Text("V"), contexts: WORLD | BATTLE },
