@@ -858,7 +858,7 @@ pub fn is_active(index: usize) -> bool {
     }
     let classic = overlay_style() == OverlayStyle::Classic;
     if classic {
-        if current_context() == WORLD && controls()[index].name.starts_with("alpha") { return false }
+        if current_context() == WORLD && matches!(controls()[index].name, "alpha1" | "alpha2" | "alpha3" | "alpha4" | "alpha5" | "alpha6" | "alpha7") { return false }
         if controls()[index].name == crate::field_controls::NAME && current_context() != WORLD { return false }
         if controls()[index].name == PARTY_NAME && current_context() != BATTLE { return false }
         if layout_override(controls()[index].name).is_some_and(|entry| !entry.visible) { return false }
