@@ -104,6 +104,9 @@ pub struct Gl {
     config: EGLConfig,
     context: EGLContext,
     surface: EGLSurface,
+    /// The window the current surface was built on, so a surface tied to an old window is not
+    /// mistaken for a valid one when Android hands over a new window.
+    window_ptr: *mut c_void,
     /// The surface the context is bound to, so binding only happens when it changes.
     bound: EGLSurface,
     swap_interval: u32,
@@ -139,6 +142,25 @@ pub unsafe fn attach_surface(native_window: *mut c_void) {
     if native_window.is_null() {
         return
     }
+    // A surface built on a window that Android has already replaced is worse than none: it is not
+    // EGL_NO_SURFACE, so the renderer believes it can draw, but every swap goes nowhere. Destroy it
+    // before building the new one. The frame lock is taken first, in the same order as the render
+    // thread (frame, then GL), so no frame is in flight while the surface goes away.
+    let stale = {
+        let Ok(slot) = GL.lock() else { return };
+        slot.as_ref().map(|gl| gl.surface != EGL_NO_SURFACE && gl.window_ptr != native_window).unwrap_or(false)
+    };
+    if stale {
+        let _no_frame = detach_guard();
+        let Ok(mut slot) = GL.lock() else { return };
+        if let Some(gl) = slot.as_mut() {
+            if gl.surface != EGL_NO_SURFACE && gl.window_ptr != native_window {
+                eglDestroySurface(gl.display, gl.surface);
+                gl.surface = EGL_NO_SURFACE;
+                gl.bound = EGL_NO_SURFACE;
+            }
+        }
+    }
     let Ok(mut slot) = GL.lock() else { return };
     let Some(gl) = slot.as_mut() else { return };
     if gl.surface != EGL_NO_SURFACE {
@@ -150,6 +172,7 @@ pub unsafe fn attach_surface(native_window: *mut c_void) {
         return
     }
     gl.surface = surface;
+    gl.window_ptr = native_window;
 }
 
 /// Destroys the surface, while the window it was built on still exists: the only moment EGL can be
@@ -164,6 +187,7 @@ pub unsafe fn detach_surface() {
     }
     eglDestroySurface(gl.display, gl.surface);
     gl.surface = EGL_NO_SURFACE;
+    gl.window_ptr = ptr::null_mut();
 }
 
 /// Whether there is a surface to draw to right now.
@@ -292,6 +316,7 @@ impl PlatformImpl {
             config,
             context,
             surface,
+            window_ptr: native_window,
             bound: surface,
             swap_interval: 1,
         });
@@ -378,12 +403,14 @@ impl Drop for PlatformImpl {
         unsafe {
             let Ok(mut slot) = GL.lock() else { return };
             let Some(gl) = slot.take() else { return };
-            eglMakeCurrent(gl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, gl.context);
+            // Unbind first so the surface and context can be destroyed from this thread too.
+            eglMakeCurrent(gl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
             if gl.surface != EGL_NO_SURFACE {
                 eglDestroySurface(gl.display, gl.surface);
             }
             eglDestroyContext(gl.display, gl.context);
-            eglTerminate(gl.display);
+            // Deliberately no eglTerminate: it terminates every context on the display, not just
+            // this one, and would break any other EGL user in the same process (Compose included).
         }
     }
 }

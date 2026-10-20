@@ -26,6 +26,10 @@ const AAUDIO_DIRECTION_OUTPUT: i32 = 0;
 const AAUDIO_FORMAT_PCM_FLOAT: i32 = 2;
 const AAUDIO_PERFORMANCE_MODE_LOW_LATENCY: i32 = 12;
 const AAUDIO_CALLBACK_RESULT_CONTINUE: i32 = 0;
+// aaudio_stream_state_t, in header order.
+const AAUDIO_STREAM_STATE_UNINITIALIZED: i32 = 0;
+const AAUDIO_STREAM_STATE_CLOSED: i32 = 12;
+const AAUDIO_STREAM_STATE_DISCONNECTED: i32 = 13;
 
 /// The mixer currently being pulled by the AAudio callback, if any.
 static MIXER: Mutex<Option<Mixer>> = Mutex::new(None);
@@ -33,6 +37,10 @@ static MIXER: Mutex<Option<Mixer>> = Mutex::new(None);
 /// The output stream, so it can be stopped and resumed when the app goes to the background and
 /// comes back. Set by [open].
 static STREAM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The stream's parameters, kept so a stream Android reclaimed in the background can be rebuilt.
+static CHANNELS: AtomicU32 = AtomicU32::new(0);
+static RATE: AtomicU32 = AtomicU32::new(0);
 
 /// Stops or resumes the output. Without this the music keeps playing behind the home screen, which
 /// is both wrong and how a game that never really paused gives itself away.
@@ -46,10 +54,55 @@ pub fn set_paused(paused: bool) {
             AAudioStream_requestPause(stream);
             // Drop what is already queued, so the silence arrives now instead of draining first.
             AAudioStream_requestFlush(stream);
-        } else {
-            let _ = AAudioStream_requestStart(stream);
+            return
         }
+        // Android reclaims streams from background apps. Starting a dead one can block forever
+        // waiting for a callback that will never come, taking the game thread with it; it has to
+        // be closed and rebuilt instead.
+        let state = AAudioStream_getState(stream);
+        if state == AAUDIO_STREAM_STATE_DISCONNECTED
+            || state == AAUDIO_STREAM_STATE_CLOSED
+            || state == AAUDIO_STREAM_STATE_UNINITIALIZED
+        {
+            eprintln!("[aaudio] stream en estado {}, reconstruyendo", state);
+            AAudioStream_close(stream);
+            STREAM.store(0, Ordering::Relaxed);
+            if let Err(error) = reopen_stream() {
+                eprintln!("[aaudio] no pude reconstruir la salida: {}", error);
+            }
+            return
+        }
+        let _ = AAudioStream_requestStart(stream);
     }
+}
+
+/// Builds a stream with the parameters saved by [open]. Used to replace one Android reclaimed.
+unsafe fn reopen_stream() -> Result<(), String> {
+    let channels = CHANNELS.load(Ordering::Relaxed);
+    let rate = RATE.load(Ordering::Relaxed);
+    if channels == 0 || rate == 0 {
+        return Err("no hay parametros de audio guardados".into())
+    }
+    let stream = create_stream(rate as i32, channels as i32)?;
+    STREAM.store(stream as usize, Ordering::Relaxed);
+    check(AAudioStream_requestStart(stream), "AAudioStream_requestStart")
+}
+
+/// Creates the output stream; the caller owns it until it is closed.
+unsafe fn create_stream(sample_rate: i32, channel_count: i32) -> Result<*mut c_void, String> {
+    let mut builder: *mut c_void = std::ptr::null_mut();
+    check(AAudio_createStreamBuilder(&mut builder), "AAudio_createStreamBuilder")?;
+    AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
+    AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
+    AAudioStreamBuilder_setChannelCount(builder, channel_count);
+    AAudioStreamBuilder_setSampleRate(builder, sample_rate);
+    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setDataCallback(builder, data_callback, std::ptr::null_mut());
+    let mut stream: *mut c_void = std::ptr::null_mut();
+    let result = AAudioStreamBuilder_openStream(builder, &mut stream);
+    AAudioStreamBuilder_delete(builder);
+    check(result, "AAudioStreamBuilder_openStream")?;
+    Ok(stream)
 }
 
 extern "C" {
@@ -71,6 +124,8 @@ extern "C" {
     fn AAudioStream_requestFlush(stream: *mut c_void) -> i32;
     fn AAudioStream_getChannelCount(stream: *mut c_void) -> i32;
     fn AAudioStream_getSampleRate(stream: *mut c_void) -> i32;
+    fn AAudioStream_getState(stream: *mut c_void) -> i32;
+    fn AAudioStream_close(stream: *mut c_void) -> i32;
 }
 
 /// Set once the mixer has produced something audible. The launcher waits for this before handing the
@@ -126,20 +181,7 @@ fn check(result: i32, what: &str) -> Result<(), String> {
 /// and the handle used to add sounds.
 pub fn open(global_volume: Arc<AtomicU32>) -> Result<(usize, ChannelCount, SampleRate, MixerHandle), String> {
     unsafe {
-        let mut builder: *mut c_void = std::ptr::null_mut();
-        check(AAudio_createStreamBuilder(&mut builder), "AAudio_createStreamBuilder")?;
-
-        AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
-        AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
-        AAudioStreamBuilder_setChannelCount(builder, 2);
-        AAudioStreamBuilder_setSampleRate(builder, 48000);
-        AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-        AAudioStreamBuilder_setDataCallback(builder, data_callback, std::ptr::null_mut());
-
-        let mut stream: *mut c_void = std::ptr::null_mut();
-        let result = AAudioStreamBuilder_openStream(builder, &mut stream);
-        AAudioStreamBuilder_delete(builder);
-        check(result, "AAudioStreamBuilder_openStream")?;
+        let stream = create_stream(48000, 2)?;
 
         let channels = AAudioStream_getChannelCount(stream).max(1) as u32;
         let sample_rate = AAudioStream_getSampleRate(stream).max(8000) as u32;
@@ -148,6 +190,8 @@ pub fn open(global_volume: Arc<AtomicU32>) -> Result<(usize, ChannelCount, Sampl
 
         let (mixer, handle) = Mixer::new(sample_rate, channels, global_volume);
         *MIXER.lock().unwrap() = Some(mixer);
+        CHANNELS.store(channels.get() as u32, Ordering::Relaxed);
+        RATE.store(sample_rate.get() as u32, Ordering::Relaxed);
         STREAM.store(stream as usize, Ordering::Relaxed);
 
         check(AAudioStream_requestStart(stream), "AAudioStream_requestStart")?;

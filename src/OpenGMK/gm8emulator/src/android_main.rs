@@ -327,9 +327,9 @@ fn stick_release() {
 
 /// `Keycode` is a repr(i32) enum, so the raw AKEYCODE_* value is recoverable.
 fn key_code_value(keycode: &android_activity::input::Keycode) -> i32 {
-    // Keycode's variants are AKEYCODE_*; its Debug form is "A(29)" style, so use its
-    // discriminant through `Clone`-free transmute-free access below.
-    unsafe { *std::ptr::from_ref(keycode).cast::<i32>().to_owned() }
+    // `Keycode` is `#[repr(u32)]` with `num_enum::IntoPrimitive`, so this conversion is the
+    // supported one; reading it as an i32 through a pointer was undefined behaviour.
+    u32::from(*keycode) as i32
 }
 
 /// Which control each active pointer is currently holding, so a multi-touch release is paired with
@@ -1033,24 +1033,53 @@ fn with_activity(f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JClass) -> jni:
     let _ = f(&mut env, &class);
 }
 
+/// The `ANativeWindow` whose reference this process owns, if any.
+///
+/// The wrapper `AndroidApp::native_window()` hands out drops its own reference when the call ends,
+/// so one of ours is needed for the renderer to use it. Taking one on every event and never
+/// releasing it leaked a reference each time; the previous window is now released when it is
+/// replaced.
+static PUBLISHED_WINDOW: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
 fn publish_window(app: &AndroidApp) {
-    if let Some(window) = app.native_window() {
-        let ptr = window.ptr().as_ptr() as *mut std::ffi::c_void;
-        // The `NativeWindow` wrapper above owns a reference and drops it when this function
-        // returns; without acquiring our own, the window can be freed before the game thread
-        // calls eglCreateWindowSurface on it, which crashes with a null function pointer.
-        // SAFETY: `ptr` is a valid ANativeWindow handed out by the activity, and this only
-        // bumps its reference count.
+    let Some(window) = app.native_window() else { return };
+    let ptr = window.ptr().as_ptr() as *mut std::ffi::c_void;
+    let width = window.width() as u32;
+    let height = window.height() as u32;
+    let previous = PUBLISHED_WINDOW.swap(ptr, std::sync::atomic::Ordering::SeqCst);
+    // Acquire first, then tell the renderer, and only then drop the old one: at no point is the
+    // window the renderer has been told about already freed.
+    if previous != ptr {
         unsafe { ANativeWindow_acquire(ptr) };
-        let width = window.width() as u32;
-        let height = window.height() as u32;
-        android::set_native_window(ptr, width, height);
+    }
+    android::set_native_window(ptr, width, height);
+    if !previous.is_null() && previous != ptr {
+        unsafe { ANativeWindow_release(previous) };
     }
 }
 
 extern "C" {
     /// Bumps the reference count of an `ANativeWindow`. From `libandroid`, always linked.
     fn ANativeWindow_acquire(window: *mut std::ffi::c_void) -> i32;
+    /// Drops a reference taken with [ANativeWindow_acquire].
+    fn ANativeWindow_release(window: *mut std::ffi::c_void);
+}
+
+/// Android can recreate the Activity inside the same process. Carrying the previous session's
+/// input state over would leave keys held down (the player walking on their own, a wheel stuck...).
+fn reset_input_state() {
+    if let Ok(mut value) = POINTER_CONTROLS.lock() { *value = None; }
+    if let Ok(mut value) = WHEEL_PTR.lock() { *value = None; }
+    if let Ok(mut value) = FIELD_POINTER.lock() { *value = None; }
+    if let Ok(mut value) = SWALLOWED_INPUTS.lock() { *value = None; }
+    if let Ok(mut value) = MOUSE_DOWN_AT.lock() { value.clear(); }
+    if let Ok(mut value) = DELAYED_UPS.lock() { value.clear(); }
+    if let Ok(mut value) = DELAYED_DOWNS.lock() { value.clear(); }
+    if let Ok(mut value) = MOVEMENT_PTR.lock() { *value = None; }
+    MOVEMENT_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
+    STICK_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
+    IME_SHOWN.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Copies everything the engine prints to logcat.
@@ -1061,6 +1090,13 @@ extern "C" {
 /// reason in it. With the process's own stdout and stderr pointing at a pipe, all of it lands in
 /// logcat, which is also what the launcher's log screen reads.
 fn pipe_std_to_logcat() {
+    // The native entry can run again if the Activity is recreated in the same process; a second
+    // pipe thread would keep the first one blocked on a dead pipe forever.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(install_std_log_pipe);
+}
+
+fn install_std_log_pipe() {
     let mut fds = [0 as libc::c_int; 2];
     // SAFETY: `fds` is a valid array of two ints, which is what pipe() fills in.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
@@ -1140,6 +1176,8 @@ pub fn android_entry(app: AndroidApp) {
     pipe_std_to_logcat();
     // Panics then land in the same log, with a backtrace.
     std::env::set_var("RUST_BACKTRACE", "1");
+    // A recreated Activity must not inherit the previous session's held keys.
+    reset_input_state();
 
     // The pad layout, the touch overlay and the video mode are read once, before any input can arrive.
     load_controls();
@@ -1238,7 +1276,14 @@ pub fn android_entry(app: AndroidApp) {
             ime_check = Instant::now();
             jni_refresh_ime_height();
         }
-        game_app.poll_events(Some(Duration::from_millis(8)), |event| match event {
+        // While paused the engine is not drawing, so the pump does not need to spin: a long wait
+        // still wakes immediately for Resume, input or Destroy.
+        let poll_wait = if ramen::platform::android::paused() {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(8)
+        };
+        game_app.poll_events(Some(poll_wait), |event| match event {
             PollEvent::Main(main_event) => match main_event {
                 // Init/Resume/Start all mean the surface is (re)available, which is also what
                 // happens when the user comes back from the home screen.
@@ -1248,8 +1293,6 @@ pub fn android_entry(app: AndroidApp) {
                 | android_activity::MainEvent::Resume { .. }
                 | android_activity::MainEvent::GainedFocus
                 | android_activity::MainEvent::Start => {
-                    ramen::platform::android::set_paused(false);
-                    crate::game::audio::set_output_paused(false);
                     publish_window(&game_app);
                     if let Some(window) = game_app.native_window() {
                         // The activity has given us a window: build the GL surface for it now, while
@@ -1260,6 +1303,12 @@ pub fn android_entry(app: AndroidApp) {
                             crate::render::opengl::egl::attach_surface(ptr);
                         }
                         android::push_resize(window.width() as u16, window.height() as u16);
+                        // Only wake the engine once it has somewhere to draw. Resuming before the
+                        // surface exists made the render loop spin without presenting a frame.
+                        if crate::render::opengl::egl::has_surface() {
+                            ramen::platform::android::set_paused(false);
+                            crate::game::audio::set_output_paused(false);
+                        }
                     }
                 },
                 // Going away. The surface is let go on `Pause`/`Stop` as well as on
