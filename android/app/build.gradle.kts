@@ -82,7 +82,7 @@ android {
             signingConfig = if (!keystoreProperties.isEmpty) {
                 signingConfigs.getByName("release")
             } else {
-                signingConfigs.getByName("debug")
+                null // Do not sign official release builds with a debug key.
             }
         }
     }
