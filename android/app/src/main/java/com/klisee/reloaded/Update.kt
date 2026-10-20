@@ -1,11 +1,14 @@
 package com.klisee.reloaded
 
+import android.content.pm.PackageManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
+import java.util.zip.ZipFile
 
 /**
  * Looks for a newer build on GitHub. The repository's releases are the only place a version is
@@ -16,7 +19,8 @@ object Update {
     private const val LATEST = "https://api.github.com/repos/$REPO/releases/latest"
     const val RELEASES_PAGE = "https://github.com/$REPO/releases/latest"
 
-    data class Release(val version: String, val apkUrl: String?, val pageUrl: String)
+    data class Release(val version: String, val apkUrl: String?, val pageUrl: String, val digest: String? = null)
+    internal data class Asset(val name: String, val url: String, val digest: String?)
 
     /** The newer release, or `null` when the installed build is already the latest one. */
     suspend fun check(installed: String): Result<Release?> = withContext(Dispatchers.IO) {
@@ -26,8 +30,17 @@ object Update {
             if (tag.isEmpty() || !isNewer(tag, installed)) {
                 return@runCatching null
             }
-            val apk = chooseApk(json.optJSONArray("assets"), android.os.Build.SUPPORTED_ABIS.toList())
-            Release(tag, apk, json.optString("html_url").ifEmpty { RELEASES_PAGE })
+            val assets = json.optJSONArray("assets")?.let { array ->
+                (0 until array.length()).mapNotNull { index ->
+                    val asset = array.getJSONObject(index)
+                    val name = asset.optString("name")
+                    val url = asset.optString("browser_download_url")
+                    if (name.isEmpty() || url.isEmpty()) null
+                    else Asset(name, url, asset.optString("digest").takeIf { it.isNotEmpty() })
+                }
+            }.orEmpty()
+            val apk = chooseApk(assets, android.os.Build.SUPPORTED_ABIS.toList())
+            Release(tag, apk?.url, json.optString("html_url").ifEmpty { RELEASES_PAGE }, apk?.digest)
         }
     }
 
@@ -36,19 +49,21 @@ object Update {
      * taking the first `.apk` was wrong: a 32-bit phone could download the arm64 build and Android
      * would then refuse to install it. [abis] is ordered by preference, as `SUPPORTED_ABIS` is.
      */
-    internal fun chooseApk(assets: org.json.JSONArray?, abis: List<String>): String? {
-        val apks = (0 until (assets?.length() ?: 0)).mapNotNull { index ->
-            val asset = assets!!.getJSONObject(index)
-            val name = asset.optString("name")
-            val url = asset.optString("browser_download_url")
-            if (name.endsWith(".apk", true) && url.isNotEmpty()) name.lowercase() to url else null
+    internal fun chooseApk(assets: List<Asset>, abis: List<String>): Asset? {
+        val apks = assets.filter { it.name.endsWith(".apk", true) && it.url.isNotEmpty() }
+        // 1. The build made for an ABI this device prefers (SUPPORTED_ABIS is ordered).
+        for (abi in abis.map { it.lowercase() }) {
+            apks.firstOrNull { it.name.lowercase().endsWith("-$abi.apk") }?.let { return it }
         }
-        val forDevice = abis.map { it.lowercase() }.firstNotNullOfOrNull { abi ->
-            apks.firstOrNull { it.first.endsWith("-$abi.apk") }?.second
+        // 2. The universal build, which carries every ABI.
+        apks.firstOrNull { it.name.lowercase().endsWith("-universal.apk") }?.let { return it }
+        // 3. A single, untagged APK (the way older releases shipped). An APK tagged with a
+        //    different ABI is never chosen: installing it would fail, or run the wrong binary.
+        val knownAbis = setOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86", "riscv64")
+        return apks.firstOrNull { asset ->
+            val stem = asset.name.lowercase().removeSuffix(".apk")
+            knownAbis.none { stem.endsWith("-$it") } && !stem.endsWith("-universal")
         }
-        return forDevice
-            ?: apks.firstOrNull { it.first.endsWith("-universal.apk") }?.second
-            ?: apks.firstOrNull()?.second
     }
 
     /**
@@ -58,7 +73,7 @@ object Update {
      * apart from a download that has died. Everything that happens is also written to the log, since
      * the failure used to be swallowed and the app simply opened the browser as if nothing was wrong.
      */
-    suspend fun download(url: String, target: File, onProgress: (Long, Long) -> Unit): Result<File> = withContext(Dispatchers.IO) {
+    suspend fun download(url: String, target: File, expectedDigest: String?, onProgress: (Long, Long) -> Unit): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             val connection = open(url)
             connection.connect()
@@ -66,6 +81,7 @@ object Update {
             val total = connection.contentLengthLong
             trace("update: descarga $code, $total bytes desde $url")
             if (code !in 200..299) error("La descarga respondio $code.")
+            val sha = MessageDigest.getInstance("SHA-256")
             connection.inputStream.use { input ->
                 target.outputStream().use { output ->
                     val buffer = ByteArray(64 * 1024)
@@ -74,11 +90,18 @@ object Update {
                         val read = input.read(buffer)
                         if (read < 0) break
                         output.write(buffer, 0, read)
+                        sha.update(buffer, 0, read)
                         written += read
                         onProgress(written, total)
                     }
                     trace("update: descargados $written bytes")
                 }
+            }
+            val actual = "sha256:" + sha.digest().joinToString("") { "%02x".format(it) }
+            trace("update: sha256 $actual")
+            if (!expectedDigest.isNullOrBlank() && !expectedDigest.equals(actual, ignoreCase = true)) {
+                target.delete()
+                error("El archivo descargado no coincide con el de la release (posible corrupcion).")
             }
             target
         }.onFailure { trace("update: FALLO la descarga: ${it::class.java.simpleName}: ${it.message}") }
@@ -126,6 +149,30 @@ object Update {
  * been granted there is nothing to open - so that case is reported instead of failing quietly.
  */
 fun installUpdate(context: android.content.Context, apk: File): String? {
+    val pm = context.packageManager
+    // Never hand an arbitrary file to the installer: check it is this app, newer, built for this
+    // device and signed with the same key. Android would reject most of these anyway, but the user
+    // deserves a clear reason instead of a bare failure, and a wrong-ABI APK must never be offered.
+    val archive = runCatching { pm.getPackageArchiveInfo(apk.path, PackageManager.GET_SIGNING_CERTIFICATES) }.getOrNull()
+        ?: return "El APK descargado no se puede leer."
+    if (archive.packageName != context.packageName) return "Ese APK no es Pokemon Reloaded."
+    val installedCode = runCatching { pm.getPackageInfo(context.packageName, 0).longVersionCode }.getOrDefault(0L)
+    if (archive.longVersionCode < installedCode) return "Ese APK es mas viejo que el que tienes instalado."
+    val deviceAbis = android.os.Build.SUPPORTED_ABIS.toSet()
+    val forThisDevice = runCatching {
+        ZipFile(apk).use { zip ->
+            zip.entries().asSequence().any { entry ->
+                entry.name.startsWith("lib/") && entry.name.endsWith(".so") &&
+                    entry.name.removePrefix("lib/").substringBefore('/') in deviceAbis
+            }
+        }
+    }.getOrDefault(false)
+    if (!forThisDevice) return "Ese APK no trae una version para la arquitectura de este movil."
+    val installedSigners = signers(runCatching { pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES) }.getOrNull())
+    val archiveSigners = signers(archive)
+    if (installedSigners != null && archiveSigners != null && installedSigners != archiveSigners) {
+        return "Ese APK no esta firmado con la misma clave que la app instalada."
+    }
     // Without this Android will not open an installer for a file from this app, and it fails with
     // nothing to see. Sending the user straight to the switch is the only way to get anywhere.
     if (!context.packageManager.canRequestPackageInstalls()) {
@@ -140,6 +187,7 @@ fun installUpdate(context: android.content.Context, apk: File): String? {
     }
     return runCatching {
         val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.updates", apk)
+        // (signature/ABI/version already verified above)
         val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
             .setDataAndType(uri, "application/vnd.android.package-archive")
             .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -147,3 +195,7 @@ fun installUpdate(context: android.content.Context, apk: File): String? {
         null
     }.getOrElse { "No pude abrir el instalador: ${it::class.java.simpleName}: ${it.message}" }
 }
+
+/** The certificate(s) an APK is signed with, or null when the system does not report them. */
+private fun signers(info: android.content.pm.PackageInfo?): Set<List<Byte>>? =
+    info?.signingInfo?.apkContentsSigners?.map { it.toByteArray().toList() }?.toSet()

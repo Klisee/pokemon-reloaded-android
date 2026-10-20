@@ -129,7 +129,7 @@ fun App(repo: GameRepository, prefs: Preferences) {
                     total = 0
                     problem = null
                     scope.launch {
-                        val result = Update.download(url, java.io.File(context.cacheDir, "update.apk")) { done, size ->
+                        val result = Update.download(url, java.io.File(context.cacheDir, "update.apk"), release.digest) { done, size ->
                             written = done
                             total = size
                         }
