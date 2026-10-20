@@ -121,7 +121,10 @@ cd ../../android
 ./build.sh :app:assembleRelease
 ./build.sh :app:assembleRelease -PtargetAbi=armeabi-v7a
 ./build.sh :app:assembleRelease -PtargetAbi=x86_64
+./build.sh :app:assembleRelease -PtargetAbi=universal
 ```
+
+La **universal** lleva las tres arquitecturas y sirve de comodín, a costa de pesar unos 10 MB más.
 
 El workflow `.github/workflows/build-apks.yml` compila las tres en CI al publicar un tag.
 

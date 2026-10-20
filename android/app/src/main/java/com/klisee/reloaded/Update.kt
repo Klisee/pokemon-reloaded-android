@@ -26,15 +26,29 @@ object Update {
             if (tag.isEmpty() || !isNewer(tag, installed)) {
                 return@runCatching null
             }
-            val apk = json.optJSONArray("assets")?.let { assets ->
-                (0 until assets.length())
-                    .map { assets.getJSONObject(it) }
-                    .firstOrNull { it.optString("name").endsWith(".apk", ignoreCase = true) }
-                    ?.optString("browser_download_url")
-                    ?.takeIf { it.isNotEmpty() }
-            }
+            val apk = chooseApk(json.optJSONArray("assets"), android.os.Build.SUPPORTED_ABIS.toList())
             Release(tag, apk, json.optString("html_url").ifEmpty { RELEASES_PAGE })
         }
+    }
+
+    /**
+     * Picks the APK built for this device. Releases ship one per ABI, plus a universal fallback, so
+     * taking the first `.apk` was wrong: a 32-bit phone could download the arm64 build and Android
+     * would then refuse to install it. [abis] is ordered by preference, as `SUPPORTED_ABIS` is.
+     */
+    internal fun chooseApk(assets: org.json.JSONArray?, abis: List<String>): String? {
+        val apks = (0 until (assets?.length() ?: 0)).mapNotNull { index ->
+            val asset = assets!!.getJSONObject(index)
+            val name = asset.optString("name")
+            val url = asset.optString("browser_download_url")
+            if (name.endsWith(".apk", true) && url.isNotEmpty()) name.lowercase() to url else null
+        }
+        val forDevice = abis.map { it.lowercase() }.firstNotNullOfOrNull { abi ->
+            apks.firstOrNull { it.first.endsWith("-$abi.apk") }?.second
+        }
+        return forDevice
+            ?: apks.firstOrNull { it.first.endsWith("-universal.apk") }?.second
+            ?: apks.firstOrNull()?.second
     }
 
     /**

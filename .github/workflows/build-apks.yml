@@ -29,6 +29,8 @@ jobs:
             rust: armv7-linux-androideabi
           - abi: x86_64
             rust: x86_64-linux-android
+          - abi: universal
+            rust: universal
 
     steps:
       - name: Check out source
@@ -56,15 +58,29 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-      - name: Install Rust target and cargo-ndk
+      - name: Install Rust targets and cargo-ndk
         shell: bash
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --target "${{ matrix.rust }}"
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          if [ "${{ matrix.abi }}" = "universal" ]; then
+            rustup target add --toolchain "$RUST_VERSION" \
+              aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          else
+            rustup target add --toolchain "$RUST_VERSION" "${{ matrix.rust }}"
+          fi
           cargo +"$RUST_VERSION" install cargo-ndk --version "$CARGO_NDK_VERSION" --locked
 
       - name: Build native engine
         working-directory: src/OpenGMK
-        run: cargo +"$RUST_VERSION" ndk -t "${{ matrix.abi }}" --platform 29 build -p gm8emulator --release
+        shell: bash
+        run: |
+          if [ "${{ matrix.abi }}" = "universal" ]; then
+            for a in arm64-v8a armeabi-v7a x86_64; do
+              cargo +"$RUST_VERSION" ndk -t "$a" --platform 29 build -p gm8emulator --release
+            done
+          else
+            cargo +"$RUST_VERSION" ndk -t "${{ matrix.abi }}" --platform 29 build -p gm8emulator --release
+          fi
 
       - name: Build release APK
         working-directory: android
@@ -73,12 +89,18 @@ jobs:
       - name: Verify architecture
         shell: bash
         run: |
-          SO="src/OpenGMK/target/${{ matrix.rust }}/release/libgm8emulator.so"
           APK="$(ls android/app/build/outputs/apk/release/pokemon-reloaded-*-${{ matrix.abi }}.apk)"
-          test -s "$SO"
           test -s "$APK"
-          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h "$SO"
-          unzip -l "$APK" | grep "lib/${{ matrix.abi }}/libgm8emulator.so"
+          if [ "${{ matrix.abi }}" = "universal" ]; then
+            for a in arm64-v8a armeabi-v7a x86_64; do
+              unzip -l "$APK" | grep "lib/$a/libgm8emulator.so"
+            done
+          else
+            SO="src/OpenGMK/target/${{ matrix.rust }}/release/libgm8emulator.so"
+            test -s "$SO"
+            "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h "$SO"
+            unzip -l "$APK" | grep "lib/${{ matrix.abi }}/libgm8emulator.so"
+          fi
 
       - name: Upload APK and native library
         uses: actions/upload-artifact@v4
@@ -88,4 +110,4 @@ jobs:
           retention-days: 14
           path: |
             android/app/build/outputs/apk/release/*.apk
-            src/OpenGMK/target/${{ matrix.rust }}/release/libgm8emulator.so
+            src/OpenGMK/target/**/libgm8emulator.so

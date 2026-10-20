@@ -12,31 +12,40 @@ val keystoreProperties = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 
-// One APK per architecture. arm64-v8a is the default; the others are built with
+// One APK per architecture, plus a universal one with all of them:
+//   ./build.sh assembleRelease                         (arm64-v8a, the default)
 //   ./build.sh assembleRelease -PtargetAbi=armeabi-v7a
 //   ./build.sh assembleRelease -PtargetAbi=x86_64
-// after building the same ABI with cargo-ndk (the error below prints the exact command).
+//   ./build.sh assembleRelease -PtargetAbi=universal
+// after building the same ABIs with cargo-ndk (the error below prints the exact commands).
 val appVersion = "0.3.5"
+val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val rustTargetOf = mapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "armeabi-v7a" to "armv7-linux-androideabi",
+    "x86_64" to "x86_64-linux-android",
+)
 val targetAbi = providers.gradleProperty("targetAbi").orElse("arm64-v8a").get()
-val rustTarget = when (targetAbi) {
-    "arm64-v8a" -> "aarch64-linux-android"
-    "armeabi-v7a" -> "armv7-linux-androideabi"
-    "x86_64" -> "x86_64-linux-android"
-    else -> error("ABI no soportada: $targetAbi")
+val universal = targetAbi == "universal"
+require(universal || targetAbi in allAbis) { "ABI no soportada: $targetAbi" }
+val buildAbis = if (universal) allAbis else listOf(targetAbi)
+val emulatorSos = buildAbis.associateWith { abi ->
+    rootProject.file("../src/OpenGMK/target/${rustTargetOf.getValue(abi)}/release/libgm8emulator.so")
 }
-val emulatorSo = rootProject.file("../src/OpenGMK/target/$rustTarget/release/libgm8emulator.so")
-val jniLibDir = layout.projectDirectory.dir("src/main/jniLibs/$targetAbi")
 val copyEmulatorSo by tasks.registering {
-    inputs.file(emulatorSo).withPropertyName("emulatorSo").optional()
-    outputs.dir(jniLibDir)
+    inputs.files(emulatorSos.values.map { it }).optional()
+    outputs.dirs(buildAbis.map { layout.projectDirectory.dir("src/main/jniLibs/$it") })
     doLast {
-        if (!emulatorSo.isFile) error("falta ${emulatorSo}; compila con: cargo ndk -t $targetAbi --platform 29 build -p gm8emulator --release")
-        val magic = emulatorSo.inputStream().use { it.readNBytes(4) }
-        if (magic.size < 4 || magic[0] != 0x7F.toByte() || magic[1] != 'E'.code.toByte() || magic[2] != 'L'.code.toByte() || magic[3] != 'F'.code.toByte()) {
-            error("${emulatorSo} no es un ELF valido (¿quedó a cero tras un corte?)")
+        for (abi in buildAbis) {
+            val so = emulatorSos.getValue(abi)
+            if (!so.isFile) error("falta $so; compila con: cargo ndk -t $abi --platform 29 build -p gm8emulator --release")
+            val magic = so.inputStream().use { it.readNBytes(4) }
+            if (magic.size < 4 || magic[0] != 0x7F.toByte() || magic[1] != 'E'.code.toByte() || magic[2] != 'L'.code.toByte() || magic[3] != 'F'.code.toByte()) {
+                error("$so no es un ELF valido (¿quedó a cero tras un corte?)")
+            }
+            val out = layout.projectDirectory.dir("src/main/jniLibs/$abi").asFile.apply { mkdirs() }.resolve("libgm8emulator.so")
+            so.copyTo(out, overwrite = true)
         }
-        val out = jniLibDir.asFile.apply { mkdirs() }.resolve("libgm8emulator.so")
-        emulatorSo.copyTo(out, overwrite = true)
     }
 }
 
@@ -50,7 +59,7 @@ android {
         targetSdk = 36
         versionCode = 11
         versionName = appVersion
-        ndk { abiFilters += targetAbi }
+        ndk { abiFilters += buildAbis }
     }
 
     signingConfigs {
@@ -95,7 +104,7 @@ androidComponents {
     onVariants { variant ->
         if (variant.buildType != "release") return@onVariants
         variant.outputs.forEach { output ->
-            output.outputFileName.set("pokemon-reloaded-$appVersion-$targetAbi.apk")
+            output.outputFileName.set("pokemon-reloaded-$appVersion-${if (universal) "universal" else targetAbi}.apk")
         }
     }
 }
