@@ -3,4 +3,11 @@
     <style name="Theme.Reloaded" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
     </style>
+
+    <!-- The native game window: fullscreen and black from the first frame, so switching from the
+         Compose launcher does not flash a light default window. -->
+    <style name="Theme.Reloaded.Game" parent="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>

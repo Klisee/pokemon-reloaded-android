@@ -36,7 +36,7 @@
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|uiMode"
             android:screenOrientation="sensorLandscape"
             android:windowSoftInputMode="adjustNothing|stateAlwaysHidden"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            android:theme="@style/Theme.Reloaded.Game">
             <meta-data
                 android:name="android.app.lib_name"
                 android:value="gm8emulator" />

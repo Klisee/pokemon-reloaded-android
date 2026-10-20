@@ -2,6 +2,9 @@ package com.klisee.reloaded
 
 import android.app.NativeActivity
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
@@ -34,6 +37,40 @@ private const val TAG = "ReloadedIme"
 class GameActivity : NativeActivity() {
     private val touchFeedback by lazy { TouchFeedback(this) }
     private val touchPreferences by lazy { Preferences(this) }
+    private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+    private var focusRequest: AudioFocusRequest? = null
+
+    /**
+     * Another app took the audio focus (a call, a notification, a video): the game pauses its output
+     * instead of talking over it, and resumes when the focus comes back.
+     */
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> nativeAudioFocus(true)
+            AudioManager.AUDIOFOCUS_GAIN -> nativeAudioFocus(false)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+            )
+            .setOnAudioFocusChangeListener(focusListener)
+            .build()
+        focusRequest = request
+        audioManager.requestAudioFocus(request)
+    }
+
+    override fun onPause() {
+        focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        focusRequest = null
+        super.onPause()
+    }
 
     /** The 1x1 view the system keyboard types into. What it receives goes straight to the engine. */
     private var imeAnchor: EditText? = null
@@ -172,6 +209,9 @@ class GameActivity : NativeActivity() {
             anchor.clearFocus()
         }
     }
+
+    /** Called from the audio focus listener: true pauses the game's output. */
+    external fun nativeAudioFocus(lost: Boolean)
 
     external fun nativeCommitText(text: String)
     external fun nativeBackspace()

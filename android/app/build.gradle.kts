@@ -55,7 +55,8 @@ android {
 
     defaultConfig {
         applicationId = "com.klisee.reloaded"
-        minSdk = 29
+        // AAudio exists since Android 8 (API 26), which is the real floor of the engine.
+        minSdk = 26
         targetSdk = 36
         versionCode = 11
         versionName = appVersion

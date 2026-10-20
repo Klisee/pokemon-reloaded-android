@@ -1,6 +1,8 @@
 package com.klisee.reloaded
 
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -153,11 +155,19 @@ fun installUpdate(context: android.content.Context, apk: File): String? {
     // Never hand an arbitrary file to the installer: check it is this app, newer, built for this
     // device and signed with the same key. Android would reject most of these anyway, but the user
     // deserves a clear reason instead of a bare failure, and a wrong-ABI APK must never be offered.
-    val archive = runCatching { pm.getPackageArchiveInfo(apk.path, PackageManager.GET_SIGNING_CERTIFICATES) }.getOrNull()
+    // GET_SIGNING_CERTIFICATES and longVersionCode arrived in API 28; the app runs from API 26.
+    val packageFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        PackageManager.GET_SIGNING_CERTIFICATES
+    } else {
+        @Suppress("DEPRECATION") PackageManager.GET_SIGNATURES
+    }
+    val archive = runCatching { pm.getPackageArchiveInfo(apk.path, packageFlags) }.getOrNull()
         ?: return "El APK descargado no se puede leer."
     if (archive.packageName != context.packageName) return "Ese APK no es Pokemon Reloaded."
-    val installedCode = runCatching { pm.getPackageInfo(context.packageName, 0).longVersionCode }.getOrDefault(0L)
-    if (archive.longVersionCode < installedCode) return "Ese APK es mas viejo que el que tienes instalado."
+    val installedInfo = runCatching { pm.getPackageInfo(context.packageName, packageFlags) }.getOrNull()
+    if (versionCode(archive) < (installedInfo?.let(::versionCode) ?: 0L)) {
+        return "Ese APK es mas viejo que el que tienes instalado."
+    }
     val deviceAbis = android.os.Build.SUPPORTED_ABIS.toSet()
     val forThisDevice = runCatching {
         ZipFile(apk).use { zip ->
@@ -168,7 +178,7 @@ fun installUpdate(context: android.content.Context, apk: File): String? {
         }
     }.getOrDefault(false)
     if (!forThisDevice) return "Ese APK no trae una version para la arquitectura de este movil."
-    val installedSigners = signers(runCatching { pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES) }.getOrNull())
+    val installedSigners = signers(installedInfo)
     val archiveSigners = signers(archive)
     if (installedSigners != null && archiveSigners != null && installedSigners != archiveSigners) {
         return "Ese APK no esta firmado con la misma clave que la app instalada."
@@ -197,5 +207,19 @@ fun installUpdate(context: android.content.Context, apk: File): String? {
 }
 
 /** The certificate(s) an APK is signed with, or null when the system does not report them. */
-private fun signers(info: android.content.pm.PackageInfo?): Set<List<Byte>>? =
-    info?.signingInfo?.apkContentsSigners?.map { it.toByteArray().toList() }?.toSet()
+private fun signers(info: PackageInfo?): Set<List<Byte>>? {
+    if (info == null) return null
+    val certificates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        info.signingInfo?.apkContentsSigners
+    } else {
+        @Suppress("DEPRECATION") info.signatures
+    }
+    return certificates?.map { it.toByteArray().toList() }?.toSet()
+}
+
+private fun versionCode(info: PackageInfo): Long =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        info.longVersionCode
+    } else {
+        @Suppress("DEPRECATION") info.versionCode.toLong()
+    }

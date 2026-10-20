@@ -959,6 +959,17 @@ pub extern "system" fn Java_com_klisee_reloaded_GameActivity_nativeImeInset<'loc
     IME_SHOWN.store(height > 0, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Called from the activity when another app takes (or gives back) the audio focus, so the game's
+/// output does not talk over a call or a notification.
+#[no_mangle]
+pub extern "system" fn Java_com_klisee_reloaded_GameActivity_nativeAudioFocus<'local>(
+    _env: jni::JNIEnv<'local>,
+    _this: jni::objects::JObject<'local>,
+    lost: jni::sys::jboolean,
+) {
+    crate::game::audio::set_output_paused(lost != 0);
+}
+
 /// Whether the system keyboard is up, so it is only raised or dropped on a change.
 static IME_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
