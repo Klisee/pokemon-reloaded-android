@@ -18,7 +18,7 @@ val keystoreProperties = Properties().apply {
 //   ./build.sh assembleRelease -PtargetAbi=x86_64
 //   ./build.sh assembleRelease -PtargetAbi=universal
 // after building the same ABIs with cargo-ndk (the error below prints the exact commands).
-val appVersion = "0.3.6"
+val appVersion = "0.3.5"
 val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 val rustTargetOf = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
@@ -58,7 +58,7 @@ android {
         // AAudio exists since Android 8 (API 26), which is the real floor of the engine.
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
+        versionCode = 11
         versionName = appVersion
         ndk { abiFilters += buildAbis }
     }
