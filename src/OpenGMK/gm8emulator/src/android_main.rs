@@ -1003,6 +1003,154 @@ fn jni_refresh_ime_height() {
     });
 }
 
+/// Tells the app which room the game is in, so it can show the player's location on Discord.
+///
+/// Called from `Game::sync_overlay`, which runs wherever the game draws, so it is guarded here: the
+/// name is only produced (and only crosses JNI) when the room id actually changes.
+pub(crate) fn report_route(room_id: i32, name: impl FnOnce() -> String) {
+    use std::sync::atomic::{AtomicI32, Ordering};
+    static LAST_ROOM: AtomicI32 = AtomicI32::new(i32::MIN);
+    if LAST_ROOM.load(Ordering::Relaxed) == room_id {
+        return
+    }
+    let route = name();
+    if route.trim().is_empty() {
+        return
+    }
+    let sent = with_activity(|env, class| {
+        let route = env.new_string(route.as_str())?;
+        env.call_static_method(
+            class,
+            "onGameRoute",
+            "(ILjava/lang/String;)V",
+            &[jni::objects::JValue::Int(room_id), jni::objects::JValue::Object(&route)],
+        )?;
+        Ok(())
+    });
+    // Only remember the room once the app actually got it, so a transition (no activity yet) is
+    // retried on the next frame instead of leaving the presence stuck in the previous room.
+    if sent {
+        LAST_ROOM.store(room_id, Ordering::Relaxed);
+    }
+}
+
+/// Tells the app which character is being played, so the Rich Presence can show its head.
+///
+/// `prota` is the protagonist slot (0..9 are the base roster, 10 the custom one), `outfit` the
+/// costume and `char2` the trainer id of a custom character. Only changes cross JNI.
+pub(crate) fn report_character(prota: i32, outfit: i32, char2: i32) {
+    use std::sync::atomic::Ordering;
+    static LAST: std::sync::Mutex<Option<(i32, i32, i32)>> = std::sync::Mutex::new(None);
+    if RESET_CHARACTER.swap(false, Ordering::Relaxed) {
+        if let Ok(mut last) = LAST.lock() {
+            *last = None;
+        }
+    }
+    let changed = {
+        let Ok(last) = LAST.lock() else { return };
+        last.as_ref() != Some(&(prota, outfit, char2))
+    };
+    if !changed {
+        return
+    }
+    let sent = with_activity(|env, class| {
+        env.call_static_method(
+            class,
+            "onGameCharacter",
+            "(III)V",
+            &[
+                jni::objects::JValue::Int(prota),
+                jni::objects::JValue::Int(outfit),
+                jni::objects::JValue::Int(char2),
+            ],
+        )?;
+        Ok(())
+    });
+    if sent {
+        if let Ok(mut last) = LAST.lock() {
+            *last = Some((prota, outfit, char2));
+        }
+    }
+}
+
+/// Tells the app the trainer's nickname, so the Rich Presence can show it instead of the
+/// character's default name. Only changes cross JNI.
+pub(crate) fn report_player_name(name: &str) {
+    static LAST: std::sync::Mutex<Option<std::string::String>> = std::sync::Mutex::new(None);
+    if RESET_NAME.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(mut last) = LAST.lock() {
+            *last = None;
+        }
+    }
+    let changed = {
+        let Ok(last) = LAST.lock() else { return };
+        last.as_deref() != Some(name)
+    };
+    if !changed {
+        return
+    }
+    let sent = with_activity(|env, class| {
+        let name = env.new_string(name)?;
+        env.call_static_method(
+            class,
+            "onGamePlayerName",
+            "(Ljava/lang/String;)V",
+            &[jni::objects::JValue::Object(&name)],
+        )?;
+        Ok(())
+    });
+    if sent {
+        if let Ok(mut last) = LAST.lock() {
+            *last = Some(name.to_string());
+        }
+    }
+}
+
+/// Tells the app whether a battle is running and who is on the other side. Only changes cross JNI.
+pub(crate) fn report_battle(in_battle: bool, trainer: &str, species: i32) {
+    static LAST: std::sync::Mutex<Option<(bool, std::string::String, i32)>> = std::sync::Mutex::new(None);
+    let changed = {
+        let Ok(last) = LAST.lock() else { return };
+        if let Some((was_battle, was_trainer, was_species)) = last.as_ref() {
+            *was_battle != in_battle || was_trainer != trainer || *was_species != species
+        } else {
+            true
+        }
+    };
+    if !changed {
+        return
+    }
+    let sent = with_activity(|env, class| {
+        let trainer = env.new_string(trainer)?;
+        env.call_static_method(
+            class,
+            "onGameBattle",
+            "(ZLjava/lang/String;I)V",
+            &[
+                jni::objects::JValue::Bool(in_battle as u8),
+                jni::objects::JValue::Object(&trainer),
+                jni::objects::JValue::Int(species),
+            ],
+        )?;
+        Ok(())
+    });
+    if sent {
+        if let Ok(mut last) = LAST.lock() {
+            *last = Some((in_battle, trainer.to_string(), species));
+        }
+    }
+}
+
+static RESET_CHARACTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RESET_NAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Forgets the last reported player so the next room (the intro chat) reports it again even when
+/// it is the same character as the previous game.
+pub(crate) fn reset_player_reports() {
+    RESET_CHARACTER.store(true, std::sync::atomic::Ordering::Relaxed);
+    RESET_NAME.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The activity's class, held for the life of the process.
 ///
 /// It has to be looked up through the activity's own class loader: `FindClass` would look on the
@@ -1012,11 +1160,11 @@ fn jni_refresh_ime_height() {
 static ACTIVITY_CLASS: std::sync::OnceLock<jni::objects::GlobalRef> = std::sync::OnceLock::new();
 
 /// Attaches this thread and runs `f` with the activity's class.
-fn with_activity(f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JClass) -> jni::errors::Result<()>) {
+fn with_activity(f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JClass) -> jni::errors::Result<()>) -> bool {
     let ctx = ndk_context::android_context();
-    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return };
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return false };
     // Permanent: the thread stays attached, and attaching on every call would only add work.
-    let Ok(mut env) = vm.attach_current_thread_permanently() else { return };
+    let Ok(mut env) = vm.attach_current_thread_permanently() else { return false };
     if ACTIVITY_CLASS.get().is_none() {
         let loaded = (|| -> jni::errors::Result<jni::objects::GlobalRef> {
             let context = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
@@ -1036,12 +1184,12 @@ fn with_activity(f: impl FnOnce(&mut jni::JNIEnv, &jni::objects::JClass) -> jni:
             Ok(global) => {
                 let _ = ACTIVITY_CLASS.set(global);
             },
-            Err(_) => return,
+            Err(_) => return false,
         }
     }
-    let Some(global) = ACTIVITY_CLASS.get() else { return };
+    let Some(global) = ACTIVITY_CLASS.get() else { return false };
     let class = unsafe { jni::objects::JClass::from_raw(global.as_obj().as_raw()) };
-    let _ = f(&mut env, &class);
+    f(&mut env, &class).is_ok()
 }
 
 /// The `ANativeWindow` whose reference this process owns, if any.
@@ -1386,7 +1534,7 @@ use std::{
 /// Where the app looks for `game.zip`, most specific first. The first two are the app's own
 /// storage and need no permissions; the last one is shared storage and may need one.
 const ZIP_NAME: &str = "game.zip";
-const PACKAGE_DIR: &str = "com.klisee.reloaded";
+pub(crate) const PACKAGE_DIR: &str = "com.klisee.reloaded";
 
 /// Free bytes on the filesystem containing `path`, or `None` if it can't be queried.
 fn free_bytes_on(path: &Path) -> Option<u64> {

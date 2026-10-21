@@ -22,6 +22,8 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.klisee.reloaded.discord.DiscordRpcManager
+import com.klisee.reloaded.discord.DiscordRpcService
 
 /**
  * The emulator activity: a plain `NativeActivity` (that is what loads `libgm8emulator.so`),
@@ -99,6 +101,14 @@ class GameActivity : NativeActivity() {
         if (Preferences(applicationContext).keepScreenOn) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+        // Mantiene a Discord al tanto de la ruta mientras el juego está abierto.
+        DiscordRpcManager.init(applicationContext)
+        Preferences(applicationContext).writeGameLanguage(filesDir)
+        DiscordRpcManager.setLauncherScreen(null)
+        com.klisee.reloaded.discord.RoomNames.load(applicationContext)
+        if (Preferences(applicationContext).discordEnabled) {
+            runCatching { DiscordRpcService.start(applicationContext) }
+        }
         installImeAnchor()
         watchImeHeight()
         hideSystemBars()
@@ -106,6 +116,8 @@ class GameActivity : NativeActivity() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        // El motor terminar la actividad es lo que cierra la sesión; pasar a segundo plano no.
+        if (isFinishing) runCatching { DiscordRpcService.stop(applicationContext) }
         super.onDestroy()
     }
 
@@ -274,6 +286,58 @@ class GameActivity : NativeActivity() {
                     activity.reportImeHeight(activity.currentImeHeight())
                 }
             }
+        }
+
+        /**
+         * Llamado desde el motor (JNI) al entrar en otra sala. `route` es el nombre crudo, p. ej.
+         * `rmRuta1`; se deja legible antes de mandarlo a Discord.
+         */
+        @JvmStatic
+        fun onGameRoute(@Suppress("UNUSED_PARAMETER") roomId: Int, route: String?) {
+            val raw = route?.lowercase().orEmpty()
+            val noPlayer = raw.startsWith("inicio") || raw.startsWith("select") || raw.startsWith("intro")
+            val newGame = raw.startsWith("select") || raw.startsWith("charla") || raw.startsWith("intro")
+            if (noPlayer) DiscordRpcManager.clearPlayer()
+            val newGameText = if (DiscordRpcManager.isEnglish()) "Starting a new game" else "Iniciando una nueva partida"
+            DiscordRpcManager.setRoute(
+                if (newGame) newGameText
+                else (com.klisee.reloaded.discord.RoomNames.display(route) ?: prettyRoute(route))
+                    ?.let { com.klisee.reloaded.discord.RoomNames.clean(it) },
+            )
+        }
+
+        /** Protagonist slot (10 = custom), costume and custom trainer id, reported by the engine. */
+        @JvmStatic
+        fun onGameCharacter(prota: Int, outfit: Int, char2: Int) {
+            DiscordRpcManager.setCharacter(prota, outfit, char2)
+        }
+
+        /** The trainer's nickname, as typed by the player. */
+        @JvmStatic
+        fun onGamePlayerName(name: String?) {
+            DiscordRpcManager.setPlayerName(name)
+        }
+
+        /** Battle state, the opponent's name (empty when wild) and the wild species id. */
+        @JvmStatic
+        fun onGameBattle(inBattle: Boolean, trainer: String?, species: Int) {
+            DiscordRpcManager.setBattle(inBattle, trainer, species)
+        }
+
+        /** `rmRuta1` / `Room_PuebloPaleta` -> `Ruta 1` / `Pueblo Paleta`. */
+        private fun prettyRoute(raw: String?): String? {
+            val value = raw?.trim().orEmpty()
+            if (value.isEmpty()) return null
+            var name = value
+            for (prefix in listOf("room_", "room", "rm_", "rm")) {
+                if (name.startsWith(prefix, ignoreCase = true)) {
+                    name = name.substring(prefix.length)
+                    break
+                }
+            }
+            name = name.trim('_', ' ').replace('_', ' ')
+            if (name.isEmpty()) return value
+            return name.replace(Regex("(?<=[A-Za-zÁÉÍÓÚáéíóúÑñ])(?=\\d)"), " ").trim()
         }
     }
 }

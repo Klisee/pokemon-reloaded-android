@@ -8,7 +8,7 @@ enum class TouchProfile(val id: String, val title: String, val description: Stri
     CHARACTER("character", "Personaje", "Selección de personaje. Las flechas originales siguen al personaje; al editarlas, quedan en la posición elegida."),
     CHOICE("choice", "Opciones", "Joystick y Z/X para responder las listas de opciones."),
     SAFARI("safari", "Safari", "Controles de captura en la Zona Safari."),
-    MENU_NAV("menu_nav", "Navegación", "Mochila y listas: joystick, X y gestos táctiles."),
+    MENU_NAV("menu_nav", "Navegación", "Mochila y listas: joystick, X, Z y gestos táctiles."),
     MENU("menu", "Menús y caja", "Toque directo: este modo no muestra botones superpuestos."),
 }
 
@@ -47,7 +47,7 @@ object TouchLayouts {
         TouchControlSpec("t", "T", 0.588f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "t.png", aspect = 1.000000f),
         TouchControlSpec("l", "L", 0.660f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "l.png", aspect = 1.000000f),
         TouchControlSpec("p", "P", 0.732f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "p.png", aspect = 1.000000f),
-        TouchControlSpec("z", "Z", 0.865f, 0.851f, 0.033f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.CHOICE), "z.png", aspect = 1.000000f),
+        TouchControlSpec("z", "Z", 0.865f, 0.851f, 0.033f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.CHOICE, TouchProfile.MENU_NAV), "z.png", aspect = 1.000000f),
         TouchControlSpec("x", "X", 0.933f, 0.700f, 0.033f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.CHOICE, TouchProfile.MENU_NAV), "x.png", aspect = 1.000000f),
         TouchControlSpec("c", "C", 0.797f, 0.700f, 0.033f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE), "c.png", aspect = 1.000000f),
         TouchControlSpec("v", "V", 0.865f, 0.549f, 0.033f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE), "v.png", aspect = 1.000000f),

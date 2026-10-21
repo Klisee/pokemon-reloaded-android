@@ -2769,11 +2769,17 @@ impl RendererTrait for RendererImpl {
             let mut prev_read_fbo: GLint = 0;
             self.gl.GetIntegerv(gl::READ_FRAMEBUFFER_BINDING, &mut prev_read_fbo);
 
-            // bind texture fbo
-            self.gl.BindFramebuffer(
-                gl::READ_FRAMEBUFFER,
-                self.fbo_ids[rect.atlas_id as usize].expect("Trying to dump nonexistent sprite"),
-            );
+            // bind texture fbo (the atlas may have been recreated during a scene change)
+            let Some(fbo) = self.fbo_ids.get(rect.atlas_id as usize).and_then(|fbo| *fbo) else {
+                return Box::new([])
+            };
+            self.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, fbo);
+
+            // An incomplete framebuffer makes ReadPixels undefined and can stall the driver.
+            if self.gl.CheckFramebufferStatus(gl::READ_FRAMEBUFFER) != gl::FRAMEBUFFER_COMPLETE {
+                self.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, prev_read_fbo as GLuint);
+                return Box::new([])
+            }
 
             // read data
             let len = (rect.w * rect.h * 4) as usize;
@@ -2781,11 +2787,13 @@ impl RendererTrait for RendererImpl {
             data.set_len(len);
             self.gl.ReadPixels(rect.x, rect.y, rect.w, rect.h, gl::RGBA, gl::UNSIGNED_BYTE, data.as_mut_ptr().cast());
 
-            assert_eq!(self.gl.GetError(), 0);
+            // A GL error here used to panic the game thread (the screen froze). The caller handles
+            // an empty buffer instead, and the error is left for the next frame to reset.
+            let _ = self.gl.GetError();
 
             // cleanup
             self.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, prev_read_fbo as GLuint);
-            assert_eq!(self.gl.GetError(), 0);
+            let _ = self.gl.GetError();
 
             data.into_boxed_slice()
         }
