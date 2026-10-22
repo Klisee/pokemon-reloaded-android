@@ -394,6 +394,28 @@ fn touch_feedback() {
     });
 }
 
+// Only the PC box uses a long press; menus, text entry and info overlays keep their input.
+static BOX_TOUCH: Mutex<crate::box_touch::BoxTouch> = Mutex::new(crate::box_touch::BoxTouch::new());
+
+fn box_touch_active() -> bool {
+    use crate::touch_controls as tc;
+    tc::box_open() && tc::current_context() == tc::MENU
+        && !tc::info_window_open() && !tc::text_entry_open()
+        && !matches!(tc::modal_id(), 9673 | 9674 | 7778)
+}
+
+fn emit_box_events(events: Vec<crate::box_touch::Event>) {
+    use crate::box_touch::{Event, Point};
+    use ramen::platform::android::InputEvent;
+    for event in events {
+        android::push_input(match event {
+            Event::Move(Point(x, y)) => InputEvent::PointerMoved { x, y },
+            Event::Down(Point(x, y), button) => InputEvent::PointerDown { x, y, button },
+            Event::Up(Point(x, y), button) => InputEvent::PointerUp { x, y, button },
+        });
+    }
+}
+
 fn pointer_down(id: i32, x: f32, y: f32) {
     // A new gesture cannot inherit a swallowed Up from an Android cancellation.
     if let Some(ids)=SWALLOWED_INPUTS.lock().unwrap().as_mut(){ids.remove(&id);}
@@ -404,6 +426,14 @@ fn pointer_down(id: i32, x: f32, y: f32) {
     if crate::touch_controls::pad_active() {
         crate::touch_controls::set_pad_active(false);
         SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);
+        return
+    }
+    if box_touch_active() {
+        if BOX_TOUCH.lock().unwrap().begin(id, crate::box_touch::Point(x, y), hf, Instant::now(), crate::touch_controls::box_carrying()) {
+            android::push_input(ramen::platform::android::InputEvent::PointerMoved { x, y });
+        } else {
+            SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);
+        }
         return
     }
     let on_movement = wf > 0.0 && hf > 0.0 && crate::touch_controls::movement_hit(x / wf, y / hf, wf, hf);
@@ -461,6 +491,7 @@ fn pointer_down(id: i32, x: f32, y: f32) {
 }
 
 fn pointer_up(id: i32, x: f32, y: f32) {
+    if BOX_TOUCH.lock().unwrap().end(id, crate::box_touch::Point(x, y), Instant::now()) { return }
     if crate::touch_navigation::owns(id){
         if let Some((x,y))=crate::touch_navigation::end(id,x,y){android::push_input(ramen::platform::android::InputEvent::PointerMoved{x,y});}return
     }
@@ -509,6 +540,7 @@ const MIN_TAP: Duration = Duration::from_millis(70);
 /// was selected before. Delivering the move a hair earlier gives the game that frame.
 const HOVER_DELAY: Duration = Duration::from_millis(45);
 
+static MOUSE_PRIMARY_HELD: Mutex<Option<(f32, f32)>> = Mutex::new(None);
 static MOUSE_DOWN_AT: Mutex<Vec<(i32, Instant)>> = Mutex::new(Vec::new());
 static DELAYED_UPS: Mutex<Vec<(Instant, f32, f32)>> = Mutex::new(Vec::new());
 static DELAYED_DOWNS: Mutex<Vec<(Instant, f32, f32)>> = Mutex::new(Vec::new());
@@ -535,6 +567,7 @@ fn mouse_up(id: i32, x: f32, y: f32) {
     if deadline > Instant::now() {
         DELAYED_UPS.lock().unwrap().push((deadline, x, y));
     } else {
+        MOUSE_PRIMARY_HELD.lock().unwrap().take();
         android::push_input(ramen::platform::android::InputEvent::PointerUp { x, y, button: 0 });
     }
 }
@@ -552,6 +585,7 @@ fn flush_delayed_mouse() {
         }
     });
     for (x, y) in downs {
+        *MOUSE_PRIMARY_HELD.lock().unwrap() = Some((x, y));
         android::push_input(ramen::platform::android::InputEvent::PointerDown { x, y, button: 0 });
     }
 
@@ -565,6 +599,7 @@ fn flush_delayed_mouse() {
         }
     });
     for (x, y) in ups {
+        MOUSE_PRIMARY_HELD.lock().unwrap().take();
         android::push_input(ramen::platform::android::InputEvent::PointerUp { x, y, button: 0 });
     }
 }
@@ -650,9 +685,19 @@ fn movement_release() {
 }
 
 fn release_touch_profile() {
+    let (box_id, box_events) = BOX_TOUCH.lock().unwrap().cancel();
+    emit_box_events(box_events);
     let held = POINTER_CONTROLS.lock().unwrap().take().unwrap_or_default();
     let mut swallowed = SWALLOWED_INPUTS.lock().unwrap();
     let ids = swallowed.get_or_insert_with(std::collections::HashSet::new);
+    if let Some(id) = box_id { ids.insert(id); }
+    // No delayed click from the old screen may leak into the newly opened box/menu.
+    DELAYED_DOWNS.lock().unwrap().clear();
+    DELAYED_UPS.lock().unwrap().clear();
+    for (id, _) in MOUSE_DOWN_AT.lock().unwrap().drain(..) { ids.insert(id); }
+    if let Some((x, y)) = MOUSE_PRIMARY_HELD.lock().unwrap().take() {
+        android::push_input(ramen::platform::android::InputEvent::PointerUp { x, y, button: 0 });
+    }
     for (id, index) in held {
         control_key_up(index);
         ids.insert(id);
@@ -744,6 +789,7 @@ fn translate(event: &InputEvent) {
                     let wheel_ptr = *WHEEL_PTR.lock().unwrap();
                     for p in motion.pointers() {
                         if SWALLOWED_INPUTS.lock().unwrap().as_ref().is_some_and(|ids|ids.contains(&p.pointer_id())){continue}
+                        if BOX_TOUCH.lock().unwrap().moved(p.pointer_id(), crate::box_touch::Point(p.x(), p.y()), Instant::now()) { continue }
                         if crate::touch_navigation::moved(p.pointer_id(),p.x(),p.y()){continue}
                         if wheel_ptr == Some(p.pointer_id()) {
                             let (w, h) = android::window_size();
@@ -1397,6 +1443,7 @@ pub fn android_entry(app: AndroidApp) {
     let mut destroying = false;
     let mut input_context = crate::touch_controls::current_context();
     let mut input_identity=crate::touch_navigation::identity();
+    let mut input_box_active = box_touch_active();
     let mut ime_check = Instant::now();
     let mut text_entry_was_open = false;
     loop {
@@ -1405,7 +1452,15 @@ pub fn android_entry(app: AndroidApp) {
         }
         let context = crate::touch_controls::current_context();
         let identity=crate::touch_navigation::identity();
-        if context!=input_context || identity!=input_identity {release_touch_profile();input_context=context;input_identity=identity;}
+        let box_active = box_touch_active();
+        if context != input_context || identity != input_identity || box_active != input_box_active {
+            release_touch_profile();
+            input_context = context;
+            input_identity = identity;
+            input_box_active = box_active;
+        }
+        let box_events = BOX_TOUCH.lock().unwrap().poll(Instant::now(), crate::touch_controls::box_carrying(), crate::touch_controls::box_resting_target());
+        emit_box_events(box_events);
         if let Some(key)=crate::touch_navigation::next_key(){tap_key(key);}
         if let Some((down,x,y))=crate::touch_navigation::next_pointer(){
             use ramen::platform::android::InputEvent;
@@ -1477,10 +1532,12 @@ pub fn android_entry(app: AndroidApp) {
                 android_activity::MainEvent::TerminateWindow { .. }
                 | android_activity::MainEvent::Pause { .. }
                 | android_activity::MainEvent::Stop => {
+                    release_touch_profile();
                     ramen::platform::android::set_paused(true);
                     crate::game::audio::set_output_paused(true);
                     unsafe { crate::render::opengl::egl::detach_surface() };
                 },
+                android_activity::MainEvent::LostFocus => { release_touch_profile(); },
                 android_activity::MainEvent::InputAvailable => {
                     if let Ok(mut iter) = game_app.input_events_iter() {
                         loop {

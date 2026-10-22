@@ -82,7 +82,7 @@ android {
             signingConfig = if (!keystoreProperties.isEmpty) {
                 signingConfigs.getByName("release")
             } else {
-                signingConfigs.getByName("debug")
+                null // Do not sign official release builds with a debug key.
             }
         }
     }
@@ -111,6 +111,7 @@ androidComponents {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")

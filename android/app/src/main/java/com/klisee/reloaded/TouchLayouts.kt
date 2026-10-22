@@ -39,6 +39,7 @@ object TouchLayouts {
         TouchControlSpec("alpha5", "5", 0.588f, 0.055f, 0.020f, setOf(TouchProfile.SAFARI), null, aspect = 1.000000f),
         TouchControlSpec("alpha6", "6", 0.660f, 0.055f, 0.020f, setOf(TouchProfile.SAFARI), null, aspect = 1.000000f),
         TouchControlSpec("alpha7", "7", 0.732f, 0.055f, 0.020f, setOf(TouchProfile.WORLD), null),
+        TouchControlSpec("alpha8", "8", 0.228f, 0.050f, 0.022f, setOf(TouchProfile.WORLD), "alpha8.png"),
         TouchControlSpec("sel_world", "SEL", 0.300f, 0.760f, 0.038f, setOf(TouchProfile.WORLD), "sel_world.png"),
         TouchControlSpec("space", "PKM", 0.300f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "space.png", aspect = 1.000000f),
         TouchControlSpec("o", "O", 0.372f, 0.145f, 0.022f, setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.SAFARI), "o.png", aspect = 1.000000f),
@@ -69,7 +70,7 @@ object TouchLayouts {
     )
     fun key(profile: TouchProfile, spec: TouchControlSpec) = "${profile.id}/${spec.id}"
     fun availableFor(profile: TouchProfile) = if (profile == TouchProfile.MENU) emptyList() else
-        controls.filter { (!it.joystick || profile in it.profiles) && !(profile == TouchProfile.WORLD && it.id.startsWith("alpha")) && (it.id != "sel_world" || profile == TouchProfile.WORLD) && (it.id != "pkmn" || profile == TouchProfile.BATTLE) }
+        controls.filter { (!it.joystick || profile in it.profiles) && !(profile == TouchProfile.WORLD && it.id in setOf("alpha1", "alpha2", "alpha3", "alpha4", "alpha5", "alpha6", "alpha7")) && (it.id != "sel_world" || profile == TouchProfile.WORLD) && (it.id != "pkmn" || profile == TouchProfile.BATTLE) }
     fun controlsFor(profile: TouchProfile, values: Map<String, TouchPlacement> = emptyMap()) =
         availableFor(profile).filter { profile in it.profiles || key(profile, it) in values }
     fun added(profile: TouchProfile, spec: TouchControlSpec) = profile !in spec.profiles

@@ -2047,6 +2047,8 @@ impl Game {
         crate::touch_controls::set_room(self.room.id);
         crate::touch_controls::set_dialogue(self.dialogue_open());
         crate::touch_controls::set_box_open(self.inside_box());
+        let (carrying, resting_target) = self.box_interaction();
+        crate::touch_controls::set_box_interaction(carrying, resting_target);
         crate::touch_controls::set_text_entry(self.text_entry_open());
         crate::touch_controls::set_picker_boxes(self.picker_boxes());
         crate::touch_controls::set_modal_open(self.modal_system() > 0);
@@ -2214,6 +2216,27 @@ impl Game {
     #[cfg(target_os = "android")]
     fn inside_box(&self) -> bool {
         self.global_number(b"ENCAJA", 0).is_some_and(|value| value != 0)
+    }
+
+    /// Read real cursor/slot state from MenuCajaControl (object 43, room 8).
+    /// Negative pkmnC values represent eggs; missing cursor data fails closed.
+    #[cfg(target_os = "android")]
+    fn box_interaction(&self) -> (bool, bool) {
+        if !self.inside_box() || self.room.id != 8 { return (false, false) }
+        let mut objects = self.room.instance_list.iter_by_object(43);
+        let Some(handle) = objects.next(&self.room.instance_list) else { return (false, false) };
+        let fields = self.room.instance_list.get(handle).fields.borrow();
+        let number = |name: &[u8]| -> Option<i32> {
+            let field = self.compiler.find_field_id(name)?;
+            match fields.get(&field)?.get(0)? {
+                gml::Value::Real(n) => Some(n.into_inner() as i32),
+                _ => None,
+            }
+        };
+        let carrying = number(b"pkmnC").is_none_or(|value| value != 0);
+        let resting = !carrying && number(b"PK").is_some_and(|value| value != 0)
+            && number(b"PKMN").is_some_and(|value| (1..=30).contains(&value));
+        (carrying, resting)
     }
 
     /// True while the game is showing its text-entry dialog, the one that draws the on-screen

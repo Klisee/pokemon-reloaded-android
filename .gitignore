@@ -35,3 +35,9 @@ android/app/src/main/jniLibs/
 
 # The built APK goes to the GitHub release, not into git.
 pokemon-reloaded-*.apk
+# Never commit private Android signing material in a contribution/PR.
+**/*.jks
+**/*.keystore
+**/*.p12
+**/*.pfx
+**/keystore.properties

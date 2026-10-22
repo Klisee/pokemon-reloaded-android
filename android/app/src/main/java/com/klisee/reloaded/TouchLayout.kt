@@ -46,6 +46,7 @@ val TOUCH_CONTROLS: List<TouchControl> = listOf(
     TouchControl("alpha3", "3", 0.444f, 0.055f),
     TouchControl("alpha5", "5", 0.516f, 0.055f),
     TouchControl("alpha7", "7", 0.588f, 0.055f),
+    TouchControl("alpha8", "8", 0.228f, 0.050f),
     TouchControl("space", "Pokemon", 0.300f, 0.145f),
     TouchControl("o", "Mochila", 0.372f, 0.145f),
     TouchControl("m", "Mega", 0.444f, 0.145f),
