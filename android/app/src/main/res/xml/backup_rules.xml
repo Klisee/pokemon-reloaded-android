@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Discord session token is sealed with a key that never leaves this device, so a backup of
+     the ciphertext is useless at best and a liability at worst: keep it out. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="discord_auth.xml" />
+    <exclude domain="root" path="app_webview" />
+</full-backup-content>

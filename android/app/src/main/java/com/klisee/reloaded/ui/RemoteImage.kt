@@ -2,9 +2,8 @@ package com.klisee.reloaded.ui
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -16,6 +15,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
@@ -25,34 +25,37 @@ import java.net.URL
  * the launcher shows, and it keeps the APK from growing another dependency.
  */
 @Composable
-fun RemoteImage(url: String, modifier: Modifier = Modifier) {
+fun RemoteImage(url: String, modifier: Modifier = Modifier, contentScale: ContentScale = ContentScale.Crop) {
     var bitmap by remember(url) { mutableStateOf<ImageBitmap?>(null) }
 
     LaunchedEffect(url) {
-        bitmap = withContext(Dispatchers.IO) {
-            runCatching {
-                val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 15_000
-                    readTimeout = 15_000
-                }
-                connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
-            }.getOrNull()
+        repeat(4) { attempt ->
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 15_000
+                        readTimeout = 15_000
+                    }
+                    connection.inputStream.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
+                }.getOrNull()
+            }
+            if (loaded != null) {
+                bitmap = loaded
+                return@LaunchedEffect
+            }
+            delay(2_000L * (attempt + 1))
         }
     }
 
     val image = bitmap
     if (image == null) {
-        // The card keeps its footprint while the picture loads, so the layout doesn't jump.
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceContainerHighest,
-            shape = MaterialTheme.shapes.extraLarge,
-            modifier = modifier,
-        ) {}
+        // Transparent: callers can draw something underneath (the app icon in the preview).
+        Spacer(modifier)
     } else {
         Image(
             bitmap = image,
             contentDescription = null,
-            contentScale = ContentScale.Crop,
+            contentScale = contentScale,
             modifier = modifier,
         )
     }

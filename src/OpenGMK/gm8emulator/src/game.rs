@@ -1937,6 +1937,112 @@ impl Game {
     pub(crate) fn sync_overlay(&self) {
         // The touch overlay tells taps from drags in the bag by knowing which room/modal it is in.
         let room_name = self.assets.rooms.get_asset(self.room.id).map(|r| r.name.to_string().to_ascii_lowercase()).unwrap_or_default();
+        // Title, character selection and the intro happen before there is a player to show. They
+        // must not report a character (the selection changes it on every key, which would upload a
+        // head each time); the chat right after selection is where the chosen player appears.
+        let no_player_room = room_name.starts_with("inicio") || room_name.starts_with("select") || room_name.starts_with("intro");
+        static LAST_NO_PLAYER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static LAST_CHAR: std::sync::Mutex<Option<(i32, i32, i32)>> = std::sync::Mutex::new(None);
+        let was_no_player = LAST_NO_PLAYER.swap(no_player_room, std::sync::atomic::Ordering::Relaxed);
+        if no_player_room && !was_no_player {
+            // Forget the previous game's player so the chat reports the new one even if it is the
+            // same character, and so the sprite is exported again.
+            crate::android_main::reset_player_reports();
+            if let Ok(mut last) = LAST_CHAR.lock() {
+                *last = None;
+            }
+        }
+        // The Discord integration shows the room the player is in; report it verbatim (original
+        // casing) and only when it changes. The closure keeps the name decode off the common path.
+        crate::android_main::report_route(self.room.id, || {
+            self.assets.rooms.get_asset(self.room.id).map(|r| r.name.to_string()).unwrap_or_default()
+        });
+        // `global.battle` is the battle *mode* (0 wild, 1 trainer, -1 outside), set by `BattleMode`,
+        // and the game never resets it when the battle ends. The actual battle is the set of
+        // instances created for it: `Pokemon1` (0, the player's active Pokémon), `Pokemon2` (4, the
+        // enemy), `Trainer1` (7) and `Trainer2` (9, the trainers in trainer battles). They are
+        // destroyed when the battle ends and recreated on every switch, hence the short grace.
+        let battle_type = self.global_number(b"battle", 0).unwrap_or(-1);
+        let battle_instances = [0, 4, 7, 9].iter().any(|&object| self.room.instance_list.count(object) > 0);
+        static LAST_BATTLE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        if battle_instances {
+            if let Ok(mut last) = LAST_BATTLE.lock() {
+                *last = Some(std::time::Instant::now());
+            }
+        }
+        let in_battle = battle_instances || {
+            let guard = LAST_BATTLE.lock().ok();
+            guard
+                .as_deref()
+                .and_then(|last| *last)
+                .map(|last| last.elapsed().as_millis() < 500)
+                .unwrap_or(false)
+        };
+        let prota = self.global_number(b"prota_index", 0).unwrap_or(-1);
+        let outfit = self.global_number(b"prota_vestuario", 0).unwrap_or(1);
+        let char2 = self.player_char2();
+        // Menu rooms (bag, map, party) destroy the player instance, so `char2` reads as -1 there.
+        // Exporting the sprite in that state did a GPU readback inside the menu and hung the game
+        // thread; the head belongs to the character and only changes in the world.
+        let player_exists = self.room.instance_list.count(14) > 0;
+        // The chat with the professor has no active `obj_Prota` (the player is drawn by the script),
+        // but `global.sprD` already holds the chosen sprite. Export from that there; menus still do
+        // not export (their room names are not the chat's and the player is absent).
+        let charla_room = room_name.starts_with("charla");
+        let can_export = !no_player_room && !in_battle && (player_exists || charla_room);
+        static LAST_EXPORT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        if !no_player_room {
+            // `LAST_CHAR` is only updated outside battle: the battle uses different sprites, and
+            // remembering them would trigger another readback right when the battle ends. It is
+            // also updated only after a successful export, so an early frame (atlas not ready)
+            // retries instead of leaving the app without a head.
+            if can_export {
+                let char_changed = LAST_CHAR.lock().map(|last| last.as_ref() != Some(&(prota, outfit, char2))).unwrap_or(false);
+                let ready_to_retry = LAST_EXPORT.lock().map(|last| {
+                    last.map(|last| last.elapsed().as_millis() >= 500).unwrap_or(true)
+                }).unwrap_or(false);
+                if char_changed && ready_to_retry {
+                    if let Ok(mut last) = LAST_EXPORT.lock() {
+                        *last = Some(std::time::Instant::now());
+                    }
+                    if self.export_player_sprite(self.player_sprite_index()) {
+                        if let Ok(mut last) = LAST_CHAR.lock() {
+                            *last = Some((prota, outfit, char2));
+                        }
+                    }
+                }
+            }
+            // After the export, so the app reads the fresh sprite instead of the previous one.
+            crate::android_main::report_character(prota, outfit, char2);
+        }
+        // The trainer's nickname (what the player typed when starting), not the character's name.
+        if !no_player_room {
+            if let Some(name) = self.global_string(b"protaname") {
+                if !name.trim().is_empty() {
+                    crate::android_main::report_player_name(name.trim());
+                }
+            }
+        }
+        // Battle state: a trainer battle carries the opponent's name, a wild one does not. The
+        // name can be in `enemigotrainer` (trainers created for the battle) or in `TRAINER_NM`
+        // (scripted rivals and gym leaders, set by their dialogue).
+        // The trainer's name is only trusted for a trainer battle (battle_type != 0); otherwise it
+        // could be a stale dialogue name.
+        let trainer = if battle_type != 0 {
+            [b"enemigotrainer".as_slice(), b"TRAINER_NM".as_slice(), b"enemigotrainer2".as_slice(), b"enemigotrainer3".as_slice()]
+                .iter()
+                .filter_map(|name| self.global_string(name))
+                .map(|name| name.trim().to_string())
+                .find(|name| !name.is_empty() && !name.eq_ignore_ascii_case("salvaje"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        crate::android_main::report_battle(
+            in_battle,
+            &trainer,
+            self.global_number(b"pkmn2", 0).unwrap_or(-1),
+        );
         crate::touch_navigation::report(self.room.id, self.modal_system(), room_name.contains("mochila") || room_name.contains("bagroom"));
         crate::touch_controls::set_room(self.room.id);
         crate::touch_controls::set_dialogue(self.dialogue_open());
@@ -1992,6 +2098,76 @@ impl Game {
             })
             .collect();
         boxes
+    }
+
+    /// The sprite the player is drawn with (the base roster and custom characters alike).
+    #[cfg(target_os = "android")]
+    fn player_sprite_index(&self) -> i32 {
+        // `obj_Prota` (object 14) is the player. Its instance id changes when a save is loaded or
+        // the room is rebuilt, so look it up by object index, not by `get_by_instid(3)`.
+        if let Some(handle) = self.room.instance_list.iter_by_object(14).next(&self.room.instance_list) {
+            let sprite = self.room.instance_list.get(handle).sprite_index.get();
+            if sprite >= 0 {
+                return sprite
+            }
+        }
+        self.global_number(b"sprD", 0).unwrap_or(-1)
+    }
+
+    /// Writes the player's current sprite to `files/rpc-player.png`, head up.
+    #[cfg(target_os = "android")]
+    fn export_player_sprite(&self, id: i32) -> bool {
+        if id < 0 {
+            return false
+        }
+        let Some(sprite) = self.assets.sprites.get_asset(id) else { return false };
+        let Some(frame) = sprite.frames.first() else { return false };
+        let pixels = self.renderer.dump_sprite(frame.atlas_ref);
+        let expected = (frame.width * frame.height * 4) as usize;
+        if pixels.len() != expected || pixels.is_empty() {
+            return false
+        }
+        let Some(image) = image::RgbaImage::from_raw(frame.width, frame.height, pixels.to_vec()) else {
+            return false
+        };
+        // The atlas already stores the sprite head-up: the readback comes out in the same order.
+        let path = format!("/data/data/{}/files/rpc-player.png", crate::android_main::PACKAGE_DIR);
+        if image.save(&path).is_ok() {
+            eprintln!("[rpc] sprite del jugador exportado: {} ({}x{})", id, frame.width, frame.height);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The custom trainer id of the player instance (`(3).char2`), or -1 for the base roster.
+    #[cfg(target_os = "android")]
+    fn player_char2(&self) -> i32 {
+        let Some(field_id) = self.compiler.find_field_id(b"char2") else {
+            return -1
+        };
+        // `char2` is a field of the `Control` object (3); fall back to the player (14).
+        for object in [3, 14] {
+            let Some(handle) = self.room.instance_list.iter_by_object(object).next(&self.room.instance_list) else {
+                continue
+            };
+            let instance = self.room.instance_list.get(handle);
+            let fields = instance.fields.borrow();
+            if let Some(crate::gml::Value::Real(value)) = fields.get(&field_id).and_then(|field| field.get(0)) {
+                return value.into_inner() as i32
+            }
+        }
+        -1
+    }
+
+    /// A string in a GML global, if the game has declared it.
+    #[cfg(target_os = "android")]
+    fn global_string(&self, name: &[u8]) -> Option<std::string::String> {
+        let field_id = self.compiler.find_field_id(name)?;
+        match self.globals.fields.get(&field_id)?.get(0)? {
+            crate::gml::Value::Str(value) => Some(value.decode_utf8().into_owned()),
+            _ => None,
+        }
     }
 
     /// Some number in a GML global, if the game has declared it.

@@ -18,7 +18,7 @@ val keystoreProperties = Properties().apply {
 //   ./build.sh assembleRelease -PtargetAbi=x86_64
 //   ./build.sh assembleRelease -PtargetAbi=universal
 // after building the same ABIs with cargo-ndk (the error below prints the exact commands).
-val appVersion = "0.3.6"
+val appVersion = "0.3.7"
 val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 val rustTargetOf = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
@@ -58,7 +58,7 @@ android {
         // AAudio exists since Android 8 (API 26), which is the real floor of the engine.
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
+        versionCode = 13
         versionName = appVersion
         ndk { abiFilters += buildAbis }
     }
@@ -122,4 +122,7 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.5.0-alpha28")
     implementation("androidx.compose.material:material-icons-extended:1.7.6")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+    // Discord Rich Presence: la conexión con el Gateway es un WebSocket.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

@@ -8,7 +8,7 @@ enum class TouchProfile(val id: String, val title: String, val description: Stri
     CHARACTER("character", "Personaje", "Selección de personaje. Las flechas originales siguen al personaje; al editarlas, quedan en la posición elegida."),
     CHOICE("choice", "Opciones", "Joystick y Z/X para responder las listas de opciones."),
     SAFARI("safari", "Safari", "Controles de captura en la Zona Safari."),
-    MENU_NAV("menu_nav", "Navegación", "Mochila y listas: joystick, Z, X y gestos táctiles."),
+    MENU_NAV("menu_nav", "Navegación", "Mochila y listas: joystick, X, Z y gestos táctiles."),
     MENU("menu", "Menús y caja", "Toque directo: este modo no muestra botones superpuestos."),
 }
 

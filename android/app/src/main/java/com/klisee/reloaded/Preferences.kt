@@ -19,6 +19,56 @@ class Preferences(context: Context) {
             prefs.edit().putBoolean("keepScreenOn", value).apply()
         }
 
+    /** Muestra en Discord que se está jugando y en qué ruta. */
+    var discordEnabled: Boolean
+        get() = prefs.getBoolean("discordEnabled", false)
+        set(value) {
+            prefs.edit().putBoolean("discordEnabled", value).apply()
+        }
+
+    /**
+     * How the trainer's name reads in "En combate contra …": -1 abbreviates the class
+     * ("E. Rubén"), 0 keeps it complete, and a positive value truncates to that many characters.
+     */
+    var trainerNameLimit: Int
+        get() = prefs.getInt("trainerNameLimit", -1)
+        set(value) {
+            prefs.edit().putInt("trainerNameLimit", value).apply()
+        }
+
+    /** The Rich Presence warning keeps appearing until this is checked. */
+    var discordWarningDismissed: Boolean
+        get() = prefs.getBoolean("discordWarningDismissed", false)
+        set(value) {
+            prefs.edit().putBoolean("discordWarningDismissed", value).apply()
+        }
+
+    /**
+     * Game language: "auto" follows the phone, "es" and "en" force one. The engine's text reader
+     * reads the game's own `data/text/config.ini`, so this is written there before launching.
+     */
+    var gameLanguage: String
+        get() = prefs.getString("gameLanguage", "auto") ?: "auto"
+        set(value) {
+            prefs.edit().putString("gameLanguage", value).apply()
+        }
+
+    fun resolvedGameLanguage(): String {
+        val mode = gameLanguage
+        if (mode == "es" || mode == "en") return mode
+        return if (java.util.Locale.getDefault().language == "es") "es" else "en"
+    }
+
+    /** Writes the game's language index (0 Spanish, 1 English) where the engine reads it. */
+    fun writeGameLanguage(filesDir: File) {
+        val file = File(filesDir, "game/data/text/config.ini")
+        val index = if (resolvedGameLanguage() == "en") 1 else 0
+        runCatching {
+            file.parentFile?.mkdirs()
+            file.writeText(" $index")
+        }
+    }
+
     /** Whether the first-run setup has been completed. */
     var onboardingDone: Boolean
         get() = prefs.getBoolean("onboardingDone", false)
@@ -123,7 +173,30 @@ class Preferences(context: Context) {
         }
 
     fun touchLayouts(): Map<String, TouchPlacement> {
-        val values = TouchLayouts.parse(prefs.getString("touchLayoutV1", TouchLayouts.HEADER).orEmpty())
+        val values = TouchLayouts.parse(prefs.getString("touchLayoutV1", TouchLayouts.HEADER).orEmpty()).toMutableMap()
+        // One-time: X joins Z on the same row, as at the start of the game. Forced on update.
+        if (!prefs.getBoolean("touchXZLayoutV1", false)) {
+            values["world/z"] = TouchPlacement(0.865f, 0.851f)
+            values["world/x"] = TouchPlacement(0.933f, 0.851f)
+            prefs.edit().putBoolean("touchXZLayoutV1", true)
+                .putString("touchLayoutV1", TouchLayouts.encode(values)).apply()
+        }
+        // One-time: the Navigation profile also gets X and Z together.
+        if (!prefs.getBoolean("touchXZMenuV1", false)) {
+            values["menu_nav/z"] = TouchPlacement(0.865f, 0.851f)
+            values["menu_nav/x"] = TouchPlacement(0.933f, 0.851f)
+            prefs.edit().putBoolean("touchXZMenuV1", true)
+                .putString("touchLayoutV1", TouchLayouts.encode(values)).apply()
+        }
+        // One-time: final default is the game's diagonal, X above-right of Z.
+        if (!prefs.getBoolean("touchXZDiagonalV1", false)) {
+            values["world/z"] = TouchPlacement(0.865f, 0.851f)
+            values["world/x"] = TouchPlacement(0.933f, 0.700f)
+            values["menu_nav/z"] = TouchPlacement(0.865f, 0.851f)
+            values["menu_nav/x"] = TouchPlacement(0.933f, 0.700f)
+            prefs.edit().putBoolean("touchXZDiagonalV1", true)
+                .putString("touchLayoutV1", TouchLayouts.encode(values)).apply()
+        }
         if (prefs.getBoolean("battleTopLayoutV1", false)) return values
         // One-time: in battle, the three buttons on the right sat on top of the party's status bars.
         // They are lined up with the three on the left; only the untouched old default moves.
