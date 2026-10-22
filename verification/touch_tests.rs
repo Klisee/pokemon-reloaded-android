@@ -38,9 +38,23 @@ fn profiles_keep_automatic_switching_and_correct_key8_in_both_visual_styles() {
     assert!(tc::is_active(idx("z")) && tc::is_active(idx("x")));
     assert!(tc::movement_active());
     assert!(!tc::is_active(eight) && !tc::is_active(idx("v")));
+    touch_navigation::report(8, -1, false);
+    tc::set_room(8);
     tc::set_box_open(true);
     assert_eq!(tc::current_context(), tc::MENU);
     assert!(!tc::is_active(idx("z")) && !tc::movement_active());
+    for room in [7,5,6] {
+        touch_navigation::report(room, -1, false);
+        tc::set_room(room);
+        assert_eq!(tc::current_context(), tc::MENU_NAV);
+        assert!(tc::is_active(idx("z")) && tc::is_active(idx("x")) && tc::movement_active());
+    }
+    touch_navigation::report(8, -1, false);
+    tc::set_room(8);
+    assert_eq!(tc::current_context(), tc::MENU);
+    tc::set_modal_id(7778);
+    assert_eq!(tc::current_context(), tc::MENU_NAV);
+    tc::set_modal_id(-1);
     tc::set_box_open(false);
     touch_navigation::report(47, -1, false);
     tc::set_room(47);
@@ -50,4 +64,15 @@ fn profiles_keep_automatic_switching_and_correct_key8_in_both_visual_styles() {
     touch_navigation::report(100, -1, false);
     tc::set_room(100);
     assert!(tc::is_active(eight));
+}
+
+#[test]
+fn small_touch_stick_motion_preserves_gamepad_deadzone() {
+    use touch_controls::{touch_stick_dirs as touch, stick_dirs as pad};
+    assert_eq!(touch(0.0,0.0),[false;4]);
+    assert_eq!(touch(0.11,0.0),[false,false,false,true]);
+    assert_eq!(touch(0.0,-0.11),[true,false,false,false]);
+    assert_eq!(touch(-0.08,0.08),[false,true,true,false]);
+    assert_eq!(touch(f32::NAN,0.0),[false;4]);
+    assert_eq!(pad(0.11,0.0),[false;4]);
 }
