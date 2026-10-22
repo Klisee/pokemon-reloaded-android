@@ -1219,11 +1219,13 @@ impl Game {
             },
             InstanceVariable::ImageIndex => {
                 instance.image_index.set(value.into());
+                instance.bbox_is_stale.set(true);
             },
             InstanceVariable::ImageSingle => {
                 let img = Real::from(value);
                 if img >= Real::from(0.0) {
                     instance.image_index.set(img);
+                    instance.bbox_is_stale.set(true);
                     instance.image_speed.set(Real::from(0.0));
                 } else {
                     instance.image_speed.set(Real::from(1.0));

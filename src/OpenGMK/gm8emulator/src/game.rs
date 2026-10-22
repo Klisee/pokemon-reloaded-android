@@ -2454,6 +2454,7 @@ impl Game {
             let instance = self.room.instance_list.get(handle);
             let new_index = instance.image_index.get() + instance.image_speed.get();
             instance.image_index.set(new_index);
+            instance.bbox_is_stale.set(true);
             let frame_count = self
                 .assets
                 .sprites
@@ -2462,6 +2463,7 @@ impl Game {
                 .unwrap_or(0.0);
             if new_index.into_inner() >= frame_count {
                 instance.image_index.set(new_index - Real::from(frame_count));
+                instance.bbox_is_stale.set(true);
                 self.run_instance_event(ev::OTHER, 7, handle, handle, None)?; // animation end event
             }
         }
@@ -3080,6 +3082,15 @@ impl Game {
                 Some(c) => c,
                 None => return false,
             };
+
+            // For sprites with per-frame colliders, an empty map is a real "no collision" frame
+            // (the open gate `spr_compuertaRetaguardia` frames 4/5). The bbox fallback below is
+            // only for sprites that never had a pixel mask, like the battle sprites.
+            if (sprite1.per_frame_colliders && collider1.data.iter().all(|&px| !px))
+                || (sprite2.per_frame_colliders && collider2.data.iter().all(|&px| !px))
+            {
+                return false;
+            }
 
             // round x and y values, and get sin and cos of each angle...
             let x1 = inst1.x.get().round();

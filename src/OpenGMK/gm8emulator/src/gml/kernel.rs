@@ -2991,6 +2991,7 @@ impl Game {
             } else if sprite.frames.len() as f64 <= instance.image_index.get().floor().into() {
                 instance.image_index.set(0.0.into());
             }
+            instance.bbox_is_stale.set(true);
 
             instance.image_speed.set(image_speed);
             Ok(Default::default())

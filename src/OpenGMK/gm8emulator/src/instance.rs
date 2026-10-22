@@ -280,14 +280,18 @@ impl Instance {
                 let y = self.y.get();
                 let xscale = self.image_xscale.get();
                 let yscale = self.image_yscale.get();
+                let (bbox_left, bbox_right, bbox_top, bbox_bottom) = match sprite.collider_at(self.image_index.get()) {
+                    Some(collider) => (collider.bbox_left, collider.bbox_right, collider.bbox_top, collider.bbox_bottom),
+                    None => (sprite.bbox_left, sprite.bbox_right, sprite.bbox_top, sprite.bbox_bottom),
+                };
                 let mut top_left_x =
-                    (x - (Real::from(sprite.origin_x) * xscale)) + (Real::from(sprite.bbox_left) * xscale);
+                    (x - (Real::from(sprite.origin_x) * xscale)) + (Real::from(bbox_left) * xscale);
                 let mut top_left_y =
-                    (y - (Real::from(sprite.origin_y) * yscale)) + (Real::from(sprite.bbox_top) * yscale);
+                    (y - (Real::from(sprite.origin_y) * yscale)) + (Real::from(bbox_top) * yscale);
                 let mut bottom_right_x =
-                    top_left_x + (Real::from(sprite.bbox_right + 1 - sprite.bbox_left) * xscale) - Real::from(1.0);
+                    top_left_x + (Real::from(bbox_right + 1 - bbox_left) * xscale) - Real::from(1.0);
                 let mut bottom_right_y =
-                    top_left_y + (Real::from(sprite.bbox_bottom + 1 - sprite.bbox_top) * yscale) - Real::from(1.0);
+                    top_left_y + (Real::from(bbox_bottom + 1 - bbox_top) * yscale) - Real::from(1.0);
 
                 // Make sure left/right and top/bottom are the right way around
                 if xscale <= Real::from(0.0) {
