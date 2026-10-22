@@ -429,7 +429,7 @@ fn pointer_down(id: i32, x: f32, y: f32) {
         return
     }
     if box_touch_active() {
-        if BOX_TOUCH.lock().unwrap().begin(id, crate::box_touch::Point(x, y), hf, Instant::now()) {
+        if BOX_TOUCH.lock().unwrap().begin(id, crate::box_touch::Point(x, y), hf, Instant::now(), crate::touch_controls::box_carrying()) {
             android::push_input(ramen::platform::android::InputEvent::PointerMoved { x, y });
         } else {
             SWALLOWED_INPUTS.lock().unwrap().get_or_insert_with(std::collections::HashSet::new).insert(id);
@@ -1311,7 +1311,7 @@ pub fn android_entry(app: AndroidApp) {
             input_identity = identity;
             input_box_active = box_active;
         }
-        let box_events = BOX_TOUCH.lock().unwrap().poll(Instant::now());
+        let box_events = BOX_TOUCH.lock().unwrap().poll(Instant::now(), crate::touch_controls::box_carrying(), crate::touch_controls::box_resting_target());
         emit_box_events(box_events);
         if let Some(key)=crate::touch_navigation::next_key(){tap_key(key);}
         if let Some((down,x,y))=crate::touch_navigation::next_pointer(){
