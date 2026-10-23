@@ -2,9 +2,7 @@
 
 [![Licencia GPL-2.0](https://img.shields.io/badge/Licencia-GPL--2.0-515050?style=for-the-badge&logo=gnu&logoColor=000000&labelColor=FFFFFF)](LICENSE)
 [![Última versión](https://img.shields.io/github/v/release/Klisee/pokemon-reloaded-android?style=for-the-badge&label=Versi%C3%B3n&labelColor=FFFFFF&color=3DDC84&logo=android&logoColor=000000)](https://github.com/Klisee/pokemon-reloaded-android/releases/latest)
-[![Descargas totales](https://img.shields.io/github/downloads/Klisee/pokemon-reloaded-android/total?style=for-the-badge&label=Descargas&labelColor=FFFFFF&color=515050&logo=github&logoColor=000000)](https://github.com/Klisee/pokemon-reloaded-android/releases)
-[![Stars](https://img.shields.io/github/stars/Klisee/pokemon-reloaded-android?style=for-the-badge&label=Stars&labelColor=FFFFFF&color=515050&logo=github&logoColor=000000)](https://github.com/Klisee/pokemon-reloaded-android/stargazers)
-[![Forks](https://img.shields.io/github/forks/Klisee/pokemon-reloaded-android?style=for-the-badge&label=Forks&labelColor=FFFFFF&color=515050&logo=github&logoColor=000000)](https://github.com/Klisee/pokemon-reloaded-android/forks)
+[![Descargas totales](https://img.shields.io/github/downloads/Klisee/pokemon-reloaded-android/total?style=for-the-badge&label=Descargas&labelColor=FFFFFF&color=1F6FEB&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0iIzAwMCIgZD0iTTUgMjBoMTR2LTJINXYyek0xOSA5aC00VjNIOXY2SDVsNyA3IDctN3oiLz48L3N2Zz4%3D)](https://github.com/Klisee/pokemon-reloaded-android/releases)
 
 Ejecuta **Pokémon Reloaded** en Android sin emulador de Windows de por medio. Lo mantiene
 [@Klisee](https://github.com/Klisee), para la comunidad.
