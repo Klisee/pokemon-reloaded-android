@@ -128,6 +128,17 @@ La **universal** lleva las tres arquitecturas y sirve de comodín, a costa de pe
 
 El workflow `.github/workflows/build-apks.yml` compila las tres en CI al publicar un tag.
 
+## Licencia
+
+Copyright (C) 2026 Klisee y colaboradores.
+
+Este proyecto se distribuye bajo la **GNU General Public License v2.0** (`GPL-2.0-only`), la misma
+licencia que OpenGMK, del que toma el motor. El texto completo está en [LICENSE](LICENSE).
+
+Los archivos originales de Pokémon Reloaded no forman parte de este repositorio ni se distribuyen
+con el APK; son obra de F3R Productions y se rigen por sus propios términos. `vendor/udon` también
+es GPL-2.0-only, y `vendor/ramen` se distribuye bajo licencia Zlib.
+
 ## Créditos
 
 - **Pokémon Reloaded** es obra de **F3R Productions**: [el blog del juego](https://pokemon-reloaded.blogspot.com/)
