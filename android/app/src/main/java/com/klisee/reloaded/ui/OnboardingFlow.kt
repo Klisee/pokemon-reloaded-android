@@ -23,8 +23,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.klisee.reloaded.Blog
 import com.klisee.reloaded.GameRepository
 import com.klisee.reloaded.Preferences
@@ -47,6 +49,7 @@ fun Onboarding(
     var keepScreenOn by remember { mutableStateOf(prefs.keepScreenOn) }
     var busy by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<Int?>(null) }
+    var installLog by remember { mutableStateOf(emptyList<String>()) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) { post = Blog.latest().getOrNull() }
@@ -55,8 +58,14 @@ fun Onboarding(
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         busy = true
+        installLog = emptyList()
+        progress = null
         scope.launch {
-            repo.import(uri) { progress = it }
+            repo.import(
+                uri,
+                onProgress = { progress = it },
+                onLog = { line -> installLog = (installLog + line).takeLast(20) },
+            )
             busy = false
             progress = null
             status = repo.status()
@@ -143,6 +152,13 @@ fun Onboarding(
             )
             if (busy) {
                 LinearWavyProgressIndicator(progress = { (progress ?: 0) / 100f }, modifier = Modifier.fillMaxWidth())
+                Text(
+                    text = installLog.takeLast(3).joinToString("\n").ifEmpty { "Comprobando el archivo…" },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 

@@ -947,7 +947,7 @@ impl RendererImpl {
 fn load_skin(gl: &gl::Gl) -> (GLuint, [Option<SkinSlot>; MAX_SKIN_SLOTS]) {
     let mut slots: [Option<SkinSlot>; MAX_SKIN_SLOTS] = [None; MAX_SKIN_SLOTS];
     // Same folder the launcher writes `controls.conf` and `layout.conf` to.
-    let dir = format!("/data/data/{}/files", "com.klisee.reloaded");
+    let dir = crate::android_main::storage_dir().to_string_lossy().into_owned();
     let mut images: Vec<(&'static str, image::RgbaImage, bool, u8, bool)> = Vec::new();
     let load = |name: &str, fallback: &str| {
         image::open(format!("{}/touch-sprites-active/{}.png", dir, name)).ok().map(|img| (img,true))
@@ -1063,7 +1063,7 @@ fn label_file(text: &str) -> String {
 /// Packs the label images the launcher left in `files/touch-labels`, one slot per label text.
 #[cfg(target_os = "android")]
 fn load_label_skin(gl: &gl::Gl) -> GLuint {
-    let dir = "/data/data/com.klisee.reloaded/files/touch-labels";
+    let dir = crate::android_main::storage_dir().join("touch-labels");
     let mut texts: Vec<&'static str> = Vec::new();
     for control in crate::touch_controls::CLASSIC_CONTROLS {
         if let crate::touch_controls::Label::Text(text) = control.label {
@@ -1074,7 +1074,7 @@ fn load_label_skin(gl: &gl::Gl) -> GLuint {
     }
     let mut images: Vec<(&'static str, image::RgbaImage)> = Vec::new();
     for text in texts {
-        if let Ok(img) = image::open(format!("{}/{}", dir, label_file(text))) {
+        if let Ok(img) = image::open(format!("{}/{}", dir.display(), label_file(text))) {
             images.push((text, img.to_rgba8()));
         }
     }
@@ -1184,7 +1184,7 @@ unsafe fn create_party_texture(gl: &gl::Gl) -> GLuint {
 /// Pokémon keep the offset the game stores, which is also what picks their folder.
 #[cfg(target_os = "android")]
 unsafe fn upload_party(gl: &gl::Gl, texture: GLuint, species: [i32; crate::touch_controls::PICKER_SLOTS]) {
-    let dir = format!("/data/data/{}/files/game/data", "com.klisee.reloaded");
+    let dir = crate::android_main::storage_dir().join("game/data");
     let cell = PARTY_CELL as usize;
     let cells = crate::touch_controls::PICKER_SLOTS;
     let stride = cell * cells;
@@ -1195,7 +1195,7 @@ unsafe fn upload_party(gl: &gl::Gl, texture: GLuint, species: [i32; crate::touch
         }
         let shiny = (1000..=2000).contains(&value) || (3000..=4000).contains(&value);
         let folder = if shiny { "pkmn_shiny" } else { "pkmn" };
-        let Ok(image) = image::open(format!("{}/{}/{}.gif", dir, folder, value)) else {
+        let Ok(image) = image::open(format!("{}/{}/{}.gif", dir.display(), folder, value)) else {
             continue
         };
         let image = image.to_rgba8();
@@ -3839,7 +3839,7 @@ impl RendererTrait for RendererImpl {
                     let frames = FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if crate::game::audio::sound_started() || frames > 900 {
                         READY.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let _ = std::fs::write("/data/data/com.klisee.reloaded/files/game-ready", b"");
+                        let _ = std::fs::write(crate::android_main::storage_path("game-ready"), b"");
                     }
                 }
             }

@@ -2,14 +2,24 @@ package com.klisee.reloaded
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.util.Locale
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
@@ -39,10 +49,17 @@ class GameRepository(private val context: Context) {
     private val metaFile: File get() = File(files, "game.json")
     val logFile: File get() = File(files, "emulator.log")
 
+    /**
+     * Writing to app.log is kept off the caller's thread: on adopted storage a stalled card would
+     * otherwise block the install itself (and the UI) just because it was writing a log line.
+     */
+    private val logWriter = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "app-log").apply { isDaemon = true }
+    }
+
     /** The emulator's executable name is not pinned, so it is discovered by extension. */
     fun status(): Status {
-        val exe = gameDir.listFiles()?.firstOrNull { it.isFile && it.extension.equals("exe", ignoreCase = true) }
-            ?: return Status.Missing
+        val exe = findExe(gameDir) ?: return Status.Missing
         // A gutted `data` folder is not an install either: the game would start and fail.
         val data = File(gameDir, "data")
         if (!data.isDirectory || (data.listFiles()?.size ?: 0) < 5) return Status.Missing
@@ -62,12 +79,51 @@ class GameRepository(private val context: Context) {
     private fun versionFromName(name: String): String? =
         Regex("""\d+\.\d+(?:\.\d+){1,2}""").find(name)?.value
 
-    /** Frees the extracted game, leaving the launcher ready for another import or download. */
+    /** Frees the extracted game and any half-finished install, leaving the launcher ready again. */
     suspend fun deleteGame() = withContext(Dispatchers.IO) {
         gameDir.deleteRecursively()
         metaFile.delete()
+        File(files, "game.staging").deleteRecursively()
+        File(files, "game.old").deleteRecursively()
+        File(files, "game.saves").deleteRecursively()
         Unit
     }
+
+    /**
+     * Finishes or rolls back an install that was interrupted (the app was killed, the phone ran out
+     * of battery). It runs once at startup, before the home screen asks for the game's status, so a
+     * stray `game.staging` cannot make a good install look missing.
+     */
+    private fun recoverInterruptedInstall() {
+        val staging = File(files, "game.staging")
+        val previous = File(files, "game.old")
+        if (looksLikeGame(gameDir)) {
+            staging.deleteRecursively()
+            previous.deleteRecursively()
+            return
+        }
+        // A `game` folder without an exe or data is a leftover, not an install; it must not block
+        // the complete extraction (or the previous game) waiting beside it.
+        if (gameDir.exists()) gameDir.deleteRecursively()
+        if (looksLikeGame(staging) && staging.renameTo(gameDir)) {
+            trace("install: recuperada una extraccion completa de game.staging")
+            previous.deleteRecursively()
+        } else if (looksLikeGame(previous) && previous.renameTo(gameDir)) {
+            trace("install: restaurado el juego anterior desde game.old")
+        } else {
+            staging.deleteRecursively()
+            previous.deleteRecursively()
+        }
+    }
+
+    private fun looksLikeGame(dir: File): Boolean {
+        if (!dir.isDirectory || findExe(dir) == null) return false
+        val data = File(dir, "data")
+        return data.isDirectory && data.listFiles()?.isNotEmpty() == true
+    }
+
+    private fun findExe(dir: File): File? =
+        dir.listFiles()?.firstOrNull { it.isFile && it.extension.equals("exe", ignoreCase = true) }
 
     /**
      * What a "save" actually is: the saved games plus the teams and custom characters the game's own
@@ -265,7 +321,8 @@ class GameRepository(private val context: Context) {
      * It ships inside the APK so music works on any device without depending on external paths.
      */
     suspend fun prepare(): Unit = withContext(Dispatchers.IO) {
-        val exe = gameDir.listFiles()?.firstOrNull { it.isFile && it.extension.equals("exe", ignoreCase = true) }
+        recoverInterruptedInstall()
+        val exe = findExe(gameDir)
         if (exe != null && File(gameDir, "data").isDirectory) {
             // Installs made before the launcher recorded these still need their size and date.
             val meta = readMeta() ?: JSONObject()
@@ -301,20 +358,32 @@ class GameRepository(private val context: Context) {
     }
 
     /** Imports a zip picked with the system file chooser. */
-    suspend fun import(uri: Uri, onProgress: (Int) -> Unit): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun import(
+        uri: Uri,
+        onProgress: (Int) -> Unit,
+        onLog: (String) -> Unit = {},
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            val log = logger(onLog)
+            val started = SystemClock.elapsedRealtime()
             val temp = File(files, "import.zip")
+            var stalled = false
             try {
-                trace("import: uri=$uri")
-                copyFromUri(uri, temp, onProgress)
-                trace("import: copiado a $temp (${temp.length()} bytes, libre ${files.usableSpace})")
-                installZip(temp, version = null, source = "manual", onProgress = onProgress).getOrThrow()
+                log("Comprobando el almacenamiento antes de copiar…")
+                preflightStorage(log)
+                copyFromUri(uri, temp, onProgress, log)
+                log("Zip listo: ${formatBytes(temp.length())}")
+                installZip(temp, version = null, source = "manual", onProgress = onProgress, log = log)
                 prepare()
+                log("Instalación terminada en ${seconds(started)}.")
+                onProgress(100)
             } catch (e: Throwable) {
-                trace("import: FALLO ${e::class.java.simpleName}: ${e.message}")
+                stalled = e is StorageStalled
+                log("Error: ${messageOf(e)}")
                 throw e
             } finally {
-                temp.delete()
+                // Touching the card while it is stalled would hang this coroutine again.
+                if (!stalled) temp.delete()
             }
         }
     }
@@ -324,37 +393,53 @@ class GameRepository(private val context: Context) {
      *
      * Reading a big document through `contentResolver.openInputStream()` is not reliable on every
      * device: the stream can end early (`unexpected EOF`) or come back empty, especially on devices
-     * with little memory and the game on slow/adopted storage. That is what made importing the zip
-     * fail. So the size the picker reports is used as a reference, the file is verified after the
-     * copy, and the whole thing is retried a few times before giving up. Leaving a half-written
-     * `import.zip` behind (as before) made the next step read a broken archive.
+     * with little memory and the game on slow/adopted storage. So the size the picker reports is
+     * used as a reference, the file is verified after the copy, and the whole thing is retried
+     * before giving up.
      */
-    private fun copyFromUri(uri: Uri, dest: File, onProgress: (Int) -> Unit) {
+    private fun copyFromUri(uri: Uri, dest: File, onProgress: (Int) -> Unit, log: (String) -> Unit) {
         val expected = contentResolverSize(uri)
+        if (expected > 0) {
+            val free = files.usableSpace
+            log("Espacio libre: ${formatBytes(free)}; el zip ocupa ${formatBytes(expected)}.")
+            if (free < expected + 32L * 1024 * 1024) {
+                error("No hay espacio para copiar el zip: quedan ${formatBytes(free)} y necesita ${formatBytes(expected)}.")
+            }
+        }
+        val reporter = InstallReporter(onProgress, log) { percent -> percent * COPY_SHARE / 100 }
         var last: Throwable? = null
         for (attempt in 1..3) {
             try {
                 dest.delete()
+                log("Leyendo el archivo elegido…")
                 context.contentResolver.openInputStream(uri)?.use { input ->
-                    dest.outputStream().buffered().use { output ->
-                        val buffer = ByteArray(256 * 1024)
+                    dest.outputStream().buffered(BUFFER).use { output ->
+                        val buffer = ByteArray(BUFFER)
                         var copied = 0L
                         while (true) {
-                            val n = input.read(buffer)
-                            if (n < 0) break
-                            output.write(buffer, 0, n)
-                            copied += n
-                            if (expected > 0) onProgress(((copied * 100) / expected).toInt().coerceIn(0, 99))
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            copied += read
+                            if (expected > 0) {
+                                reporter.progress(
+                                    ((copied * 100) / expected).toInt().coerceIn(0, 99),
+                                    "Copiando…",
+                                )
+                            }
                         }
                     }
                 } ?: error("No pude abrir el fichero elegido.")
                 val size = dest.length()
-                if (size == 0L) error("La copia vino vacia.")
-                if (expected > 0 && size != expected) error("Copia incompleta: $size de $expected bytes.")
+                if (size == 0L) error("La copia vino vacía.")
+                if (expected > 0 && size != expected) {
+                    error("Copia incompleta: $size de $expected bytes.")
+                }
+                reporter.progress(100, "Copiando…")
                 return
             } catch (e: Throwable) {
                 last = e
-                trace("import: intento $attempt de copiar fallo (${e.message}); reintentando")
+                log("Intento $attempt de copiar falló: ${messageOf(e)}")
             }
         }
         throw last ?: error("No pude copiar el zip.")
@@ -368,10 +453,21 @@ class GameRepository(private val context: Context) {
     }.getOrDefault(-1L)
 
     /** Downloads a zip from a direct URL (following redirects) and installs it. */
-    suspend fun download(url: String, cookies: String?, onProgress: (Int) -> Unit): Result<Unit> = withContext(Dispatchers.IO) {
+    suspend fun download(
+        url: String,
+        cookies: String?,
+        onProgress: (Int) -> Unit,
+        onLog: (String) -> Unit = {},
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            val log = logger(onLog)
+            val started = SystemClock.elapsedRealtime()
             val temp = File(files, "download.zip")
+            var stalled = false
             try {
+                log("Comprobando el almacenamiento antes de descargar…")
+                preflightStorage(log)
+                log("Conectando con el servidor…")
                 val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                     instanceFollowRedirects = true
                     connectTimeout = 30_000
@@ -380,165 +476,459 @@ class GameRepository(private val context: Context) {
                     if (!cookies.isNullOrEmpty()) setRequestProperty("Cookie", cookies)
                 }
                 connection.connect()
-                if (connection.responseCode !in 200..299) error("El servidor respondio ${connection.responseCode}.")
+                if (connection.responseCode !in 200..299) error("El servidor respondió ${connection.responseCode}.")
                 val total = connection.contentLengthLong.takeIf { it > 0 } ?: -1L
+                log(if (total > 0) "Descargando ${formatBytes(total)}…" else "Descargando…")
+                val reporter = InstallReporter(onProgress, log) { percent -> percent * COPY_SHARE / 100 }
                 connection.inputStream.use { input ->
-                    temp.outputStream().use { output ->
-                        val buffer = ByteArray(64 * 1024)
+                    temp.outputStream().buffered(BUFFER).use { output ->
+                        val buffer = ByteArray(BUFFER)
                         var written = 0L
                         while (true) {
-                            val n = input.read(buffer)
-                            if (n < 0) break
-                            output.write(buffer, 0, n)
-                            written += n
-                            if (total > 0) onProgress((written * 100 / total).toInt())
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            output.write(buffer, 0, read)
+                            written += read
+                            if (total > 0) {
+                                reporter.progress((written * 100 / total).toInt().coerceIn(0, 99), "Descargando…")
+                            }
                         }
                     }
                 }
-                installZip(temp, version = null, source = "descarga", onProgress = onProgress).getOrThrow()
+                reporter.progress(100, "Descargando…")
+                installZip(temp, version = null, source = "descarga", onProgress = onProgress, log = log)
                 prepare()
+                log("Instalación terminada en ${seconds(started)}.")
+                onProgress(100)
+            } catch (e: Throwable) {
+                stalled = e is StorageStalled
+                log("Error: ${messageOf(e)}")
+                throw e
             } finally {
-                temp.delete()
+                if (!stalled) temp.delete()
             }
         }
     }
 
-    /** Validates, inflates and swaps in a game zip. Mirrors the emulator's own requirements. */
-    private fun installZip(zip: File, version: String?, source: String, onProgress: (Int) -> Unit): Result<Unit> = runCatching {
+    /**
+     * Validates, inflates and swaps in a game zip.
+     *
+     * The order is what keeps a failed import from costing the installed game: everything that can
+     * be checked is checked first (a second or two), the archive is unpacked beside the current
+     * install rather than over it, and only a complete `game.staging` is renamed into place. If that
+     * last move fails, `game.old` is renamed back.
+     */
+    private fun installZip(
+        zip: File,
+        version: String?,
+        source: String,
+        onProgress: (Int) -> Unit,
+        log: (String) -> Unit,
+    ) {
+        log("Comprobando el zip…")
         foldZipNamesToAscii(zip)
-        requireGameZip(zip)
+        val plan = planZip(zip, log)
+        log("Zip válido: ${plan.items.count { !it.directory }} archivos, ${formatBytes(plan.totalBytes)} sin comprimir.")
+
+        // A previous failed attempt can leave a lot in staging, so clear it before measuring the
+        // free space it would otherwise hide.
         val staging = File(files, "game.staging")
-        staging.deleteRecursively()
-        staging.mkdirs()
-
-        val total = zip.length().coerceAtLeast(1)
-        trace("import: extrayendo ${zip.length()} bytes de ${zip.name}...")
-        ZipInputStream(zip.inputStream().buffered()).use { input ->
-            val buffer = ByteArray(64 * 1024)
-            var written = 0L
-            var entries = 0
-            var entry = input.nextEntry
-            while (entry != null) {
-                val target = File(staging, entry.name)
-                // Reject zip-slip: entries must stay inside the staging directory.
-                if (!target.canonicalPath.startsWith(staging.canonicalPath + File.separator)) {
-                    error("El zip tiene una ruta no valida: ${entry.name}")
-                }
-                if (entry.isDirectory) {
-                    target.mkdirs()
-                } else {
-                    target.parentFile?.mkdirs()
-                    target.outputStream().buffered().use { output ->
-                        var n = input.read(buffer)
-                        while (n > 0) {
-                            output.write(buffer, 0, n)
-                            written += n
-                            onProgress(((written * 100) / total).toInt().coerceIn(0, 99))
-                            n = input.read(buffer)
-                        }
-                    }
-                }
-                input.closeEntry()
-                entries++
-                // A game zip holds tens of thousands of files; on slow/adopted storage the extraction
-                // can take a while, so leave a trail instead of going silent.
-                if (entries % 5000 == 0) {
-                    trace("import: extraidas $entries entradas (${written / (1024 * 1024)} MB)")
-                }
-                entry = input.nextEntry
-            }
-            trace("import: extraccion terminada ($entries entradas, ${written / (1024 * 1024)} MB)")
+        if (staging.exists()) {
+            log("Limpiando una extracción anterior…")
+            if (!staging.deleteRecursively()) error("No pude limpiar ${staging.absolutePath}.")
         }
 
-        // A zip of the game folder keeps it one level down, and the emulator wants it at the root.
-        unwrapSingleFolder(staging)
-        trace("import: primer nivel de ${staging.name} = ${staging.listFiles()?.joinToString { it.name } ?: "vacio"}")
-
-        if (staging.listFiles()?.none { it.isFile && it.extension.equals("exe", ignoreCase = true) } != false ||
-            !File(staging, "data").isDirectory
-        ) {
-            staging.deleteRecursively()
-            error("El zip no trae el .exe y la carpeta data/.")
+        // The saves are copied aside during the swap, so their size also has to fit.
+        val savesBytes = saveFolders.sumOf { folder ->
+            val dir = File(gameDir, "data/$folder")
+            if (!dir.isDirectory) 0L else dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        }
+        val free = files.usableSpace
+        val needed = plan.totalBytes + savesBytes + 32L * 1024 * 1024
+        log("Espacio libre: ${formatBytes(free)}; hacen falta ${formatBytes(needed)} (incluye partidas).")
+        if (plan.totalBytes > 0 && free < needed) {
+            error("No hay espacio suficiente: hacen falta ${formatBytes(needed)} y quedan ${formatBytes(free)} libres.")
         }
 
-        // Carry the player's data across an update: the folders the game's own migration tells you
-        // to keep. They are copied aside before the old install is swapped out and merged back into
-        // the new one, so importing a new version no longer costs anyone their saves.
+        if (!staging.mkdirs() && !staging.isDirectory) {
+            error("No pude crear ${staging.absolutePath}.")
+        }
+
         val saved = File(files, "game.saves")
-        saved.deleteRecursively()
-        var kept = 0
-        if (gameDir.isDirectory) {
+        try {
+            log("Extrayendo en ${staging.absolutePath}…")
+            extractZip(zip, plan, staging, onProgress, log)
+            onProgress(EXTRACT_END)
+
+            log("Verificando la extracción…")
+            if (!looksLikeGame(staging)) {
+                error("El zip no trae el .exe y la carpeta data/ en la raíz.")
+            }
+            log("Verificación correcta.")
+
+            log("Conservando partidas y datos del jugador…")
+            if (!saved.deleteRecursively() && saved.exists()) {
+                error("No pude preparar ${saved.absolutePath}.")
+            }
+            var kept = 0
+            if (gameDir.isDirectory) {
+                for (folder in saveFolders) {
+                    val from = File(gameDir, "data/$folder")
+                    if (!from.isDirectory) continue
+                    val to = File(saved, folder)
+                    runCatching { from.copyRecursively(to, overwrite = true) }
+                    if (to.isDirectory) kept += to.walkTopDown().count { it.isFile }
+                }
+            }
+            log("Partidas conservadas: $kept archivos.")
+            onProgress(95)
+
+            log("Instalando (reemplazo atómico)…")
+            val previous = File(files, "game.old")
+            if (!previous.deleteRecursively() && previous.exists()) {
+                error("No pude limpiar ${previous.absolutePath}; no he tocado el juego actual.")
+            }
+            val hadGame = gameDir.isDirectory
+            if (hadGame && !gameDir.renameTo(previous)) {
+                error("No pude apartar el juego anterior (${gameDir.absolutePath}); no se ha modificado nada.")
+            }
+            if (!staging.renameTo(gameDir)) {
+                val restored = if (!hadGame) {
+                    true
+                } else {
+                    gameDir.deleteRecursively()
+                    previous.renameTo(gameDir)
+                }
+                staging.deleteRecursively()
+                saved.deleteRecursively()
+                error(
+                    if (restored) "No pude instalar el juego nuevo; se ha restaurado el anterior."
+                    else "No pude instalar el juego nuevo ni restaurar el anterior. Reinicia la app.",
+                )
+            }
+            if (hadGame && !previous.deleteRecursively() && previous.exists()) {
+                log("Aviso: no pude borrar ${previous.absolutePath}; se limpiará en el próximo arranque.")
+            }
+            onProgress(98)
+
+            log("Restaurando partidas…")
             for (folder in saveFolders) {
-                val source = File(gameDir, "data/$folder")
-                if (!source.isDirectory) continue
-                val dest = File(saved, folder)
-                runCatching { source.copyRecursively(dest, overwrite = true) }
-                if (dest.isDirectory) kept += dest.walkTopDown().count { it.isFile }
+                val from = File(saved, folder)
+                if (!from.isDirectory) continue
+                val to = File(gameDir, "data/$folder")
+                to.mkdirs()
+                runCatching { from.copyRecursively(to, overwrite = false) }
             }
-        }
-        trace("import: conservados $kept ficheros de partidas y datos del jugador")
-
-        // Swap the folders instead of erasing the old install first: if the last move fails, the
-        // previous game (and its saves) is still on disk to fall back to.
-        val previous = File(files, "game.old")
-        previous.deleteRecursively()
-        val movedAside = gameDir.isDirectory && gameDir.renameTo(previous)
-        if (gameDir.isDirectory) gameDir.deleteRecursively()
-        if (!staging.renameTo(gameDir)) {
-            if (movedAside) {
-                gameDir.deleteRecursively()
-                previous.renameTo(gameDir)
-            }
-            staging.deleteRecursively()
             saved.deleteRecursively()
-            error("No pude mover el juego a su carpeta definitiva.")
-        }
-        previous.deleteRecursively()
 
-        // Put the player's data back. Anything the new version ships in those folders wins, so an
-        // update never reverts the game's own files; a save is only added when it is missing.
-        for (folder in saveFolders) {
-            val source = File(saved, folder)
-            if (!source.isDirectory) continue
-            val dest = File(gameDir, "data/$folder")
-            dest.mkdirs()
-            runCatching { source.copyRecursively(dest, overwrite = false) }
+            runCatching {
+                metaFile.writeText(
+                    JSONObject()
+                        .put("version", version ?: "")
+                        .put("source", source)
+                        .put("installedAt", System.currentTimeMillis())
+                        .put("sizeBytes", plan.totalBytes)
+                        .toString(),
+                )
+            }.onFailure { log("Aviso: no pude escribir ${metaFile.name}: ${messageOf(it)}") }
+
+            onProgress(100)
+            log("Juego instalado en ${gameDir.absolutePath} (${formatBytes(plan.totalBytes)}).")
+        } catch (e: Throwable) {
+            if (e is StorageStalled) {
+                log("El almacenamiento no responde; dejo ${staging.name} para limpiarlo al reiniciar.")
+            } else {
+                staging.deleteRecursively()
+                saved.deleteRecursively()
+            }
+            throw e
         }
-        saved.deleteRecursively()
-        metaFile.writeText(
-            JSONObject()
-                .put("version", version ?: "")
-                .put("source", source)
-                .put("installedAt", System.currentTimeMillis())
-                .put("sizeBytes", gameDir.walkTopDown().filter { it.isFile }.sumOf { it.length() })
-                .toString(),
-        )
-        onProgress(100)
     }
 
-    /** Cheap structural check before doing the expensive extraction. */
-    private fun requireGameZip(file: File) {
+    /**
+     * What the zip contains, worked out from its central directory before anything is written.
+     *
+     * A zip made by right-clicking the game folder keeps it one level down (`Pokemon Reloaded/…`),
+     * so the common root of the `.exe` and `data/` is found and its prefix stripped during
+     * extraction. That also skips `__MACOSX` and other top-level junk, and gives the exact
+     * uncompressed size used for the free-space check and the progress bar.
+     */
+    private fun planZip(file: File, log: (String) -> Unit): ZipPlan {
+        if (!file.isFile || file.length() == 0L) error("El archivo del juego está vacío.")
+        val items = ArrayList<ZipItem>()
         ZipFile(file).use { zip ->
-            var exe = false
-            var data = false
-            var seen = 0
-            val first = StringBuilder()
             val entries = zip.entries()
             while (entries.hasMoreElements()) {
-                val name = entries.nextElement().name
-                if (seen < 12) {
-                    first.append(name).append(" | ")
-                    seen++
-                }
-                if (name.endsWith(".exe", ignoreCase = true)) exe = true
-                if (name.startsWith("data/") || name.contains("/data/")) data = true
+                val entry = entries.nextElement()
+                val path = normalizeZipName(entry.name)
+                if (path.isEmpty() || isJunk(path)) continue
+                items += ZipItem(
+                    raw = entry.name,
+                    path = path,
+                    directory = entry.isDirectory || entry.name.endsWith("/") || entry.name.endsWith("\\"),
+                    size = entry.size,
+                )
             }
-            trace("import: exe=$exe data=$data; empieza por: $first")
-            // Only a sanity check. The layout is settled once the zip is unpacked, because a zip
-            // made by right-clicking the game folder keeps everything one level down.
-            if (!exe || !data) error("Ese zip no parece Pokemon Reloaded: no encuentro el .exe ni la carpeta data/.")
         }
+        if (items.isEmpty()) error("El zip está vacío.")
+
+        val names = items.map { it.path }
+        val roots = LinkedHashSet<String>()
+        roots += ""
+        for (name in names) {
+            val slash = name.indexOf('/')
+            if (slash > 0) roots += name.substring(0, slash + 1)
+        }
+        val root = roots.firstOrNull { prefix ->
+            val hasExe = names.any { name ->
+                name.startsWith(prefix, ignoreCase = true) && !name.endsWith("/") &&
+                    name.substring(prefix.length).let { rest ->
+                        rest.isNotEmpty() && '/' !in rest && rest.endsWith(".exe", ignoreCase = true)
+                    }
+            }
+            val hasData = names.any { name ->
+                name.startsWith(prefix + "data/") && name.length > prefix.length + "data/".length
+            }
+            hasExe && hasData
+        } ?: error(
+            "Ese zip no parece Pokémon Reloaded: no encuentro el .exe y la carpeta data/ " +
+                "en la misma carpeta. Empieza por: ${names.take(5).joinToString(" | ")}",
+        )
+
+        val relative = LinkedHashMap<String, ZipItem>()
+        for (item in items) {
+            if (!item.path.startsWith(root)) continue
+            val path = item.path.substring(root.length)
+            if (path.isEmpty()) continue
+            if (relative.put(path, item.copy(path = path)) != null) {
+                error("El zip trae el mismo archivo dos veces: $path. Vuelve a descargarlo.")
+            }
+        }
+        if (relative.isEmpty()) error("El zip no tiene archivos que instalar.")
+        val totalBytes = relative.values.sumOf { if (!it.directory && it.size > 0) it.size else 0L }
+        log("Estructura: raíz \"$root\", ${relative.size} entradas.")
+        return ZipPlan(relative.values.toList(), totalBytes)
     }
+
+    /**
+     * Unpacks [plan] into [staging] using one [ZipFile] handle per worker.
+     *
+     * `ZipInputStream` walks the archive from beginning to end and skips unknown entries, while
+     * `ZipFile` reads straight from the central directory. The work is split between a few threads
+     * (deflate is CPU-bound, so this is what makes a 20,000-file game take seconds instead of a
+     * minute on a mult-core phone). Progress is reported at most every 250 ms / 1 %, and failures
+     * from any worker abort the whole extraction.
+     */
+    private fun extractZip(
+        zip: File,
+        plan: ZipPlan,
+        staging: File,
+        onProgress: (Int) -> Unit,
+        log: (String) -> Unit,
+    ) {
+        val items = plan.items
+        val total = plan.totalBytes.coerceAtLeast(1)
+        val written = AtomicLong(0)
+        val reporter = InstallReporter(onProgress, log) { percent ->
+            EXTRACT_START + percent * (EXTRACT_END - EXTRACT_START) / 100
+        }
+        // Adopted storage (a microSD formatted as internal) goes through a FUSE layer that can stall
+        // or deadlock under parallel writes: four workers left every extraction thread in the kernel
+        // at 69 % on a HiBreak. One writer is slower but actually finishes. Internal flash still gets
+        // the parallel path.
+        val adopted = files.absolutePath.startsWith("/mnt/expand/")
+        val workers = when {
+            items.size < 200 || adopted -> 1
+            else -> Runtime.getRuntime().availableProcessors().coerceIn(1, 4)
+        }
+        log(
+            "Extrayendo ${items.count { !it.directory }} archivos (${formatBytes(plan.totalBytes)}) " +
+                "con $workers ${if (workers == 1) "hilo" else "hilos"}…" +
+                if (adopted) " (almacenamiento adoptado, sin escrituras en paralelo)" else "",
+        )
+        val pool = Executors.newFixedThreadPool(workers) { runnable ->
+            Thread(runnable, "install-zip").apply { isDaemon = true }
+        }
+        try {
+            val chunks = List(workers) { worker -> items.filterIndexed { index, _ -> index % workers == worker } }
+            val futures = chunks.filter { it.isNotEmpty() }.map { chunk ->
+                pool.submit(Callable {
+                    ZipFile(zip).use { archive ->
+                        val buffer = ByteArray(BUFFER)
+                        for (item in chunk) {
+                            val target = File(staging, item.path)
+                            if (item.directory) {
+                                target.mkdirs()
+                                continue
+                            }
+                            val entry = archive.getEntry(item.raw)
+                                ?: throw IOException("No encuentro ${item.raw} dentro del zip.")
+                            target.parentFile?.mkdirs()
+                            target.outputStream().buffered(buffer.size).use { output ->
+                                archive.getInputStream(entry).use { input ->
+                                    while (true) {
+                                        val read = input.read(buffer)
+                                        if (read < 0) break
+                                        output.write(buffer, 0, read)
+                                        // Count as the bytes land, not when the file is finished: a
+                                        // single big entry must keep the watchdog and the bar alive.
+                                        written.addAndGet(read.toLong())
+                                        reporter.progress(
+                                            ((written.get() * 100) / total).toInt().coerceIn(0, 100),
+                                            "Extrayendo…",
+                                        )
+                                    }
+                                }
+                            }
+                            if (item.size >= 0 && target.length() != item.size) {
+                                throw IOException(
+                                    "${item.path} salió incompleto (${target.length()} de ${item.size} bytes).",
+                                )
+                            }
+                        }
+                    }
+                })
+            }
+            // Wait without blocking blindly: if the card stops answering, say so and eventually
+            // abort instead of leaving the install (and the user) waiting forever.
+            var lastBytes = 0L
+            var lastChangeAt = SystemClock.elapsedRealtime()
+            var lastWarningAt = 0L
+            while (futures.any { !it.isDone }) {
+                val now = SystemClock.elapsedRealtime()
+                val bytes = written.get()
+                if (bytes != lastBytes) {
+                    lastBytes = bytes
+                    lastChangeAt = now
+                }
+                val idle = now - lastChangeAt
+                if (idle >= 15_000 && now - lastWarningAt >= 15_000) {
+                    lastWarningAt = now
+                    log("El almacenamiento no responde; sigo esperando… (${idle / 1000} s sin escribir)")
+                }
+                if (idle >= 90_000) {
+                    futures.forEach { it.cancel(true) }
+                    throw StorageStalled(
+                        "El almacenamiento adoptado (tarjeta SD) dejó de responder durante la extracción. " +
+                            "Reinicia el móvil y vuelve a intentarlo.",
+                    )
+                }
+                Thread.sleep(200)
+            }
+            try {
+                futures.forEach { it.get() }
+            } catch (e: ExecutionException) {
+                futures.forEach { it.cancel(true) }
+                throw (e.cause ?: e)
+            } catch (e: InterruptedException) {
+                futures.forEach { it.cancel(true) }
+                Thread.currentThread().interrupt()
+                throw e
+            }
+        } finally {
+            pool.shutdownNow()
+            runCatching { pool.awaitTermination(2, TimeUnit.SECONDS) }
+        }
+        reporter.progress(100, "Extrayendo…")
+    }
+
+    /**
+     * Fails in a second, with the exact path, when the app's storage cannot be written.
+     *
+     * This is the check that would have caught the engine's old `/data/data/.../files/game`
+     * permission error before copying a 300 MB zip, and the message names the directory so a bug
+     * report says what is wrong instead of only "falló".
+     */
+    private fun preflightStorage(log: (String) -> Unit) {
+        val root = files
+        log("Comprobando ${root.absolutePath}…")
+        if (!root.isDirectory && !root.mkdirs()) {
+            error("No existe ${root.absolutePath} y no pude crearla.")
+        }
+        checkWritable(root, "carpeta de datos de la app")
+        val game = gameDir
+        if (game.exists() && !game.isDirectory) {
+            error("${game.absolutePath} existe pero no es una carpeta. Bórrala o reinstala la app.")
+        }
+        if (!game.isDirectory && !game.mkdirs() && !game.isDirectory) {
+            error("No pude crear ${game.absolutePath}. Comprueba el espacio libre.")
+        }
+        checkWritable(game, "carpeta del juego")
+        log("Escritura correcta en ${game.absolutePath}.")
+        log("Espacio libre: ${formatBytes(root.usableSpace)}.")
+    }
+
+    private fun checkWritable(dir: File, what: String) {
+        val probe = File(dir, ".reloaded-write-test")
+        try {
+            probe.outputStream().use { output ->
+                output.write(ByteArray(16 * 1024))
+                output.flush()
+            }
+        } catch (e: Throwable) {
+            throw IllegalStateException(
+                "No puedo escribir en ${dir.absolutePath} ($what): ${messageOf(e)}. " +
+                    "Revisa el almacenamiento o reinstala la app.",
+                e,
+            )
+        } finally {
+            probe.delete()
+        }
+        if (probe.exists()) error("Puedo escribir en ${dir.absolutePath} pero no borrar la prueba.")
+    }
+
+    private fun normalizeZipName(raw: String): String {
+        val forward = raw.replace('\\', '/')
+        if (forward.indexOf('\u0000') >= 0) error("El zip trae un nombre no válido.")
+        if (forward.startsWith("/") || Regex("^[A-Za-z]:").containsMatchIn(forward)) {
+            error("El zip trae una ruta absoluta no válida: $raw")
+        }
+        val parts = ArrayList<String>()
+        for (part in forward.split('/')) {
+            when (part) {
+                "", "." -> {}
+                ".." -> error("El zip trae una ruta que se sale de la carpeta: $raw")
+                else -> parts += part
+            }
+        }
+        return parts.joinToString("/")
+    }
+
+    private fun isJunk(path: String): Boolean =
+        path == "__MACOSX" || path.startsWith("__MACOSX/") ||
+            path == ".DS_Store" || path.endsWith("/.DS_Store") ||
+            path == "Thumbs.db" || path.endsWith("/Thumbs.db")
+
+    private fun logger(onLog: (String) -> Unit): (String) -> Unit = { message ->
+        // The UI comes first: writing app.log must never delay (or block) what the console shows.
+        runCatching { onLog(message) }
+        trace(message)
+    }
+
+    private fun messageOf(e: Throwable): String =
+        e.message?.takeIf { it.isNotBlank() } ?: e::class.java.simpleName
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1_000_000_000L -> String.format(Locale.US, "%.1f GB", bytes / 1_000_000_000.0)
+        bytes >= 1_000_000L -> String.format(Locale.US, "%.1f MB", bytes / 1_000_000.0)
+        bytes >= 1_000L -> String.format(Locale.US, "%.0f KB", bytes / 1_000.0)
+        else -> "$bytes B"
+    }
+
+    private fun seconds(startedAt: Long): String =
+        String.format(Locale.US, "%.1f s", (SystemClock.elapsedRealtime() - startedAt) / 1000.0)
+
+    private data class ZipItem(
+        val raw: String,
+        val path: String,
+        val directory: Boolean,
+        val size: Long,
+    )
+
+    private data class ZipPlan(
+        val items: List<ZipItem>,
+        val totalBytes: Long,
+    )
 
     /**
      * Writes one line to logcat, which is what the log screen reads, and also to a small file.
@@ -549,13 +939,15 @@ class GameRepository(private val context: Context) {
      */
     private fun trace(message: String) {
         android.util.Log.i("Reloaded", message)
-        runCatching {
-            val file = File(files, "app.log")
-            if (file.length() > 256 * 1024) {
-                File(files, "app.log.1").delete()
-                file.renameTo(File(files, "app.log.1"))
+        logWriter.execute {
+            runCatching {
+                val file = File(files, "app.log")
+                if (file.length() > 256 * 1024) {
+                    File(files, "app.log.1").delete()
+                    file.renameTo(File(files, "app.log.1"))
+                }
+                file.appendText("$message\n")
             }
-            file.appendText("$message\n")
         }
     }
 
@@ -598,12 +990,17 @@ class GameRepository(private val context: Context) {
                     val localOffset = le32(cd, p + 42)
 
                     var changed = false
-                    for (i in 0 until nameLen) {
-                        val at = p + 46 + i
-                        val byte = cd[at].toInt() and 0xff
-                        if (byte > 0x7f) {
-                            cd[at] = foldToAscii(byte)
-                            changed = true
+                    // A name that is already valid UTF-8 is read correctly by Android's zip reader
+                    // and is left alone: folding its two-byte accents would mangle it, while the
+                    // fold exists only for archives whose names are raw DOS code page bytes.
+                    if (!isValidUtf8(cd, p + 46, nameLen)) {
+                        for (i in 0 until nameLen) {
+                            val at = p + 46 + i
+                            val byte = cd[at].toInt() and 0xff
+                            if (byte > 0x7f) {
+                                cd[at] = foldToAscii(byte)
+                                changed = true
+                            }
                         }
                     }
 
@@ -626,6 +1023,13 @@ class GameRepository(private val context: Context) {
 
     private fun asciiName(bytes: ByteArray, at: Int, length: Int) =
         String(bytes, at, length, Charsets.ISO_8859_1)
+
+    private fun isValidUtf8(bytes: ByteArray, at: Int, length: Int): Boolean = runCatching {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes, at, length))
+    }.isSuccess
 
     private fun findEndOfCentralDirectory(raf: RandomAccessFile): Long? {
         val window = minOf(raf.length(), 64L * 1024).toInt()
@@ -664,24 +1068,55 @@ class GameRepository(private val context: Context) {
         else -> '_'.code.toByte()
     }
 
-    /**
-     * Moves the contents of a lone top-level folder up to `staging`.
-     *
-     * A zip made by compressing the game folder keeps the game one level down, and the emulator
-     * wants it at the root: refusing those is what made importing fail for most people. It only
-     * acts when that folder really looks like the game, and does nothing when the top level holds
-     * several things, because then there is no telling which one is the game.
-     */
-    private fun unwrapSingleFolder(staging: File) {
-        val top = staging.listFiles()?.filter { it.name != "__MACOSX" && !it.name.startsWith(".") } ?: return
-        val only = top.singleOrNull()?.takeIf { it.isDirectory } ?: return
-        val inner = only.listFiles()?.toList().orEmpty()
-        val hasExe = inner.any { it.isFile && it.extension.equals("exe", ignoreCase = true) }
-        val hasData = inner.any { it.isDirectory && it.name == "data" }
-        if (!hasExe || !hasData) return
-        for (child in inner) {
-            if (!child.renameTo(File(staging, child.name))) return
+    private companion object {
+        /** Copy/download takes the bar from 0 to 20; extraction continues from there to 90. */
+        const val COPY_SHARE = 20
+        const val EXTRACT_START = 20
+        const val EXTRACT_END = 90
+
+        /** Big enough that the read/write loop is not the bottleneck on a 20,000-file zip. */
+        const val BUFFER = 256 * 1024
+    }
+}
+
+/** The adopted storage stopped answering mid-install; touching it again would hang as well. */
+private class StorageStalled(message: String) : IOException(message)
+
+/**
+ * Rate-limits install progress for the UI and the on-screen console.
+ *
+ * Progress is reported at most every 150 ms and once per percent, so a fast extraction cannot flood
+ * Compose with thousands of recompositions, while the console gets the current percent roughly
+ * every 800 ms. Safe to call from the extraction workers.
+ */
+private class InstallReporter(
+    private val onProgress: (Int) -> Unit,
+    private val log: (String) -> Unit,
+    private val overall: (Int) -> Int = { it },
+) {
+    private var lastPercent = -1
+    private var lastAt = 0L
+    private var lastLogged = -10
+    private var lastLogAt = 0L
+
+    @Synchronized
+    fun progress(percent: Int, verb: String) {
+        val value = percent.coerceIn(0, 100)
+        val now = SystemClock.elapsedRealtime()
+        if (value != lastPercent && (value == 100 || now - lastAt >= 150)) {
+            lastPercent = value
+            lastAt = now
+            runCatching { onProgress(overall(value)) }
         }
-        only.delete()
+        if (value == 100) {
+            if (lastLogged != 100) {
+                lastLogged = 100
+                runCatching { log("$verb ${overall(value)}%") }
+            }
+        } else if (value != lastLogged && now - lastLogAt >= 800) {
+            lastLogged = value
+            lastLogAt = now
+            runCatching { log("$verb ${overall(value)}%") }
+        }
     }
 }

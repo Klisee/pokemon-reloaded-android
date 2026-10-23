@@ -2129,7 +2129,7 @@ impl Game {
             return false
         };
         // The atlas already stores the sprite head-up: the readback comes out in the same order.
-        let path = format!("/data/data/{}/files/rpc-player.png", crate::android_main::PACKAGE_DIR);
+        let path = crate::android_main::storage_path("rpc-player.png");
         if image.save(&path).is_ok() {
             eprintln!("[rpc] sprite del jugador exportado: {} ({}x{})", id, frame.width, frame.height);
             true

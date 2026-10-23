@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -53,8 +54,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.klisee.reloaded.Blog
 import com.klisee.reloaded.Emulator
 import com.klisee.reloaded.GameRepository
@@ -85,6 +88,9 @@ fun HomeScreen(
     var status by remember(revision) { mutableStateOf(repo.status()) }
     var busy by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<Int?>(null) }
+    // The install's own little console: the last lines of what it is doing, so a slow import never
+    // looks frozen and a failure says where it happened without opening the Logs screen.
+    var installLog by remember { mutableStateOf(emptyList<String>()) }
     var post by remember { mutableStateOf<Blog.Post?>(null) }
     var blogError by remember { mutableStateOf<String?>(null) }
     var loadingPost by remember { mutableStateOf(true) }
@@ -109,8 +115,14 @@ fun HomeScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         val hadGame = status is GameRepository.Status.Ready
         busy = true
+        installLog = emptyList()
+        progress = null
         scope.launch {
-            val result = repo.import(uri) { progress = it }
+            val result = repo.import(
+                uri,
+                onProgress = { progress = it },
+                onLog = { line -> installLog = (installLog + line).takeLast(40) },
+            )
             busy = false
             progress = null
             status = repo.status()
@@ -229,7 +241,7 @@ fun HomeScreen(
                 }
             }
 
-            ImportPanel(busy = busy, progress = progress)
+            ImportPanel(busy = busy, progress = progress, lines = installLog)
         }
     }
 }
@@ -255,7 +267,7 @@ private fun CircleIconButton(icon: ImageVector, description: String, onClick: ()
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun ImportPanel(busy: Boolean, progress: Int?) {
+private fun ImportPanel(busy: Boolean, progress: Int?, lines: List<String>) {
     if (!busy) return
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Surface(color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.5f), modifier = Modifier.fillMaxSize()) {}
@@ -265,9 +277,9 @@ private fun ImportPanel(busy: Boolean, progress: Int?) {
             modifier = Modifier.padding(32.dp),
         ) {
             Column(
-                modifier = Modifier.padding(28.dp),
+                modifier = Modifier.padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Text(
                     text = if (progress == null) "Preparando el archivo…" else "Instalando el juego…",
@@ -278,9 +290,47 @@ private fun ImportPanel(busy: Boolean, progress: Int?) {
                     LoadingIndicator()
                 } else {
                     LinearWavyProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth())
-                    Text("$progress %", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "$progress %",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
+                ImportConsole(lines)
             }
+        }
+    }
+}
+
+/** The install's own terminal: the latest lines, auto-scrolled and in monospace. */
+@Composable
+private fun ImportConsole(lines: List<String>) {
+    if (lines.isEmpty()) return
+    val scroll = rememberScrollState()
+    LaunchedEffect(lines.size) { scroll.scrollTo(scroll.maxValue) }
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(
+                text = "Registro",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = lines.takeLast(6).joinToString("\n"),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 104.dp)
+                    .padding(top = 4.dp)
+                    .verticalScroll(scroll),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
