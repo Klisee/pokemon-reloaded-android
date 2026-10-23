@@ -1,5 +1,3 @@
-#define IS_NAN(v) ((v) != (v))
-
 struct Light {
     vec4 pos; // padded vec3
     vec4 colour; // padded vec3

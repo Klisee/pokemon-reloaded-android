@@ -235,7 +235,10 @@ impl PrimitiveBuilder {
     }
 
     fn push_vertex(&mut self, pos: [f32; 3], tex_coord: [f32; 2], blend: [f32; 4], normal: [f32; 3]) -> &mut Self {
-        let tex_coord = if self.textured { tex_coord } else { [f32::NAN; 2] };
+        // -1 marks an untextured primitive. NaN used to be the marker, but mobile GPUs (and their
+        // interpolators) are allowed to flush it, which turned the texture coordinate into a real
+        // sample and made every filled primitive -- the characters' shadows included -- vanish.
+        let tex_coord = if self.textured { tex_coord } else { [-1.0; 2] };
         self.push_vertex_raw(Vertex { pos, tex_coord, blend, normal, atlas_xywh: self.atlas_ref.into() });
         self
     }

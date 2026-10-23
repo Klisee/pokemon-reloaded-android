@@ -148,7 +148,7 @@ impl Default for RenderState {
             depth_test: false.into(),
             write_depth: false,
             culling: false,
-            alpha_test: GLBool::True,
+            alpha_test: GLBool::False,
             fog_enabled: GLBool::False,
             fog_begin: 0.0,
             fog_end: 0.0,

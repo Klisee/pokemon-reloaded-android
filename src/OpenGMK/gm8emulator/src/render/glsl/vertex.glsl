@@ -1,6 +1,3 @@
-#define IS_NAN(v) ((v) != (v))
-
-
 struct Light {
     vec4 pos; // padded vec3
     vec4 colour; // padded vec3
@@ -47,7 +44,9 @@ void main() {
     frag_atlas_xywh = atlas_xywh;
     frag_blend_flat = vec4(1.0);
 
-    if (IS_NAN(tex_coord)) {
+    // -1 is the engine's mark for an untextured primitive (its vertices sample the white pixel).
+    // A comparison is safe on every GPU; NaN is not.
+    if (tex_coord.x < 0.0) {
         frag_tex_coord = vec2(0.0);
         frag_blend = blend;
     } else {
