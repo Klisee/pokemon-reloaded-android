@@ -82,6 +82,10 @@ pub const CHOICE: u8 = 32;
 pub const SAFARI: u8 = 64;
 pub const MENU_NAV: u8 = 128;
 
+/// The actual puzzle room: PuzleUNW, 202.
+pub const PUZZLE_ROOM: i32 = 202;
+pub const ROTATE_NAME: &str = "girar";
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Shape {
     Circle { cx: f32, cy: f32, r: f32 },
@@ -131,6 +135,12 @@ pub const CLASSIC_CONTROLS: &[Control] = &[
     Control { name: crate::field_controls::NAME, key: Key::Alpha1, shape: Shape::Circle { cx: 0.300, cy: 0.760, r: 0.038 }, label: Label::Text("SEL"), contexts: WORLD },
     // Menu / misc keys (second row along the top).
     Control { name: "space", key: Key::Space, shape: Shape::Circle { cx: 0.300, cy: 0.145, r: 0.022 }, label: Label::Text("PKM"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: ROTATE_NAME, key: Key::Z, shape: Shape::Circle { cx: 0.935, cy: 0.150, r: 0.036 }, label: Label::Text("Girar"), contexts: 0 },
+    Control { name: "f1", key: Key::F1, shape: Shape::Circle { cx: 0.935, cy: 0.300, r: 0.036 }, label: Label::Text("F1"), contexts: 0 },
+    Control { name: "box_z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: 0 },
+    Control { name: "box_x", key: Key::X, shape: Shape::Circle { cx: 0.933, cy: 0.700, r: 0.033 }, label: Label::Text("X"), contexts: 0 },
+    Control { name: "box_s", key: Key::S, shape: Shape::Circle { cx: 0.712, cy: 0.700, r: 0.026 }, label: Label::Text("S"), contexts: 0 },
+    Control { name: "box_o", key: Key::O, shape: Shape::Circle { cx: 0.712, cy: 0.840, r: 0.026 }, label: Label::Text("O"), contexts: 0 },
     Control { name: "o", key: Key::O, shape: Shape::Circle { cx: 0.372, cy: 0.145, r: 0.022 }, label: Label::Text("O"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "m", key: Key::M, shape: Shape::Circle { cx: 0.444, cy: 0.145, r: 0.022 }, label: Label::Text("M"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "e", key: Key::E, shape: Shape::Circle { cx: 0.516, cy: 0.145, r: 0.022 }, label: Label::Text("E"), contexts: WORLD | BATTLE | SAFARI },
@@ -185,6 +195,12 @@ pub const NEW_CONTROLS: &[Control] = &[
     Control { name: "alpha7", key: Key::Alpha7, shape: Shape::Circle { cx: 0.588, cy: 0.055, r: 0.020 }, label: Label::Text("7"), contexts: WORLD | SAFARI },
     // Menu / misc keys (second row along the top).
     Control { name: "space", key: Key::Space, shape: Shape::Circle { cx: 0.300, cy: 0.145, r: 0.022 }, label: Label::Text("PKM"), contexts: WORLD | BATTLE | SAFARI },
+    Control { name: ROTATE_NAME, key: Key::Z, shape: Shape::Circle { cx: 0.935, cy: 0.150, r: 0.036 }, label: Label::Text("Girar"), contexts: 0 },
+    Control { name: "f1", key: Key::F1, shape: Shape::Circle { cx: 0.935, cy: 0.300, r: 0.036 }, label: Label::Text("F1"), contexts: 0 },
+    Control { name: "box_z", key: Key::Z, shape: Shape::Circle { cx: 0.865, cy: 0.851, r: 0.033 }, label: Label::Text("Z"), contexts: 0 },
+    Control { name: "box_x", key: Key::X, shape: Shape::Circle { cx: 0.933, cy: 0.700, r: 0.033 }, label: Label::Text("X"), contexts: 0 },
+    Control { name: "box_s", key: Key::S, shape: Shape::Circle { cx: 0.712, cy: 0.700, r: 0.026 }, label: Label::Text("S"), contexts: 0 },
+    Control { name: "box_o", key: Key::O, shape: Shape::Circle { cx: 0.712, cy: 0.840, r: 0.026 }, label: Label::Text("O"), contexts: 0 },
     Control { name: "o", key: Key::O, shape: Shape::Circle { cx: 0.372, cy: 0.145, r: 0.022 }, label: Label::Text("O"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "m", key: Key::M, shape: Shape::Circle { cx: 0.444, cy: 0.145, r: 0.022 }, label: Label::Text("M"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "e", key: Key::E, shape: Shape::Circle { cx: 0.516, cy: 0.145, r: 0.022 }, label: Label::Text("E"), contexts: WORLD | BATTLE | SAFARI },
@@ -203,7 +219,7 @@ pub const NEW_CONTROLS: &[Control] = &[
     Control { name: "s", key: Key::S, shape: Shape::Circle { cx: 0.712, cy: 0.700, r: 0.026 }, label: Label::Text("S"), contexts: BATTLE },
     // Holding this opens the party wheel (see below): each slot is one Pokémon of the team.
     Control { name: PARTY_NAME, key: Key::Alpha1, shape: Shape::Circle { cx: 0.300, cy: 0.760, r: 0.038 }, label: Label::Text("SEL"), contexts: BATTLE },
-    Control { name: "a", key: Key::A, shape: Shape::Circle { cx: 0.640, cy: 0.900, r: 0.024 }, label: Label::Text("A"), contexts: WORLD | SAFARI },
+    Control { name: "a", key: Key::A, shape: Shape::Circle { cx: 0.640, cy: 0.900, r: 0.024 }, label: Label::Text("A"), contexts: WORLD | BATTLE | SAFARI },
     Control { name: "n", key: Key::N, shape: Shape::Circle { cx: 0.640, cy: 0.760, r: 0.024 }, label: Label::Text("N"), contexts: WORLD | SAFARI },
     // Menu keys.
     Control { name: "return", key: Key::Return, shape: Shape::Circle { cx: 0.500, cy: 0.945, r: 0.032 }, label: Label::Text("OK"), contexts: WORLD | BATTLE | SAFARI },
@@ -441,7 +457,7 @@ pub fn load_layout(text: &str) {
             let fields: Vec<_> = line.split_whitespace().collect();
             if fields.len() != 6 { continue }
             let context = match fields[0] {
-                "world" => WORLD, "battle" => BATTLE, "dialog" => DIALOG, "character" => CHARACTER, "choice" => CHOICE, "safari" => SAFARI, "menu_nav" => MENU_NAV, _ => continue,
+                "world" => WORLD, "battle" => BATTLE, "dialog" => DIALOG, "character" => CHARACTER, "choice" => CHOICE, "safari" => SAFARI, "menu_nav" => MENU_NAV, "menu" => MENU, _ => continue,
             };
             let name = if fields[1] == JOYSTICK_NAME && context & (WORLD | BATTLE | CHOICE | MENU_NAV) != 0 {
                 JOYSTICK_NAME
@@ -626,6 +642,10 @@ pub fn set_room(room: i32) {
         picker_reset();
         // A fresh picker offers its one-off trick button again; using it once was enough last time.
         COMBO_USED.store(false, Ordering::Relaxed);
+        #[cfg(target_os = "android")]
+        if room == PUZZLE_ROOM {
+            crate::android_main::show_puzzle_hint();
+        }
     }
     ROOM.store(room, Ordering::Relaxed);
     log_state_change(room);
@@ -820,6 +840,8 @@ pub fn current_context() -> u8 {
         // The Safari Zone's catching room. Confirmed on the device: it reports room 715 while the
         // ball is being thrown there. It keeps the map's buttons bar the stick and the attacks.
         715 => SAFARI,
+        // The puzzle uses only its three buttons; everything else steps aside.
+        PUZZLE_ROOM => MENU,
         // Before the first frame we don't know the room yet; show nothing rather than flashing the
         // whole overlay for one frame.
         -1 => MENU,
@@ -853,6 +875,17 @@ pub fn info_window_open() -> bool {
 pub fn is_active(index: usize) -> bool {
     if overlay_style() == OverlayStyle::None {
         return false
+    }
+    if ROOM.load(Ordering::Relaxed) == PUZZLE_ROOM
+        && matches!(controls()[index].name, ROTATE_NAME | "f1" | "x")
+    {
+        return !pad_active() && !info_window_open()
+    }
+    if matches!(controls()[index].name, "box_z" | "box_x" | "box_s" | "box_o") {
+        return box_open()
+            && !pad_active()
+            && !info_window_open()
+            && !layout_override(controls()[index].name).is_some_and(|entry| !entry.visible)
     }
     let classic = overlay_style() == OverlayStyle::Classic;
     if classic {

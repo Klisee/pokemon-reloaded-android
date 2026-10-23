@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.Typeface
+import com.klisee.reloaded.ui.Strings
 import java.io.File
 
 /**
@@ -22,6 +23,7 @@ object TouchLabels {
         "PKM", "SEL", "ESC", "OK", "C+P",
         "O", "M", "E", "T", "L", "P",
         "Z", "X", "C", "V", "B", "S", "A", "N",
+        "Girar", "F1",
     )
 
     fun fileName(label: String): String =
@@ -29,6 +31,8 @@ object TouchLabels {
 
     /** Mirrors the label images into the folder the engine reads at startup. */
     fun writeRuntime(context: Context, filesDir: File) {
+        Strings.init(context)
+        Strings.update(Preferences(context))
         val dir = File(filesDir, "touch-labels").apply { mkdirs() }
         dir.listFiles()?.forEach { it.delete() }
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -39,7 +43,7 @@ object TouchLabels {
             textAlign = Paint.Align.LEFT
         }
         for (label in LABELS) {
-            val bitmap = drawLabel(label, paint) ?: continue
+            val bitmap = drawLabel(Strings.tr(label), paint) ?: continue
             runCatching { File(dir, fileName(label)).outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) } }
             bitmap.recycle()
         }

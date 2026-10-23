@@ -283,5 +283,7 @@
  "Esto usa un método no oficial de Kizzy (dead8309). Puede haber riesgos, como una suspensión, pero no se han reportado cuentas cerradas por usar clientes alternos. Úsalo bajo tu responsabilidad: el token se guarda cifrado y puedes cerrar sesión cuando quieras.\n\nBasado en KizzyRPC.": "This uses an unofficial method by Kizzy (dead8309). There may be risks, such as a suspension, but no accounts have been reported closed for using alternative clients. Use it at your own risk: the token is stored encrypted and you can log out whenever you want.\n\nBased on KizzyRPC.",
  "Mochila y listas: joystick, X, Z y gestos táctiles.": "Bag and lists: joystick, X, Z and touch gestures.",
  "Mochila y listas: joystick, X y gestos táctiles.": "Bag and lists: joystick, X and touch gestures.",
- "Navegación": "Navigation"
+ "Navegación": "Navigation",
+ "Girar": "Rotate",
+ "Toca una pieza y pulsa Girar para rotarla.": "Tap a piece and press Rotate to turn it."
 }

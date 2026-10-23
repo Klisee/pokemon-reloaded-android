@@ -9,7 +9,7 @@ enum class TouchProfile(val id: String, val title: String, val description: Stri
     CHOICE("choice", "Opciones", "Joystick y Z/X para responder las listas de opciones."),
     SAFARI("safari", "Safari", "Controles de captura en la Zona Safari."),
     MENU_NAV("menu_nav", "Navegación", "Mochila y listas: joystick, X, Z y gestos táctiles."),
-    MENU("menu", "Menús y caja", "Toque directo: este modo no muestra botones superpuestos."),
+    MENU("menu", "Menús y caja", "Caja/PC: Z para el menú, X para salir, S para ver y O para soltar."),
 }
 
 data class TouchControlSpec(
@@ -64,11 +64,17 @@ object TouchLayouts {
         TouchControlSpec("eleccion_ok", "OK", 0.932f, 0.600f, 0.036f, setOf(TouchProfile.CHARACTER), "eleccion_ok.png", aspect = 1.900000f),
         TouchControlSpec("eleccion_atras", "X", 0.972f, 0.420f, 0.028f, setOf(TouchProfile.CHARACTER), "eleccion_atras.png", aspect = 1.000000f),
         TouchControlSpec("truco_ctrl_p", "C+P", 0.500f, 0.060f, 0.018f, setOf(TouchProfile.CHARACTER), "truco_ctrl_p.png", aspect = 7.625000f),
+        TouchControlSpec("box_z", "Z", 0.865f, 0.851f, 0.033f, setOf(TouchProfile.MENU), null, aspect = 1.000000f),
+        TouchControlSpec("box_x", "X", 0.933f, 0.700f, 0.033f, setOf(TouchProfile.MENU), null, aspect = 1.000000f),
+        TouchControlSpec("box_s", "S", 0.712f, 0.700f, 0.026f, setOf(TouchProfile.MENU), null, aspect = 1.000000f),
+        TouchControlSpec("box_o", "O", 0.712f, 0.840f, 0.026f, setOf(TouchProfile.MENU), null, aspect = 1.000000f),
         TouchControlSpec("joystick", "Joystick", .135f, .700f, .200f,
             setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.CHOICE, TouchProfile.MENU_NAV), "joystick-base.png", joystick = true),
     )
     fun key(profile: TouchProfile, spec: TouchControlSpec) = "${profile.id}/${spec.id}"
-    fun availableFor(profile: TouchProfile) = if (profile == TouchProfile.MENU) emptyList() else
+    fun availableFor(profile: TouchProfile) = if (profile == TouchProfile.MENU)
+        controls.filter { TouchProfile.MENU in it.profiles }
+    else
         controls.filter { (!it.joystick || profile in it.profiles) && !(profile == TouchProfile.WORLD && it.id.startsWith("alpha")) && (it.id != "sel_world" || profile == TouchProfile.WORLD) && (it.id != "pkmn" || profile == TouchProfile.BATTLE) }
     fun controlsFor(profile: TouchProfile, values: Map<String, TouchPlacement> = emptyMap()) =
         availableFor(profile).filter { profile in it.profiles || key(profile, it) in values }
@@ -94,6 +100,10 @@ object TouchLayouts {
         "battle/m" to TouchPlacement(0.860f, 0.330f),
         "battle/a" to TouchPlacement(0.755f, 0.448f),
         "battle/s" to TouchPlacement(0.700f, 0.650f),
+        "menu/box_z" to TouchPlacement(0.865f, 0.851f),
+        "menu/box_x" to TouchPlacement(0.933f, 0.700f),
+        "menu/box_s" to TouchPlacement(0.712f, 0.700f),
+        "menu/box_o" to TouchPlacement(0.712f, 0.840f),
     )
     fun original(spec: TouchControlSpec, profile: TouchProfile = TouchProfile.WORLD) =
         profileDefaults[key(profile, spec)] ?: TouchPlacement(spec.x, spec.y)
@@ -108,7 +118,7 @@ object TouchLayouts {
             if (fields.size != 6) continue
             val profile = TouchProfile.entries.firstOrNull { it.id == fields[0] } ?: continue
             val spec = controls.firstOrNull { it.id == fields[1] } ?: continue
-            if (profile == TouchProfile.MENU) continue
+            if (profile == TouchProfile.MENU && TouchProfile.MENU !in spec.profiles) continue
             val x = fields[2].toFloatOrNull()?.takeIf { it.isFinite() } ?: continue
             val y = fields[3].toFloatOrNull()?.takeIf { it.isFinite() } ?: continue
             val scale = fields[4].toFloatOrNull()?.takeIf { it.isFinite() } ?: continue
@@ -120,7 +130,8 @@ object TouchLayouts {
 
     fun encode(values: Map<String, TouchPlacement>): String = buildString {
         appendLine(HEADER)
-        for (profile in TouchProfile.entries.filter {it != TouchProfile.MENU}) for (spec in controls) {
+        for (profile in TouchProfile.entries) for (spec in controls) {
+            if (profile == TouchProfile.MENU && TouchProfile.MENU !in spec.profiles) continue
             val p = values[key(profile, spec)] ?: continue
             if (!p.x.isFinite() || !p.y.isFinite() || !p.scale.isFinite()) continue
             appendLine("${profile.id} ${spec.id} ${p.x.coerceIn(0f, 1f)} ${p.y.coerceIn(0f, 1f)} ${p.scale.coerceIn(.5f, 2f)} ${if (p.visible) 1 else 0}")

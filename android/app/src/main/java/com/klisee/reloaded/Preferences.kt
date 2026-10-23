@@ -197,6 +197,15 @@ class Preferences(context: Context) {
             prefs.edit().putBoolean("touchXZDiagonalV1", true)
                 .putString("touchLayoutV1", TouchLayouts.encode(values)).apply()
         }
+        // Forced: cajas/PC get their Z/X/S/O buttons even on custom layouts.
+        if (!prefs.getBoolean("touchBoxLayoutV1", false)) {
+            values["menu/box_z"] = TouchPlacement(0.865f, 0.851f)
+            values["menu/box_x"] = TouchPlacement(0.933f, 0.700f)
+            values["menu/box_s"] = TouchPlacement(0.712f, 0.700f)
+            values["menu/box_o"] = TouchPlacement(0.712f, 0.840f)
+            prefs.edit().putBoolean("touchBoxLayoutV1", true)
+                .putString("touchLayoutV1", TouchLayouts.encode(values)).apply()
+        }
         if (prefs.getBoolean("battleTopLayoutV1", false)) return values
         // One-time: in battle, the three buttons on the right sat on top of the party's status bars.
         // They are lined up with the three on the left; only the untouched old default moves.

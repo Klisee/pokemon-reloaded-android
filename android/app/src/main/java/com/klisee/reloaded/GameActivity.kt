@@ -18,12 +18,14 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.klisee.reloaded.discord.DiscordRpcManager
 import com.klisee.reloaded.discord.DiscordRpcService
+import com.klisee.reloaded.ui.Strings
 
 /**
  * The emulator activity: a plain `NativeActivity` (that is what loads `libgm8emulator.so`),
@@ -249,6 +251,21 @@ class GameActivity : NativeActivity() {
                 if (!activity.isFinishing && !activity.isDestroyed && activity.hasWindowFocus()) {
                     activity.touchFeedback.press(activity.window.decorView, activity.touchPreferences.touchAppearance)
                 }
+            }
+        }
+
+        @JvmStatic
+        fun showTouchHint() {
+            val activity = instance ?: return
+            activity.runOnUiThread {
+                if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+                Strings.init(activity)
+                Strings.update(Preferences(activity))
+                Toast.makeText(
+                    activity,
+                    Strings.tr("Toca una pieza y pulsa Girar para rotarla."),
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
 
