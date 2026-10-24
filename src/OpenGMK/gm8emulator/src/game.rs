@@ -3083,11 +3083,19 @@ impl Game {
                 None => return false,
             };
 
-            // For sprites with per-frame colliders, an empty map is a real "no collision" frame
-            // (the open gate `spr_compuertaRetaguardia` frames 4/5). The bbox fallback below is
-            // only for sprites that never had a pixel mask, like the battle sprites.
-            if (sprite1.per_frame_colliders && collider1.data.iter().all(|&px| !px))
-                || (sprite2.per_frame_colliders && collider2.data.iter().all(|&px| !px))
+            // An empty frame is "no collision" only when the map is real-sized: the open gate
+            // frames are 48x32 / 8x43. The battle `.gmspr` sprites also carry all-false masks, but
+            // as 1x1/0x0 placeholders; those must fall through to the bbox fallback in
+            // `check_collision_point_precise`, or Vuelo/Bote never land (regression in 0.3.8).
+            let empty_real_frame = |per_frame: bool, collider: &crate::asset::sprite::Collider| {
+                per_frame
+                    && collider.width > 1
+                    && collider.height > 1
+                    && collider.data.len() > 1
+                    && collider.data.iter().all(|&px| !px)
+            };
+            if empty_real_frame(sprite1.per_frame_colliders, collider1)
+                || empty_real_frame(sprite2.per_frame_colliders, collider2)
             {
                 return false;
             }
