@@ -21,6 +21,12 @@ data class TouchControlSpec(
         "pkmn" -> "SEL · equipo en Combate"
         "sel_world" -> "SEL · movimientos en Exploración"
         "dialogo" -> "Avanzar diálogo (OK)"
+        "shift" -> "Mayús (Shift)"
+        "alt" -> "Alt / AltGr"
+        "ctrl" -> "Ctrl"
+        "f3" -> "F3 (trucos)"
+        "h" -> "H (hora)"
+        "k" -> "K (mega)"
         else -> label
     }
 }
@@ -70,10 +76,20 @@ object TouchLayouts {
         TouchControlSpec("box_o", "O", 0.712f, 0.840f, 0.026f, setOf(TouchProfile.MENU), null, aspect = 1.000000f),
         TouchControlSpec("joystick", "Joystick", .135f, .700f, .200f,
             setOf(TouchProfile.WORLD, TouchProfile.BATTLE, TouchProfile.CHOICE, TouchProfile.MENU_NAV), "joystick-base.png", joystick = true),
+        // Optional keys: empty profiles means "not part of any profile by default". The editor
+        // offers them under "Agregar botón" for every profile, and the engine only draws them where
+        // the saved layout has an entry for them.
+        TouchControlSpec("shift", "Shift", .5f, .5f, .028f, emptySet(), null),
+        TouchControlSpec("alt", "Alt", .5f, .5f, .028f, emptySet(), null),
+        TouchControlSpec("ctrl", "Ctrl", .5f, .5f, .028f, emptySet(), null),
+        TouchControlSpec("d", "D", .5f, .5f, .028f, emptySet(), null),
+        TouchControlSpec("f3", "F3", .5f, .5f, .028f, emptySet(), null),
+        TouchControlSpec("h", "H", .5f, .5f, .028f, emptySet(), null),
+        TouchControlSpec("k", "K", .5f, .5f, .028f, emptySet(), null),
     )
     fun key(profile: TouchProfile, spec: TouchControlSpec) = "${profile.id}/${spec.id}"
     fun availableFor(profile: TouchProfile) = if (profile == TouchProfile.MENU)
-        controls.filter { TouchProfile.MENU in it.profiles }
+        controls.filter { TouchProfile.MENU in it.profiles || it.profiles.isEmpty() }
     else
         controls.filter { (!it.joystick || profile in it.profiles) && !(profile == TouchProfile.WORLD && it.id.startsWith("alpha")) && (it.id != "sel_world" || profile == TouchProfile.WORLD) && (it.id != "pkmn" || profile == TouchProfile.BATTLE) }
     fun controlsFor(profile: TouchProfile, values: Map<String, TouchPlacement> = emptyMap()) =
@@ -118,7 +134,7 @@ object TouchLayouts {
             if (fields.size != 6) continue
             val profile = TouchProfile.entries.firstOrNull { it.id == fields[0] } ?: continue
             val spec = controls.firstOrNull { it.id == fields[1] } ?: continue
-            if (profile == TouchProfile.MENU && TouchProfile.MENU !in spec.profiles) continue
+            if (profile == TouchProfile.MENU && TouchProfile.MENU !in spec.profiles && spec.profiles.isNotEmpty()) continue
             val x = fields[2].toFloatOrNull()?.takeIf { it.isFinite() } ?: continue
             val y = fields[3].toFloatOrNull()?.takeIf { it.isFinite() } ?: continue
             val scale = fields[4].toFloatOrNull()?.takeIf { it.isFinite() } ?: continue
@@ -131,7 +147,7 @@ object TouchLayouts {
     fun encode(values: Map<String, TouchPlacement>): String = buildString {
         appendLine(HEADER)
         for (profile in TouchProfile.entries) for (spec in controls) {
-            if (profile == TouchProfile.MENU && TouchProfile.MENU !in spec.profiles) continue
+            if (profile == TouchProfile.MENU && TouchProfile.MENU !in spec.profiles && spec.profiles.isNotEmpty()) continue
             val p = values[key(profile, spec)] ?: continue
             if (!p.x.isFinite() || !p.y.isFinite() || !p.scale.isFinite()) continue
             appendLine("${profile.id} ${spec.id} ${p.x.coerceIn(0f, 1f)} ${p.y.coerceIn(0f, 1f)} ${p.scale.coerceIn(.5f, 2f)} ${if (p.visible) 1 else 0}")

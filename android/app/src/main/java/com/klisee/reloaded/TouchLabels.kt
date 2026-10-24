@@ -24,6 +24,7 @@ object TouchLabels {
         "O", "M", "E", "T", "L", "P",
         "Z", "X", "C", "V", "B", "S", "A", "N",
         "Girar", "F1",
+        "Shift", "Alt", "Ctrl", "D", "F3", "H", "K",
     )
 
     fun fileName(label: String): String =

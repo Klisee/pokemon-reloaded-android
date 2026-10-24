@@ -182,6 +182,16 @@ pub const CLASSIC_CONTROLS: &[Control] = &[
     // the pair is pressed together (see `control_key_down`). Centred along the very top, and drawn
     // smaller than the rest because its label is a wide one.
     Control { name: COMBO_BUTTON_NAME, key: Key::LeftControl, shape: Shape::Circle { cx: 0.500, cy: 0.060, r: 0.018 }, label: Label::Text("C+P"), contexts: CHARACTER },
+    // Optional keys for the controls editor. `contexts: 0` means "no profile by default": the
+    // generic `is_active` path only draws them when the layout file has an entry for the current
+    // profile, so the player can add Shift, Alt, F3, H... without them cluttering the overlay.
+    Control { name: "shift", key: Key::LeftShift, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("Shift"), contexts: 0 },
+    Control { name: "alt", key: Key::LeftAlt, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("Alt"), contexts: 0 },
+    Control { name: "ctrl", key: Key::LeftControl, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("Ctrl"), contexts: 0 },
+    Control { name: "d", key: Key::D, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("D"), contexts: 0 },
+    Control { name: "f3", key: Key::F3, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("F3"), contexts: 0 },
+    Control { name: "h", key: Key::H, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("H"), contexts: 0 },
+    Control { name: "k", key: Key::K, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("K"), contexts: 0 },
 ];
 /// Our own (new-style) catalogue, left as it was.
 pub const NEW_CONTROLS: &[Control] = &[
@@ -242,6 +252,16 @@ pub const NEW_CONTROLS: &[Control] = &[
     // the pair is pressed together (see `control_key_down`). Centred along the very top, and drawn
     // smaller than the rest because its label is a wide one.
     Control { name: COMBO_BUTTON_NAME, key: Key::LeftControl, shape: Shape::Circle { cx: 0.500, cy: 0.060, r: 0.018 }, label: Label::Text("C+P"), contexts: CHARACTER },
+    // Optional keys for the controls editor. `contexts: 0` means "no profile by default": the
+    // generic `is_active` path only draws them when the layout file has an entry for the current
+    // profile, so the player can add Shift, Alt, F3, H... without them cluttering the overlay.
+    Control { name: "shift", key: Key::LeftShift, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("Shift"), contexts: 0 },
+    Control { name: "alt", key: Key::LeftAlt, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("Alt"), contexts: 0 },
+    Control { name: "ctrl", key: Key::LeftControl, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("Ctrl"), contexts: 0 },
+    Control { name: "d", key: Key::D, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("D"), contexts: 0 },
+    Control { name: "f3", key: Key::F3, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("F3"), contexts: 0 },
+    Control { name: "h", key: Key::H, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("H"), contexts: 0 },
+    Control { name: "k", key: Key::K, shape: Shape::Circle { cx: 0.500, cy: 0.500, r: 0.028 }, label: Label::Text("K"), contexts: 0 },
 ];
 /// The catalogue the active overlay draws and hit-tests.
 pub fn controls() -> &'static [Control] {
