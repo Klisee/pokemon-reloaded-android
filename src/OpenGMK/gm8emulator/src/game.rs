@@ -42,7 +42,7 @@ use crate::{
     instance::{DummyFieldHolder, Instance, InstanceState},
     instancelist::{InstanceList, TileList},
     math::Real,
-    render::{atlas::AtlasBuilder, Renderer, RendererOptions, Scaling},
+    render::{atlas::AtlasBuilder, RenderMode, Renderer, RendererOptions, Scaling},
     tile,
     types::{Colour, ID},
     util,
@@ -182,8 +182,12 @@ pub struct Game {
 
     pub potential_step_settings: pathfinding::PotentialStepSettings,
 
-    pub fps: u32,                 // initially 0
+    pub fps: u32,                 // logic/room speed, initially 0
     pub frame_counter: u32,       // for FPS - gets set to 0 about once per second
+    /// Frames actually presented per second. This is what the optional in-game overlay shows.
+    pub render_fps: u32,
+    /// Whether the optional FPS overlay is drawn by the engine.
+    pub show_fps: bool,
     pub transition_kind: i32,     // default 0
     pub transition_steps: i32,    // default 80
     pub cursor_sprite: i32,       // default -1
@@ -226,6 +230,18 @@ pub struct Game {
     pub stored_events: VecDeque<replay::Event>,
     pub frame_limiter: bool, // whether to limit FPS of gameplay by room_speed
     pub frame_limit_at: usize, // on which frame to start limiting FPS
+    /// How drawing is paced relative to the game's fixed step. Set from `OPENGMK_RENDER` when the
+    /// normal game loop starts.
+    pub render_mode: crate::render::RenderMode,
+    /// Position between the previous and current game steps that the next drawn frame shows.
+    pub interp_alpha: f64,
+    /// True while drawing a frame that is not the one belonging to the current game step. Draw
+    /// events run in this mode too, but anything that would change game state is suppressed.
+    pub interp_draw: bool,
+    /// The canonical draw of a step updates the views; the extra frames only read them.
+    pub interp_update_views: bool,
+    /// View state before the current step, used to interpolate the camera.
+    pub prev_views: Option<Vec<View>>,
     pub ffmpeg_recorder: Option<Child>,
 
     pub audio: audio::AudioManager,
@@ -1398,9 +1414,16 @@ impl Game {
             clock: GameClock::SpoofedNanos(0), // to avoid accessing the system timer for now
             frame_limiter,
             frame_limit_at,
+            render_mode: crate::render::RenderMode::Native,
+            interp_alpha: 1.0,
+            interp_draw: false,
+            interp_update_views: true,
+            prev_views: None,
             ffmpeg_recorder,
             fps: 0,
             frame_counter: 0,
+            render_fps: 0,
+            show_fps: false,
             parameters: game_arguments,
             encoding,
             esc_close_game: settings.esc_close_game,
@@ -2231,6 +2254,11 @@ impl Game {
     /// is already drawn is enough to move it, and it costs only the blit.
     #[cfg(target_os = "android")]
     fn represent_if_ime_moved(&mut self) {
+        // The interpolation pass is already drawing; presenting from inside it would flush the
+        // queue halfway through. Its own present, a few instructions later, sees the new inset.
+        if self.interp_draw {
+            return
+        }
         static LAST_INSET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let inset = crate::touch_controls::text_entry_inset();
         if LAST_INSET.swap(inset, std::sync::atomic::Ordering::Relaxed) == inset {
@@ -2679,57 +2707,321 @@ impl Game {
         self.init()?;
         handle_scene_change!(self);
 
+        // The launcher pins this through `video.conf`; a desktop user can set `OPENGMK_RENDER`.
+        // Read it here because the launcher and the engine share one process.
+        self.render_mode = crate::render::pinned_render_mode();
+        match self.render_mode {
+            RenderMode::Auto => self.renderer.set_vsync(true),
+            RenderMode::Fixed(_) | RenderMode::Uncapped => self.renderer.set_vsync(false),
+            RenderMode::Native => (),
+        }
+        // Auto normally lets vsync pace the screen. If the driver ignores the swap interval, the
+        // launcher's detected rate is used as an explicit ceiling.
+        let paced_fps = match self.render_mode {
+            RenderMode::Fixed(fps) => Some(fps),
+            RenderMode::Auto => crate::render::pinned_render_hz(),
+            _ => None,
+        };
+        self.show_fps = std::env::var("OPENGMK_SHOW_FPS").map(|value| value != "0").unwrap_or(false);
+        self.render_fps = self.room.speed;
+        self.prev_views = Some(self.room.views.clone());
+
         let mut time_now = Instant::now();
         let mut time_last = time_now;
+        let mut step_clock = time_now;
+        let mut accumulator = Duration::ZERO;
         let mut current_frame_time: u32 = 0;
+        let mut render_frames: u32 = 0;
+        let mut step_frames: u32 = 0;
+        let mut last_render_report = time_now;
+        let mut next_present = time_now;
+        let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
             self.process_window_events();
 
-            // The room goes with the error: the error alone names a function, not where it was
-            // called from, and with 34388 files and hundreds of scripts that is not enough to find
-            // anything. This is what turns a report into something that can be chased.
-            if let Err(e) = self.frame() {
-                println!("Runtime error: {} (room {})", e, self.room.id);
-                return Err(e.into())
-            }
-
-            self.capture_recording_frame(&mut current_frame_time, self.room.speed);
-            if let Some(SceneChange::End) = self.scene_change {
-                println!("game ending");
-                if let Some(recorder) = self.ffmpeg_recorder.take() {
-                    self.stop_recording_capture(recorder);
+            // Test-only savestate hotkeys for the netplay determinism check.
+            #[cfg(not(target_os = "android"))]
+            {
+                if self.input.keyboard_check_pressed(input::Button::F9 as u8) {
+                    let state = crate::game::savestate::SaveState::from(
+                        self,
+                        crate::game::Replay::new(0, 0),
+                        self.renderer.state(),
+                        false,
+                    );
+                    let mut buffer = crate::game::savestate::Buffer::new();
+                    match state.save_to_file(&std::path::PathBuf::from("/tmp/gm8-state.bin"), &mut buffer) {
+                        Ok(()) => eprintln!("[savestate] F9 guardado"),
+                        Err(err) => eprintln!("[savestate] F9 error: {:?}", err),
+                    }
+                }
+                if self.input.keyboard_check_pressed(input::Button::F10 as u8) {
+                    let mut buffer = crate::game::savestate::Buffer::new();
+                    match crate::game::savestate::SaveState::from_file(
+                        &std::path::PathBuf::from("/tmp/gm8-state.bin"),
+                        &mut buffer,
+                    ) {
+                        Ok(state) => {
+                            let (_replay, renderer_state) = state.load_into(self);
+                            self.renderer.set_state(&renderer_state);
+                            eprintln!("[savestate] F10 cargado");
+                        },
+                        Err(err) => eprintln!("[savestate] F10 error: {:?}", err),
+                    }
                 }
             }
-            handle_scene_change!(self);
 
-            // Exit if the window was closed by the user, such as by pressing 'X'
-            if self.close_requested {
-                break Ok(self.run_game_end_events()?);
-            }
-
-            // frame limiter
-            let diff = Instant::now().duration_since(time_now);
-            let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
-            if let GameClock::SpoofedNanos(t) = &mut self.clock {
-                *t += duration.as_nanos();
-                self.fps = self.room.speed.into();
-            } else {
-                // gm8 just ignores any leftover time after a second has passed, so we do the same
-                if time_now.duration_since(time_last) >= Duration::from_secs(1) {
-                    time_last = time_now;
-                    self.fps = self.frame_counter;
-                    self.frame_counter = 0;
+            if self.render_mode.interpolates() {
+                let now = Instant::now();
+                // While Android has no surface (app in the background) do not accumulate wall time:
+                // otherwise the game would fast-forward to catch up when the window comes back.
+                #[cfg(target_os = "android")]
+                if !crate::render::opengl::egl::has_surface() {
+                    step_clock = now;
+                    accumulator = Duration::ZERO;
+                    std::thread::sleep(Duration::from_millis(16));
+                    continue
                 }
-            }
-            self.frame_counter += 1;
+                accumulator += now.duration_since(step_clock);
+                step_clock = now;
+                let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
 
-            if let (Some(time), true) = (duration.checked_sub(diff), self.frame_limiter) {
-                gml::datetime::sleep(time);
-                time_now += duration;
+                // Transitions, a GML `sleep` and a very heavy battle frame can pause the loop. Do
+                // not replay that missing time as a burst of steps: the original runner simply
+                // resumes. Small overshoots are kept so the 30 Hz average stays correct.
+                if accumulator > duration * 3 {
+                    if log_render {
+                        eprintln!("[render] pausa de {:?}; se descarta el atraso", accumulator);
+                    }
+                    accumulator = duration;
+                }
+
+                if accumulator >= duration {
+                    // This is the canonical frame of the step: draw events run once and are allowed
+                    // to change the game. It is presented at the previous position so the next
+                    // frames can move smoothly towards the state just computed.
+                    self.interp_alpha = 0.0;
+                    self.interp_draw = false;
+                    self.interp_update_views = true;
+
+                    // The room goes with the error: the error alone names a function, not where it
+                    // was called from, and with 34388 files and hundreds of scripts that is not
+                    // enough to find anything.
+                    if let Err(e) = self.frame() {
+                        println!("Runtime error: {} (room {})", e, self.room.id);
+                        return Err(e.into())
+                    }
+
+                    accumulator -= duration;
+                    self.capture_recording_frame(&mut current_frame_time, self.room.speed);
+                    if let Some(SceneChange::End) = self.scene_change {
+                        println!("game ending");
+                        if let Some(recorder) = self.ffmpeg_recorder.take() {
+                            self.stop_recording_capture(recorder);
+                        }
+                    }
+                    // A room change invalidates the previous camera and the previous instances.
+                    let scene_changed = self.scene_change.is_some();
+                    if scene_changed {
+                        self.prev_views = None;
+                        // The new room's first draw is not an interpolation gap: persistent instances
+                        // still carry positions from the old room, so show the state as it is.
+                        self.interp_alpha = 1.0;
+                    }
+                    handle_scene_change!(self);
+                    if scene_changed {
+                        self.prev_views = Some(self.room.views.clone());
+                    }
+
+                    // Exit if the window was closed by the user, such as by pressing 'X'
+                    if self.close_requested {
+                        break Ok(self.run_game_end_events()?);
+                    }
+
+                    if let GameClock::SpoofedNanos(t) = &mut self.clock {
+                        *t += duration.as_nanos();
+                        self.fps = self.room.speed.into();
+                    } else {
+                        // gm8 just ignores any leftover time after a second has passed, so we do the same
+                        if step_clock.duration_since(time_last) >= Duration::from_secs(1) {
+                            time_last = step_clock;
+                            self.fps = self.frame_counter;
+                            self.frame_counter = 0;
+                        }
+                    }
+                    self.frame_counter += 1;
+                    step_frames += 1;
+                } else {
+                    // A frame between two game steps. Draw events still run, but state-changing
+                    // functions are suppressed inside `render_only`.
+                    self.interp_alpha =
+                        (accumulator.as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0);
+                    self.interp_draw = true;
+                    self.interp_update_views = false;
+                    if let Err(e) = self.render_only() {
+                        println!("Runtime error: {} (room {})", e, self.room.id);
+                        return Err(e.into())
+                    }
+                }
+                // Native lets vsync/uncapped set the pace; Fixed does it explicitly, for drivers
+                // where eglSwapInterval/glXSwapIntervalEXT answers success but never blocks.
+                if let Some(fps) = paced_fps {
+                    let frame = Duration::from_nanos(1_000_000_000 / fps.max(1) as u64);
+                    next_present += frame;
+                    let now = Instant::now();
+                    if next_present > now {
+                        std::thread::sleep(next_present - now);
+                    } else {
+                        next_present = now;
+                    }
+                }
+                render_frames += 1;
+                if last_render_report.elapsed() >= Duration::from_secs(1) {
+                    self.render_fps = render_frames;
+                    if log_render {
+                        eprintln!(
+                            "[render] {} dibujos/s ({} pasos/s, room {})",
+                            render_frames, step_frames, self.room.speed
+                        );
+                    }
+                    render_frames = 0;
+                    step_frames = 0;
+                    last_render_report = Instant::now();
+                }
             } else {
-                time_now = Instant::now();
+                self.interp_alpha = 1.0;
+                self.interp_draw = false;
+                self.interp_update_views = true;
+
+                // The room goes with the error: the error alone names a function, not where it was
+                // called from, and with 34388 files and hundreds of scripts that is not enough to
+                // find anything. This is what turns a report into something that can be chased.
+                if let Err(e) = self.frame() {
+                    println!("Runtime error: {} (room {})", e, self.room.id);
+                    return Err(e.into())
+                }
+
+                self.capture_recording_frame(&mut current_frame_time, self.room.speed);
+                if let Some(SceneChange::End) = self.scene_change {
+                    println!("game ending");
+                    if let Some(recorder) = self.ffmpeg_recorder.take() {
+                        self.stop_recording_capture(recorder);
+                    }
+                }
+                handle_scene_change!(self);
+
+                // Exit if the window was closed by the user, such as by pressing 'X'
+                if self.close_requested {
+                    break Ok(self.run_game_end_events()?);
+                }
+
+                // frame limiter
+                let diff = Instant::now().duration_since(time_now);
+                let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
+                if let GameClock::SpoofedNanos(t) = &mut self.clock {
+                    *t += duration.as_nanos();
+                    self.fps = self.room.speed.into();
+                } else {
+                    // gm8 just ignores any leftover time after a second has passed, so we do the same
+                    if time_now.duration_since(time_last) >= Duration::from_secs(1) {
+                        time_last = time_now;
+                        self.fps = self.frame_counter;
+                        self.frame_counter = 0;
+                    }
+                }
+                self.frame_counter += 1;
+                step_frames += 1;
+
+                if let (Some(time), true) = (duration.checked_sub(diff), self.frame_limiter) {
+                    gml::datetime::sleep(time);
+                    time_now += duration;
+                } else {
+                    time_now = Instant::now();
+                }
+
+                render_frames += 1;
+                if last_render_report.elapsed() >= Duration::from_secs(1) {
+                    self.render_fps = render_frames;
+                    if log_render {
+                        eprintln!(
+                            "[render] {} dibujos/s ({} pasos/s, room {})",
+                            render_frames, step_frames, self.room.speed
+                        );
+                    }
+                    render_frames = 0;
+                    step_frames = 0;
+                    last_render_report = Instant::now();
+                }
             }
         }
+    }
+
+    /// Draws one frame between two game steps. It runs the game's draw events with the same state
+    /// the step left behind, so visuals that depend on it (menus, checks for nearby instances) keep
+    /// working, but anything that could alter the simulation is suppressed and the few pieces of
+    /// state the draw path normally writes are restored afterwards.
+    fn render_only(&mut self) -> gml::Result<()> {
+        #[cfg(target_os = "android")]
+        let _frame = crate::render::opengl::egl::frame_guard();
+
+        #[cfg(target_os = "android")]
+        {
+            if crate::render::opengl::egl::context_lost() {
+                eprintln!("[gl] contexto perdido: terminando la sesion para reconstruir el renderer");
+                self.scene_change = Some(SceneChange::End);
+                return Ok(())
+            }
+            if !crate::render::opengl::egl::has_surface() {
+                // There is nothing to draw to while the activity is in the background. Native mode
+                // already sleeps once per step; Uncapped would spin the CPU without this.
+                std::thread::sleep(Duration::from_millis(8));
+                return Ok(())
+            }
+            unsafe { crate::render::opengl::egl::bind_surface() };
+        }
+
+        if self.close_requested {
+            return Ok(())
+        }
+
+        if !self.auto_draw || self.scene_change.is_some() {
+            std::thread::sleep(Duration::from_millis(4));
+            return Ok(())
+        }
+
+        let rand = self.rand.clone();
+        let render_state = self.renderer.draw_state();
+        let draw_font_id = self.draw_font_id;
+        let draw_colour = self.draw_colour;
+        let draw_alpha = self.draw_alpha;
+        let draw_halign = self.draw_halign;
+        let draw_valign = self.draw_valign;
+        let scene_change = self.scene_change.clone();
+        let views = self.room.views.clone();
+        let view_current = self.view_current;
+
+        self.interp_draw = true;
+        self.interp_update_views = false;
+        let result = self.draw();
+
+        self.interp_draw = false;
+        self.rand = rand;
+        self.renderer.restore_draw_state(&render_state);
+        self.draw_font_id = draw_font_id;
+        self.draw_colour = draw_colour;
+        self.draw_alpha = draw_alpha;
+        self.draw_halign = draw_halign;
+        self.draw_valign = draw_valign;
+        self.scene_change = scene_change;
+        self.room.views = views;
+        self.view_current = view_current;
+
+        result?;
+
+        if self.scene_change.is_none() && self.play_type != PlayType::Record {
+            self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+        }
+        Ok(())
     }
 
     fn capture_recording_frame(&mut self, current_frame_time: &mut u32, game_speed: u32) {

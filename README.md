@@ -35,6 +35,13 @@ ajustes, gestión de partidas y logs. El juego en sí no se toca.
 - **Partidas.** Se leen y escriben en la carpeta del juego. Desde Ajustes → Partidas puedes verlas,
   exportarlas, importarlas, borrarlas y mover una de una ranura a otra. Si jugabas en PC, tu partida
   entra por aquí.
+- **Frames.** En Ajustes → Frames, **30 FPS (Original)** es el modo por defecto. **60 FPS
+  (Experimental)** y **120 FPS (Experimental)** interpolan movimiento y cámara a esa tasa; la opción
+  de 120 solo se habilita si el panel anuncia 120 Hz o más. **FPS sin Límite** dibuja todo lo que
+  pueda el móvil y también requiere 120 Hz o más. La simulación sigue a 30 pasos/s: no va más rápido
+  el juego, y las animaciones de sprites y la lógica siguen a 30 Hz. Los modos experimentales gastan
+  más batería y pueden fallar. En escritorio se elige con `-R auto`, `-R 60`, `-R 120` o
+  `-R uncapped`, y `OPENGMK_RENDER_LOG=1` imprime los dibujos/s y los pasos/s reales.
 - **Salir y volver.** Al mandar la app a segundo plano, el bucle se detiene y el audio se corta de
   verdad; al volver, sigue donde estaba en vez de quedarse en negro.
 - **Logs.** Si algo va mal, la app escribe un log y lo puedes compartir como archivo de texto desde

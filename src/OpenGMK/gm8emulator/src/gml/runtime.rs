@@ -1293,7 +1293,13 @@ impl Game {
             InstanceVariable::Argument14 => self.set_argument(context, 14, value)?,
             InstanceVariable::Argument15 => self.set_argument(context, 15, value)?,
             InstanceVariable::Argument => self.set_argument(context, array_index as usize, value)?,
-            InstanceVariable::Room => self.scene_change = Some(SceneChange::Room(value.into())),
+            InstanceVariable::Room => {
+                // Draw scripts sometimes steer the room as a safety net. A frame drawn only to
+                // interpolate must not act on that; the canonical frame of the step will.
+                if !self.interp_draw {
+                    self.scene_change = Some(SceneChange::Room(value.into()))
+                }
+            },
             InstanceVariable::TransitionKind => self.transition_kind = value.into(),
             InstanceVariable::TransitionSteps => self.transition_steps = value.into(),
             InstanceVariable::Score => self.score = value.into(),

@@ -128,14 +128,42 @@ fn load_video() {
     if let Ok(text) = fs::read_to_string(&path) {
         for line in text.lines() {
             let Some((name, value)) = line.trim().split_once('=') else { continue };
-            if name.trim() != "scaling" {
-                continue
-            }
-            let value = value.trim();
-            if value == "aspect" || value == "full" {
-                eprintln!("[video] escalado: {}", value);
-                // Read by the engine when it builds its renderer.
-                std::env::set_var("OPENGMK_SCALING", value);
+            match name.trim() {
+                "scaling" => {
+                    let value = value.trim();
+                    if value == "aspect" || value == "full" {
+                        eprintln!("[video] escalado: {}", value);
+                        // Read by the engine when it builds its renderer.
+                        std::env::set_var("OPENGMK_SCALING", value);
+                    }
+                },
+                // How the engine paces drawing: native (one frame per game step), auto (vsync) or
+                // uncapped (as fast as the device can). Read when the game loop starts.
+                "render" => {
+                    let value = value.trim();
+                    // Named modes plus the numeric caps the Settings screen writes (60/120/...).
+                    let numeric = value.parse::<u32>().map(|hz| hz > 0).unwrap_or(false);
+                    if matches!(value, "native" | "auto" | "uncapped") || numeric {
+                        eprintln!("[video] render: {}", value);
+                        std::env::set_var("OPENGMK_RENDER", value);
+                    }
+                },
+                // Refresh rate the launcher detected. `auto` uses it as a fallback cap when the
+                // driver's swap interval answers success but never blocks (as on some PCs).
+                "detected_hz" => {
+                    if let Ok(hz) = value.trim().parse::<u32>() {
+                        if hz > 0 {
+                            eprintln!("[video] pantalla: {} Hz", hz);
+                            std::env::set_var("OPENGMK_RENDER_HZ", hz.to_string());
+                        }
+                    }
+                },
+                "show_fps" => {
+                    let value = value.trim();
+                    eprintln!("[video] mostrar FPS: {}", value != "0");
+                    std::env::set_var("OPENGMK_SHOW_FPS", if value == "1" { "1" } else { "0" });
+                },
+                _ => (),
             }
         }
     }

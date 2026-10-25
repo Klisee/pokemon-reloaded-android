@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.SettingsBackupRestore
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.VideogameAsset
 import androidx.compose.material3.AlertDialog
@@ -72,6 +73,7 @@ fun SettingsScreen(
     onControls: () -> Unit,
     onDiscord: () -> Unit,
     onTouchSettings: () -> Unit,
+    onFpsSettings: () -> Unit,
     onMySaves: () -> Unit,
     onUpdateFound: (Update.Release) -> Unit,
     bottomBar: @Composable () -> Unit = {},
@@ -263,6 +265,17 @@ fun SettingsScreen(
                         prefs.keepAspect = true
                         prefs.writeVideo(context.filesDir)
                     },
+                )
+            }
+
+            SettingsGroup("FPS") {
+                NavRow(
+                    icon = Icons.Filled.Speed,
+                    title = "FPS",
+                    subtitle = "Modifica el framerate del juego a tu gusto, con frames mayores a 30 FPS",
+                    items = 1,
+                    index = 0,
+                    onClick = onFpsSettings,
                 )
             }
 

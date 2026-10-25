@@ -236,7 +236,13 @@ pub struct RendererImpl {
 
     loc_gm81_normalize: GLint, // uniform bool gm81_normalize
     loc_tex: GLint,            // uniform sampler2D tex
+    loc_interp: GLint,         // uniform float interp_amount
     buf_state: GLuint,         // uniform RenderState state
+    /// World-space offset tagged on the vertices currently being submitted. The game sets it before
+    /// each instance's draw event so interpolation stays a rendering concern.
+    draw_offset: [f32; 2],
+    /// How much of `draw_offset` the shader applies (0 = current game step, 1 = previous one).
+    interp_amount: f32,
 
     /// Lazily-built program/buffers for the on-screen touch controls (Android only).
     #[cfg(target_os = "android")]
@@ -663,6 +669,15 @@ impl RendererImpl {
                 size_of::<Vertex>() as i32,
                 offset_of!(Vertex, atlas_xywh) as *const _,
             );
+            gl.EnableVertexAttribArray(5);
+            gl.VertexAttribPointer(
+                5,
+                2,
+                gl::FLOAT,
+                gl::FALSE,
+                size_of::<Vertex>() as i32,
+                offset_of!(Vertex, interp) as *const _,
+            );
 
             // Use program
             gl.UseProgram(program);
@@ -748,7 +763,7 @@ impl RendererImpl {
                 },
                 stored_framebuffer: None,
                 zbuf_format,
-            zbuf_type,
+                zbuf_type,
                 zbuf_trashed: false,
                 white_pixel: Default::default(),
                 vertex_queue: Vec::with_capacity(1536),
@@ -771,7 +786,10 @@ impl RendererImpl {
 
                 loc_gm81_normalize: gl.GetUniformLocation(program, b"gm81_normalize\0".as_ptr().cast()),
                 loc_tex: gl.GetUniformLocation(program, b"tex\0".as_ptr().cast()),
+                loc_interp: gl.GetUniformLocation(program, b"interp_amount\0".as_ptr().cast()),
                 buf_state,
+                draw_offset: [0.0, 0.0],
+                interp_amount: 0.0,
 
                 #[cfg(target_os = "android")]
                 overlay: None,
@@ -783,6 +801,7 @@ impl RendererImpl {
             // default uniform values
             renderer.gl.Uniform1i(renderer.loc_gm81_normalize, options.normalize_normals as _);
             renderer.gl.Uniform1i(renderer.loc_tex, 0 as _);
+            renderer.gl.Uniform1f(renderer.loc_interp, 0.0);
             renderer.gl.BindBuffer(gl::UNIFORM_BUFFER, renderer.buf_state);
             renderer.gl.BufferData(
                 gl::UNIFORM_BUFFER,
@@ -894,7 +913,16 @@ impl RendererImpl {
 
     fn push_primitive(&mut self, builder: &PrimitiveBuilder) {
         self.setup_queue(builder.get_atlas_id(), builder.get_shape());
+        let start = self.vertex_queue.len();
         self.vertex_queue.extend_from_slice(builder.get_vertices());
+        // In native mode the uniform is zero and the attribute is irrelevant. Leave it at zero
+        // too, so a NaN/infinite game position can never reach the shader as `NaN * 0`.
+        if self.interp_amount != 0.0 {
+            let offset = self.draw_offset;
+            for vertex in &mut self.vertex_queue[start..] {
+                vertex.interp = offset;
+            }
+        }
     }
 
     fn draw_buffer(&mut self, atlas_id: u32, shape: PrimitiveShape, buffer: &[Vertex]) {
@@ -935,6 +963,7 @@ impl RendererImpl {
             );
             debug_assert_eq!(self.gl.GetError(), 0);
 
+            self.gl.Uniform1f(self.loc_interp, self.interp_amount);
             self.gl.DrawArrays(shape.into(), 0, buffer.len() as i32);
         }
     }
@@ -2381,6 +2410,18 @@ impl RendererTrait for RendererImpl {
         unsafe { self.imp.wait_vsync() }
     }
 
+    fn set_draw_offset(&mut self, x: f64, y: f64) {
+        let finite = |v: f64| {
+            let v = v as f32;
+            if v.is_finite() { v } else { 0.0 }
+        };
+        self.draw_offset = [finite(x), finite(y)];
+    }
+
+    fn set_interp_amount(&mut self, amount: f32) {
+        self.interp_amount = amount.clamp(0.0, 1.0);
+    }
+
     fn create_sprite_colour(&mut self, width: i32, height: i32, col: Colour) -> Result<AtlasRef, String> {
         let atlas_ref = self.create_surface(width, height, false)?;
         if let Some(rect) = self.get_rect(atlas_ref) {
@@ -3250,6 +3291,7 @@ impl RendererTrait for RendererImpl {
         self.setup_queue(self.white_pixel.atlas_id, PrimitiveShape::Point);
         self.vertex_queue.push(Vertex {
             pos: [x as f32, y as f32, self.depth],
+            interp: if self.interp_amount != 0.0 { self.draw_offset } else { [0.0, 0.0] },
             tex_coord: [f32::NAN; 2],
             blend: split_colour(colour, alpha),
             atlas_xywh: self.white_pixel.into(),

@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -180,17 +181,18 @@ fun ChoiceRow(
     items: Int,
     index: Int,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onSelect: () -> Unit,
 ) {
     GroupListItem(
         headlineContent = { Text(title, style = MaterialTheme.typography.titleMedium) },
         supportingContent = { Text(subtitle, style = MaterialTheme.typography.bodyMedium) },
         leadingContent = { Icon(icon, contentDescription = null) },
-        trailingContent = { RadioButton(selected = selected, onClick = null) },
+        trailingContent = { RadioButton(selected = selected, onClick = null, enabled = enabled) },
         items = items,
         index = index,
-        modifier = modifier,
-        onClick = onSelect,
+        modifier = modifier.alpha(if (enabled) 1f else 0.45f),
+        onClick = if (enabled) onSelect else null,
     )
 }
 

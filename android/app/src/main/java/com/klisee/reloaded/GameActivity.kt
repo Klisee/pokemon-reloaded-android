@@ -98,6 +98,21 @@ class GameActivity : NativeActivity() {
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             window.attributes = attrs
         }
+        // Ask the system for the panel's rate in the experimental modes. Some OEMs ignore this,
+        // which is why the engine also has the detected rate as a fallback ceiling.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val prefs = Preferences(applicationContext)
+            val rate = when (prefs.renderMode) {
+                "60" -> 60f
+                "120", "uncapped" -> prefs.detectedRefreshRate()
+                else -> 0f
+            }
+            if (rate > 0f) {
+                val attrs = window.attributes
+                attrs.preferredRefreshRate = rate
+                window.attributes = attrs
+            }
+        }
         super.onCreate(savedInstanceState)
         instance = this
         if (Preferences(applicationContext).keepScreenOn) {

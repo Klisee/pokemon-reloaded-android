@@ -43,7 +43,7 @@ import com.klisee.reloaded.installUpdate
 import kotlinx.coroutines.launch
 
 /** Screens reached from a tab rather than being tabs themselves. */
-private enum class Pushed { About, Controls, Discord, TouchSettings, TouchLayout, MySaves }
+private enum class Pushed { About, Controls, Discord, TouchSettings, Fps, TouchLayout, MySaves }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -198,6 +198,7 @@ fun App(repo: GameRepository, prefs: Preferences) {
         )
         Pushed.Discord -> DiscordScreen(prefs = prefs, onBack = { pushed = null })
         Pushed.TouchSettings -> TouchSettingsScreen(prefs = prefs, onBack = { pushed = null })
+        Pushed.Fps -> FpsScreen(prefs = prefs, onBack = { pushed = null })
         Pushed.TouchLayout -> TouchLayoutScreen(prefs = prefs, onBack = { pushed = null })
         Pushed.MySaves -> MySavesScreen(repo = repo, onBack = { pushed = null })
         null -> Box(modifier = Modifier.fillMaxSize()) {
@@ -228,6 +229,7 @@ fun App(repo: GameRepository, prefs: Preferences) {
                         onControls = { pushed = Pushed.Controls },
                         onDiscord = { pushed = Pushed.Discord },
                         onTouchSettings = { pushed = Pushed.TouchSettings },
+                        onFpsSettings = { pushed = Pushed.Fps },
                         onMySaves = { pushed = Pushed.MySaves },
                         onUpdateFound = { update = it },
                     )

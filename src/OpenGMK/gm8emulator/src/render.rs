@@ -104,6 +104,52 @@ pub fn pinned_scaling() -> Option<Scaling> {
     }
 }
 
+/// How the game is presented when the room runs slower than the screen.
+///
+/// The game itself always steps at its room speed. `Auto` and `Uncapped` decouple drawing from that
+/// step and interpolate instance positions, so the picture can run at the screen's rate while the
+/// simulation keeps its original timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderMode {
+    /// One drawn frame per game step, exactly like the original runner.
+    Native,
+    /// Draw as fast as the display lets us (vsync), interpolating between game steps.
+    Auto,
+    /// Interpolate but pace drawing to a fixed number of frames per second. Useful when vsync is
+    /// not honoured by the driver and the display's native rate is known.
+    Fixed(u32),
+    /// Do not wait for anything; draw as fast as the device can.
+    Uncapped,
+}
+
+impl RenderMode {
+    pub fn interpolates(self) -> bool {
+        !matches!(self, RenderMode::Native)
+    }
+}
+
+/// The display refresh rate the launcher detected, used as a ceiling for `Auto` when vsync does
+/// not actually pace the swap.
+pub fn pinned_render_hz() -> Option<u32> {
+    let value = std::env::var("OPENGMK_RENDER_HZ").ok()?;
+    value.trim().parse::<u32>().ok().filter(|hz| *hz > 0).map(|hz| hz.min(1000))
+}
+
+/// The render rate the launcher pinned through the environment, if any. Absent means `Native`.
+pub fn pinned_render_mode() -> RenderMode {
+    let value = std::env::var("OPENGMK_RENDER").unwrap_or_default();
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "auto" => RenderMode::Auto,
+        "uncapped" | "unlimited" | "max" => RenderMode::Uncapped,
+        // A number is a fixed cap, for drivers where vsync does not actually pace the swap.
+        other => match other.parse::<u32>() {
+            Ok(fps) if fps > 0 => RenderMode::Fixed(fps.min(1000)),
+            _ => RenderMode::Native,
+        },
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SavedTexture {
     width: i32,
@@ -185,6 +231,14 @@ impl From<PrimitiveType> for PrimitiveShape {
 #[repr(C)]
 struct Vertex {
     pub pos: [f32; 3],
+    /// How far this vertex was from where it should be, in world pixels, when it was submitted.
+    ///
+    /// The shader subtracts this by `interp_amount`, so the same frame can be presented at any point
+    /// between the previous game step and the current one without touching the game state.
+    ///
+    /// Render-only data: keeping it out of savestates also keeps old savestates loadable.
+    #[serde(skip)]
+    pub interp: [f32; 2],
     pub tex_coord: [f32; 2],
     pub blend: [f32; 4],
     pub atlas_xywh: [f32; 4],
@@ -239,7 +293,14 @@ impl PrimitiveBuilder {
         // interpolators) are allowed to flush it, which turned the texture coordinate into a real
         // sample and made every filled primitive -- the characters' shadows included -- vanish.
         let tex_coord = if self.textured { tex_coord } else { [-1.0; 2] };
-        self.push_vertex_raw(Vertex { pos, tex_coord, blend, normal, atlas_xywh: self.atlas_ref.into() });
+        self.push_vertex_raw(Vertex {
+            pos,
+            interp: [0.0, 0.0],
+            tex_coord,
+            blend,
+            normal,
+            atlas_xywh: self.atlas_ref.into(),
+        });
         self
     }
 
@@ -288,6 +349,13 @@ pub trait RendererTrait {
     fn set_vsync(&self, vsync: bool);
     fn get_vsync(&self) -> bool;
     fn wait_vsync(&self);
+
+    /// Sets the interpolation offset applied to every vertex submitted from now on. Call it before
+    /// each instance's draw event and reset it to zero afterwards.
+    fn set_draw_offset(&mut self, x: f64, y: f64);
+    /// How much of each vertex's interpolation offset to apply: 0 shows the current step, 1 shows
+    /// the previous one.
+    fn set_interp_amount(&mut self, amount: f32);
 
     fn get_rect(&self, id: AtlasRef) -> Option<&AtlasRect>;
 
@@ -699,6 +767,14 @@ impl Renderer {
 
     pub fn wait_vsync(&self) {
         self.0.wait_vsync()
+    }
+
+    pub fn set_draw_offset(&mut self, x: f64, y: f64) {
+        self.0.set_draw_offset(x, y)
+    }
+
+    pub fn set_interp_amount(&mut self, amount: f32) {
+        self.0.set_interp_amount(amount)
     }
 
     pub fn draw_sprite(
@@ -1320,6 +1396,58 @@ impl Renderer {
         }
     }
 
+    /// The part of the renderer state that draw events can touch. Cheaper than [`state`], which
+    /// also snapshots every atlas rect for savestates and would be wasteful on every extra frame.
+    pub fn draw_state(&self) -> DrawState {
+        DrawState {
+            model_matrix: self.get_model_matrix(),
+            alpha_blending: self.get_alpha_blending(),
+            colour_blending: self.get_colour_blending(),
+            blend_mode: self.get_blend_mode(),
+            pixel_interpolation: self.get_pixel_interpolation(),
+            texture_repeat: self.get_texture_repeat(),
+            ambient_colour: self.get_ambient_colour(),
+            using_3d: self.get_3d(),
+            depth: self.get_depth(),
+            depth_test: self.get_depth_test(),
+            write_depth: self.get_write_depth(),
+            culling: self.get_culling(),
+            perspective: self.get_perspective(),
+            fog: self.get_fog(),
+            gouraud: self.get_gouraud(),
+            lighting_enabled: self.get_lighting_enabled(),
+            lights: self.get_lights(),
+            circle_precision: self.get_circle_precision(),
+            primitive_2d: self.get_primitive_2d(),
+            primitive_3d: self.get_primitive_3d(),
+            zbuf_trashed: self.get_zbuf_trashed(),
+        }
+    }
+
+    pub fn restore_draw_state(&mut self, state: &DrawState) {
+        self.set_model_matrix(state.model_matrix);
+        self.set_alpha_blending(state.alpha_blending);
+        self.set_colour_blending(state.colour_blending);
+        self.set_blend_mode(state.blend_mode.0, state.blend_mode.1);
+        self.set_pixel_interpolation(state.pixel_interpolation);
+        self.set_texture_repeat(state.texture_repeat);
+        self.set_ambient_colour(state.ambient_colour);
+        self.set_3d(state.using_3d);
+        self.set_depth(state.depth);
+        self.set_depth_test(state.depth_test);
+        self.set_write_depth(state.write_depth);
+        self.set_culling(state.culling);
+        self.set_perspective(state.perspective);
+        self.set_fog(state.fog.clone());
+        self.set_gouraud(state.gouraud);
+        self.set_lighting_enabled(state.lighting_enabled);
+        self.set_lights(state.lights);
+        self.set_circle_precision(state.circle_precision);
+        self.set_primitive_2d(state.primitive_2d.clone());
+        self.set_primitive_3d(state.primitive_3d.clone());
+        self.set_zbuf_trashed(state.zbuf_trashed);
+    }
+
     pub fn set_state(&mut self, state: &RendererState) {
         self.set_model_matrix(state.model_matrix);
         self.set_alpha_blending(state.alpha_blending);
@@ -1359,6 +1487,33 @@ pub struct RendererState {
     pub texture_repeat: bool,
     pub texture_rects: Vec<Option<AtlasRect>>,
     pub vsync: bool,
+    pub ambient_colour: i32,
+    pub using_3d: bool,
+    pub depth: f32,
+    pub depth_test: bool,
+    pub write_depth: bool,
+    pub culling: bool,
+    pub perspective: bool,
+    pub fog: Option<Fog>,
+    pub gouraud: bool,
+    pub lighting_enabled: bool,
+    pub lights: [(bool, Light); 8],
+    pub circle_precision: i32,
+    pub primitive_2d: PrimitiveBuilder,
+    pub primitive_3d: PrimitiveBuilder,
+    pub zbuf_trashed: bool,
+}
+
+/// The renderer state an extra (interpolated) draw pass has to put back afterwards. It leaves out
+/// texture rects and vsync, which drawing never changes and which are expensive to copy.
+#[derive(Clone, Debug)]
+pub struct DrawState {
+    pub model_matrix: [f32; 16],
+    pub alpha_blending: bool,
+    pub colour_blending: bool,
+    pub blend_mode: (BlendType, BlendType),
+    pub pixel_interpolation: bool,
+    pub texture_repeat: bool,
     pub ambient_colour: i32,
     pub using_3d: bool,
     pub depth: f32,

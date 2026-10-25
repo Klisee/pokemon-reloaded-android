@@ -3,6 +3,8 @@ use crate::{
     game::{Game, GetAsset, PlayType, Version},
     gml,
     math::Real,
+    render::BlendType,
+    types::Colour,
 };
 use serde::{Deserialize, Serialize};
 
@@ -116,66 +118,95 @@ impl Game {
     /// Draws all instances, tiles and backgrounds to the screen, taking all active views into account.
     /// Note that this function runs GML code associated with object draw events, so its usage must match GameMaker 8.
     pub fn draw(&mut self) -> gml::Result<()> {
+        self.renderer.set_interp_amount(if self.render_mode.interpolates() {
+            (1.0 - self.interp_alpha).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        });
+
         // Update views that should be following objects
         if self.room.views_enabled {
             self.renderer.clear_view(self.background_colour, 1.0);
-            for view in self.room.views.iter_mut().filter(|x| x.visible) {
-                if let Some(handle) = match view.follow_target {
-                    obj_id if obj_id < 100000 => {
-                        self.room.instance_list.iter_by_identity(view.follow_target).next(&self.room.instance_list)
-                    },
-                    inst_id => self.room.instance_list.get_by_instid(inst_id),
-                } {
-                    let inst = self.room.instance_list.get(handle);
+            if self.interp_update_views {
+                // This is the camera the step left behind, before following moves it again. Extra
+                // interpolation frames read it instead of updating the views themselves.
+                if self.render_mode.interpolates() {
+                    self.prev_views = Some(self.room.views.clone());
+                }
+                for view in self.room.views.iter_mut().filter(|x| x.visible) {
+                    if let Some(handle) = match view.follow_target {
+                        obj_id if obj_id < 100000 => {
+                            self.room.instance_list.iter_by_identity(view.follow_target).next(&self.room.instance_list)
+                        },
+                        inst_id => self.room.instance_list.get_by_instid(inst_id),
+                    } {
+                        let inst = self.room.instance_list.get(handle);
 
-                    let x = inst.x.get().round().to_i32();
-                    let y = inst.y.get().round().to_i32();
-                    if view.follow_hborder < view.source_w / 2 {
-                        let border_left = x - view.follow_hborder;
-                        let border_right = x + view.follow_hborder;
-                        if border_left < view.source_x {
-                            if view.follow_hspeed < 0 {
-                                view.source_x = border_left;
-                            } else {
-                                view.source_x -= (view.source_x - border_left).min(view.follow_hspeed);
+                        let x = inst.x.get().round().to_i32();
+                        let y = inst.y.get().round().to_i32();
+                        if view.follow_hborder < view.source_w / 2 {
+                            let border_left = x - view.follow_hborder;
+                            let border_right = x + view.follow_hborder;
+                            if border_left < view.source_x {
+                                if view.follow_hspeed < 0 {
+                                    view.source_x = border_left;
+                                } else {
+                                    view.source_x -= (view.source_x - border_left).min(view.follow_hspeed);
+                                }
+                            } else if border_right > view.source_x + view.source_w {
+                                if view.follow_hspeed < 0 {
+                                    view.source_x = border_right - view.source_w;
+                                } else {
+                                    view.source_x +=
+                                        (border_right - (view.source_x + view.source_w)).min(view.follow_hspeed);
+                                }
                             }
-                        } else if border_right > view.source_x + view.source_w {
-                            if view.follow_hspeed < 0 {
-                                view.source_x = border_right - view.source_w;
-                            } else {
-                                view.source_x +=
-                                    (border_right - (view.source_x + view.source_w)).min(view.follow_hspeed);
-                            }
+                        } else {
+                            view.source_x = x - view.source_w / 2;
                         }
-                    } else {
-                        view.source_x = x - view.source_w / 2;
-                    }
-                    view.source_x = view.source_x.max(0).min(self.room.width - view.source_w);
+                        view.source_x = view.source_x.max(0).min(self.room.width - view.source_w);
 
-                    if view.follow_vborder < view.source_h / 2 {
-                        let border_top = y - view.follow_vborder;
-                        let border_bottom = y + view.follow_vborder;
-                        if border_top < view.source_y {
-                            if view.follow_vspeed < 0 {
-                                view.source_y = border_top;
-                            } else {
-                                view.source_y -= (view.source_y - border_top).min(view.follow_vspeed);
+                        if view.follow_vborder < view.source_h / 2 {
+                            let border_top = y - view.follow_vborder;
+                            let border_bottom = y + view.follow_vborder;
+                            if border_top < view.source_y {
+                                if view.follow_vspeed < 0 {
+                                    view.source_y = border_top;
+                                } else {
+                                    view.source_y -= (view.source_y - border_top).min(view.follow_vspeed);
+                                }
+                            } else if border_bottom > view.source_y + view.source_h {
+                                if view.follow_vspeed < 0 {
+                                    view.source_y = border_bottom - view.source_h;
+                                } else {
+                                    view.source_y +=
+                                        (border_bottom - (view.source_y + view.source_h)).min(view.follow_vspeed);
+                                }
                             }
-                        } else if border_bottom > view.source_y + view.source_h {
-                            if view.follow_vspeed < 0 {
-                                view.source_y = border_bottom - view.source_h;
-                            } else {
-                                view.source_y +=
-                                    (border_bottom - (view.source_y + view.source_h)).min(view.follow_vspeed);
-                            }
+                        } else {
+                            view.source_y = y - view.source_h / 2;
                         }
-                    } else {
-                        view.source_y = y - view.source_h / 2;
+                        view.source_y = view.source_y.max(0).min(self.room.height - view.source_h);
                     }
-                    view.source_y = view.source_y.max(0).min(self.room.height - view.source_h);
                 }
             }
         }
+
+        // The camera is shown between where it was on the previous step and where it is now. The
+        // room keeps its real view; only the drawing below sees the interpolated one.
+        let saved_views = if self.room.views_enabled && self.render_mode.interpolates() && self.interp_alpha < 1.0 {
+            self.prev_views.as_ref().map(|previous| {
+                let alpha = self.interp_alpha;
+                let mut views = self.room.views.clone();
+                for (view, old) in views.iter_mut().zip(previous.iter()) {
+                    view.source_x = (f64::from(old.source_x) + f64::from(view.source_x - old.source_x) * alpha).round() as i32;
+                    view.source_y = (f64::from(old.source_y) + f64::from(view.source_y - old.source_y) * alpha).round() as i32;
+                }
+                std::mem::replace(&mut self.room.views, views)
+            })
+        } else {
+            None
+        };
 
         // The character picker's arrows are placed from what the game draws, so the frame's box starts
         // empty here and the sprite draws below fill it.
@@ -208,6 +239,10 @@ impl Game {
             self.draw_view(0, 0, self.room.width, self.room.height, 0, 0, self.room.width, self.room.height, 0.0)?;
         }
 
+        if let Some(saved) = saved_views {
+            self.room.views = saved;
+        }
+
         // Reset viewport
         self.renderer.set_view(
             0,
@@ -221,19 +256,114 @@ impl Game {
             self.unscaled_height as _,
         );
 
-        // Apply room caption
-        let title = self.get_window_title();
-        if self.play_type != PlayType::Record {
-            self.window.set_title(title.as_ref());
+        if self.show_fps {
+            self.draw_fps_overlay();
+        }
+
+        // Apply room caption. The extra interpolation frames are not new game frames, so they must
+        // not keep poking the window manager.
+        if !self.interp_draw {
+            let title = self.get_window_title();
+            if self.play_type != PlayType::Record {
+                self.window.set_title(title.as_ref());
+            }
         }
 
         Ok(())
+    }
+
+    /// Draws the optional "FPS: N" label in the game's own font, at the top centre of the game
+    /// framebuffer. Uses the dialogue font when the game has one so it matches the rest of the UI.
+    fn draw_fps_overlay(&mut self) {
+        let font_id = if self.assets.fonts.get_asset(2).is_some() {
+            2
+        } else if self.assets.fonts.get_asset(self.draw_font_id).is_some() {
+            self.draw_font_id
+        } else {
+            -1
+        };
+
+        let old_font = self.draw_font_id;
+        let old_colour = self.draw_colour;
+        let old_alpha = self.draw_alpha;
+        let old_halign = self.draw_halign;
+        let old_valign = self.draw_valign;
+        let old_depth = self.renderer.get_depth();
+        let old_depth_test = self.renderer.get_depth_test();
+        let old_write_depth = self.renderer.get_write_depth();
+        let old_alpha_blending = self.renderer.get_alpha_blending();
+        let old_blend_mode = self.renderer.get_blend_mode();
+
+        self.draw_font_id = font_id;
+        self.draw_halign = Halign::Middle;
+        self.draw_valign = Valign::Top;
+        self.draw_alpha = Real::from(1.0);
+        self.renderer.set_draw_offset(0.0, 0.0);
+        self.renderer.set_depth(-32000.0);
+        self.renderer.set_depth_test(false);
+        self.renderer.set_write_depth(false);
+        self.renderer.set_alpha_blending(true);
+        self.renderer.set_blend_mode(BlendType::SrcAlpha, BlendType::InvSrcAlpha);
+
+        let text = gml::String::from(format!("FPS: {}", self.render_fps));
+        let (text_w, text_h) = self.get_string_size(text.clone(), None, None);
+        let center = self.unscaled_width as f64 / 2.0;
+        let pad_x = 3.0;
+        let pad_y = 2.0;
+        let x1 = center - f64::from(text_w) / 2.0 - pad_x;
+        let x2 = center + f64::from(text_w) / 2.0 + pad_x;
+        let y1 = 1.0;
+        let y2 = 2.0 + f64::from(text_h) + pad_y;
+        // Same idea as the game's clock: a translucent black plate behind the text.
+        self.renderer.draw_roundrect(x1, y1, x2, y2, 0, 0, 0.65, false);
+
+        let x = Real::from(self.unscaled_width as i32 / 2);
+        let y = Real::from(2);
+        self.draw_colour = Colour::new(0.0, 0.0, 0.0);
+        self.draw_string(
+            x + Real::from(1.0),
+            y + Real::from(1.0),
+            text.clone(),
+            None,
+            None,
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            None,
+            Real::from(1.0),
+        );
+        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+        self.draw_string(
+            x,
+            y,
+            text,
+            None,
+            None,
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            None,
+            Real::from(1.0),
+        );
+
+        self.renderer.set_depth(old_depth);
+        self.renderer.set_depth_test(old_depth_test);
+        self.renderer.set_write_depth(old_write_depth);
+        self.renderer.set_alpha_blending(old_alpha_blending);
+        self.renderer.set_blend_mode(old_blend_mode.0, old_blend_mode.1);
+        self.draw_font_id = old_font;
+        self.draw_colour = old_colour;
+        self.draw_alpha = old_alpha;
+        self.draw_halign = old_halign;
+        self.draw_valign = old_valign;
     }
 
     pub fn draw_instance_default(&mut self, idx: usize) -> gml::Result<()> {
         let instance = self.room.instance_list.get(idx);
         if let Some(sprite) = self.assets.sprites.get_asset(instance.sprite_index.get()) {
             if let Some(atlas_ref) = sprite.get_atlas_ref(instance.image_index.get().floor().to_i32()) {
+                // The caller (draw_instance / draw_self) already set the interpolation offset for
+                // this instance; don't reset it here or the rest of a custom draw event would lose it.
                 self.renderer.draw_sprite(
                     atlas_ref,
                     instance.x.get().into(),
@@ -275,15 +405,20 @@ impl Game {
         fn draw_instance(game: &mut Game, idx: usize) -> gml::Result<()> {
             let instance = game.room.instance_list.get(idx);
             if instance.visible.get() {
+                let dx: f64 = (instance.xprevious.get() - instance.x.get()).into();
+                let dy: f64 = (instance.yprevious.get() - instance.y.get()).into();
                 game.renderer.set_depth(instance.depth.get().into_inner() as f32);
-                if game.custom_draw_objects.contains(&instance.object_index.get()) {
+                game.renderer.set_draw_offset(dx, dy);
+                let result = if game.custom_draw_objects.contains(&instance.object_index.get()) {
                     // Custom draw event
                     game.run_instance_event(gml::ev::DRAW, 0, idx, idx, None)
                 } else {
                     // Default draw action
                     let _ = game.draw_instance_default(idx);
                     Ok(())
-                }
+                };
+                game.renderer.set_draw_offset(0.0, 0.0);
+                result
             } else {
                 Ok(())
             }
@@ -292,6 +427,7 @@ impl Game {
         fn draw_tile(game: &mut Game, idx: usize) {
             let tile = game.room.tile_list.get(idx);
             if tile.visible.get() {
+                game.renderer.set_draw_offset(0.0, 0.0);
                 if let Some(Some(background)) = game.assets.backgrounds.get(tile.background_index.get() as usize) {
                     if let Some(atlas) = background.atlas_ref {
                         game.renderer.set_depth(tile.depth.get().into_inner() as f32);
@@ -315,6 +451,7 @@ impl Game {
         }
 
         fn draw_part_syst(game: &mut Game, id: i32) {
+            game.renderer.set_draw_offset(0.0, 0.0);
             game.particles.draw_system(id, &mut game.renderer, &game.assets, true);
         }
 
@@ -324,6 +461,7 @@ impl Game {
     
         // draw backgrounds
         self.renderer.set_depth(12000.0);
+        self.renderer.set_draw_offset(0.0, 0.0);
         for background in self.room.backgrounds.iter().filter(|x| x.visible && !x.is_foreground) {
             if let Some(bg_asset) = self.assets.backgrounds.get_asset(background.background_id) {
                 if let Some(atlas_ref) = bg_asset.atlas_ref {
@@ -396,6 +534,7 @@ impl Game {
         }
 
         // draw foregrounds
+        self.renderer.set_draw_offset(0.0, 0.0);
         self.renderer.set_depth(-12000.0);
         for background in self.room.backgrounds.clone().iter().filter(|x| x.visible && x.is_foreground) {
             if let Some(bg_asset) = self.assets.backgrounds.get_asset(background.background_id) {

@@ -556,6 +556,11 @@ impl Game {
 
     pub fn screen_redraw(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
+        // The extra interpolation frame is already inside a draw; redrawing recursively would
+        // present twice and run the whole draw path again.
+        if self.interp_draw {
+            return Ok(Default::default())
+        }
         // A dialogue redraws from inside its own wait, so the controls' state is refreshed here as
         // well as once per frame; otherwise the frame loop never comes round during a dialogue.
         #[cfg(target_os = "android")]
@@ -570,6 +575,9 @@ impl Game {
 
     pub fn screen_refresh(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
+        if self.interp_draw {
+            return Ok(Default::default())
+        }
         #[cfg(target_os = "android")]
         self.sync_overlay();
         let (width, height) = self.window_inner_size;
@@ -581,7 +589,9 @@ impl Game {
 
     pub fn screen_wait_vsync(&self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
-        self.renderer.wait_vsync();
+        if !self.interp_draw {
+            self.renderer.wait_vsync();
+        }
         Ok(Default::default())
     }
 
@@ -5545,6 +5555,9 @@ impl Game {
 
     pub fn instance_destroy(&mut self, context: &mut Context, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
+        if self.interp_draw {
+            return Ok(Default::default())
+        }
         self.run_instance_event(gml::ev::DESTROY, 0, context.this, context.this, None)?;
         self.room.instance_list.mark_deleted(context.this);
         Ok(Default::default())
@@ -5756,12 +5769,17 @@ impl Game {
 
     pub fn room_goto(&mut self, args: &[Value]) -> gml::Result<Value> {
         let target = expect_args!(args, [int])?;
-        self.scene_change = Some(SceneChange::Room(target));
+        if !self.interp_draw {
+            self.scene_change = Some(SceneChange::Room(target));
+        }
         Ok(Default::default())
     }
 
     pub fn room_goto_previous(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
+        if self.interp_draw {
+            return Ok(Default::default())
+        }
         match self
             .room_order
             .iter()
@@ -5779,6 +5797,9 @@ impl Game {
 
     pub fn room_goto_next(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
+        if self.interp_draw {
+            return Ok(Default::default())
+        }
         match self.room_order.iter().position(|x| *x == self.room.id).and_then(|x| self.room_order.get(x + 1).copied())
         {
             Some(i) => {
@@ -5814,19 +5835,25 @@ impl Game {
 
     pub fn room_restart(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
-        self.scene_change = Some(SceneChange::Room(self.room.id));
+        if !self.interp_draw {
+            self.scene_change = Some(SceneChange::Room(self.room.id));
+        }
         Ok(Default::default())
     }
 
     pub fn game_end(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
-        self.scene_change = Some(SceneChange::End);
+        if !self.interp_draw {
+            self.scene_change = Some(SceneChange::End);
+        }
         Ok(Default::default())
     }
 
     pub fn game_restart(&mut self, args: &[Value]) -> gml::Result<Value> {
         expect_args!(args, [])?;
-        self.scene_change = Some(SceneChange::Restart);
+        if !self.interp_draw {
+            self.scene_change = Some(SceneChange::Restart);
+        }
         Ok(Default::default())
     }
 
@@ -5864,6 +5891,11 @@ impl Game {
 
     pub fn sleep(&mut self, args: &[Value]) -> gml::Result<Value> {
         let millis = expect_args!(args, [int])?;
+        // A draw helper asks for this from inside a dialogue redraw. Blocking every interpolation
+        // frame would turn a short pause into a long one; the canonical step still honours it.
+        if self.interp_draw {
+            return Ok(Default::default())
+        }
         match u64::try_from(millis) {
             Ok(0) | Err(_) => (),
             Ok(millis) => {
@@ -7173,9 +7205,37 @@ impl Game {
 
     pub fn get_open_filename(&mut self, args: &[Value]) -> gml::Result<Value> {
         let _ = expect_args!(args, [string, string])?;
-        // No native file picker in this port. GM8 returns an empty string when the user cancels,
-        // and the game already handles that, so that is what it gets.
-        Ok("".into())
+        // No native file picker in this port. For the local VS, auto-pick the .TEAM files the game
+        // saved in data/equipos: the first call gets the first team, the second gets the next.
+        let filter = match args.first() {
+            Some(Value::Str(text)) => text.to_string().to_ascii_lowercase(),
+            _ => String::new(),
+        };
+        if !filter.contains(".team") {
+            return Ok("".into())
+        }
+        let program_directory = self.program_directory.to_string();
+        let dir = std::path::Path::new(&program_directory).join("data").join("equipos");
+        let mut teams: Vec<_> = std::fs::read_dir(dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("team"))
+            })
+            .collect();
+        teams.sort();
+        if teams.is_empty() {
+            return Ok("".into())
+        }
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PICK: AtomicUsize = AtomicUsize::new(0);
+        let index = PICK.fetch_add(1, Ordering::Relaxed) % teams.len();
+        Ok(Value::Str(gml::String::from(teams[index].to_string_lossy().into_owned())))
     }
 
     pub fn get_save_filename(&mut self, _args: &[Value]) -> gml::Result<Value> {
