@@ -23,7 +23,7 @@ description=Prueba
 ## Menú in-game
 
 - Si hay al menos un mod activo, el motor crea `mods/menu.txt` y `mods/active.flag`.
-- El menú del título muestra una fila **Mods**; al pulsarla (teclado) se abre una lista de mods dentro del juego.
+- El menú del título muestra una fila **Mods** (con las opciones recolocadas para no invadir el pie); al pulsarla se abre una pantalla propia a tamaño completo, como la de Opciones, con la lista de mods.
 - El menú in-game es de solo lectura por ahora; para activar/desactivar usa Ajustes → Mods en Android o edita `mod.ini` en PC.
 - ESC/X cierra la lista.
 
