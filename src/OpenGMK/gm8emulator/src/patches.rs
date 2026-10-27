@@ -33,14 +33,16 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         },
         "KeyActionsInicioControl" => {
             let mut s = String::new();
-            s.push_str(" if(global.mods_menu_open){ if(keyboard_check(key_ini_cancelar)||keyboard_check(key_ini_salir)||keyboard_check_pressed(vk_escape)||keyboard_check_pressed(ord('X'))||mouse_check_button_pressed(mb_left)){global.mods_menu_open=false;} exit;}");
-            s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){global.mods_menu_open=true;exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
+            s.push_str(" if(global.mods_menu_open){ if(keyboard_check(key_ini_cancelar)||keyboard_check(key_ini_salir)||keyboard_check_pressed(vk_escape)||keyboard_check_pressed(ord('X'))||mouse_check_button_pressed(mb_left)){global.mods_menu_open=false; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true;} exit;}");
+            s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
             s.push_str(" if(global.mods_available && SEL=5){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){ ex(9498); exit;} if(keyboard_check(key_ini_subir)){SEL=4;exit;} if(keyboard_check(key_ini_bajar)){SEL=0;exit;} }");
             s.push_str(source);
             Some(s)
         },
         "DrawInicioControl" => {
-            let mut s = source
+            let mut s = String::new();
+            s.push_str(" if(global.mods_menu_open){ draw_set_font(0); draw_set_halign(fa_center); draw_set_color(make_color_rgb(62,132,255)); draw_text(160,16,\"Mods\"); draw_set_color(make_color_rgb(42,108,235)); draw_line(16,30,304,30); draw_set_color(c_white); var f,line,i; f=file_text_open_read(\"mods/menu.txt\"); i=0; while(!file_text_eof(f) && i<10){ line=file_text_read_string(f); draw_text(160,50+i*12,line); file_text_readln(f); i+=1;} file_text_close(f); draw_set_color(c_yellow); draw_text(160,150,\"Volver\"); draw_set_color(c_white); draw_text(160,166,\"ESC / X\"); draw_set_halign(fa_left); exit; }");
+            let s2 = source
                 .replace("draw_text_color(160,74", "draw_text_color(160,70")
                 .replace("draw_text_color(160,92", "draw_text_color(160,86")
                 .replace("draw_text_color(160,110", "draw_text_color(160,102")
@@ -51,8 +53,8 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
                 .replace(",110-1+random(2)", ",102-1+random(2)")
                 .replace(",128-1+random(2)", ",118-1+random(2)")
                 .replace(",146-1+random(2)", ",134-1+random(2)");
+            s.push_str(&s2);
             s.push_str(" if(global.mods_available){ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,150,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),149+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }");
-            s.push_str(" if(global.mods_menu_open){ draw_set_color(c_black); draw_set_alpha(1); draw_rectangle(0,0,320,180,false); draw_set_alpha(1); draw_set_font(0); draw_set_halign(fa_center); draw_set_color(make_color_rgb(62,132,255)); draw_text(160,16,\"Mods\"); draw_set_color(make_color_rgb(42,108,235)); draw_line(16,30,304,30); draw_set_color(c_white); var f,line,i; f=file_text_open_read(\"mods/menu.txt\"); i=0; while(!file_text_eof(f) && i<10){ line=file_text_read_string(f); draw_text(160,50+i*12,line); file_text_readln(f); i+=1;} file_text_close(f); draw_set_color(c_yellow); draw_text(160,150,\"Volver\"); draw_set_color(c_white); draw_text(160,166,\"ESC / X\"); draw_set_halign(fa_left); }");
             Some(s)
         },
         _ => None,
