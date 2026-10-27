@@ -1,8 +1,8 @@
 use crate::{
     render::{
         atlas::{AtlasBuilder, AtlasRect, AtlasRef},
-        mat4mult, BlendType, Fog, Light, PrimitiveBuilder, PrimitiveShape, PrimitiveType, RendererOptions,
-        RendererTrait, SavedTexture, Scaling, Vertex, VertexBuffer,
+        mat4mult, BlendType, CrtSettings, Fog, GbSettings, Light, PrimitiveBuilder, PrimitiveShape,
+        PrimitiveType, RendererOptions, RendererTrait, SavedTexture, Scaling, Vertex, VertexBuffer,
     },
     types::Colour,
 };
@@ -244,6 +244,11 @@ pub struct RendererImpl {
     /// How much of `draw_offset` the shader applies (0 = current game step, 1 = previous one).
     interp_amount: f32,
 
+    crt: Option<CrtEffect>,
+    crt_settings: Option<CrtSettings>,
+    gb_settings: Option<GbSettings>,
+    gb_inverted: bool,
+
     /// Lazily-built program/buffers for the on-screen touch controls (Android only).
     #[cfg(target_os = "android")]
     overlay: Option<Overlay>,
@@ -324,8 +329,133 @@ struct Framebuffer {
     pub height: u32,
 }
 
+/// A self-contained full-screen shader pass for the CRT look.
+struct CrtEffect {
+    program: GLuint,
+    vao: GLuint,
+    vbo: GLuint,
+    loc_scene: GLint,
+    loc_resolution: GLint,
+    loc_curvature: GLint,
+    loc_scanline: GLint,
+    loc_scanline_count: GLint,
+    loc_mask: GLint,
+    loc_aberration: GLint,
+    loc_vignette: GLint,
+    loc_blur: GLint,
+    loc_noise: GLint,
+    loc_brightness: GLint,
+    loc_saturation: GLint,
+    loc_glow: GLint,
+    loc_corner: GLint,
+    loc_gb_strength: GLint,
+    loc_gb_dither: GLint,
+    loc_gb_contrast: GLint,
+    loc_gb_brightness: GLint,
+    loc_gb_invert: GLint,
+}
+
+impl CrtEffect {
+    unsafe fn new(gl: &gl::Gl) -> Result<Self, String> {
+        let vertex_shader = gl.CreateShader(gl::VERTEX_SHADER);
+        let vertex_source = shader_source(CRT_VERTEX_SHADER_SOURCE);
+        gl.ShaderSource(vertex_shader, 1, &(vertex_source.as_ptr().cast()), ptr::null());
+        gl.CompileShader(vertex_shader);
+        let mut success = gl::FALSE as GLint;
+        gl.GetShaderiv(vertex_shader, gl::COMPILE_STATUS, &mut success);
+        if success != gl::TRUE as GLint {
+            return Err(shader_info_log(gl, "CRT vertex", vertex_shader))
+        }
+
+        let fragment_shader = gl.CreateShader(gl::FRAGMENT_SHADER);
+        let fragment_source = shader_source(CRT_FRAGMENT_SHADER_SOURCE);
+        gl.ShaderSource(fragment_shader, 1, &(fragment_source.as_ptr().cast()), ptr::null());
+        gl.CompileShader(fragment_shader);
+        gl.GetShaderiv(fragment_shader, gl::COMPILE_STATUS, &mut success);
+        if success != gl::TRUE as GLint {
+            return Err(shader_info_log(gl, "CRT fragment", fragment_shader))
+        }
+
+        let program = gl.CreateProgram();
+        gl.AttachShader(program, vertex_shader);
+        gl.AttachShader(program, fragment_shader);
+        gl.LinkProgram(program);
+        gl.GetProgramiv(program, gl::LINK_STATUS, &mut success);
+        if success != gl::TRUE as GLint {
+            let mut info_len: GLint = 0;
+            gl.GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut info_len);
+            let mut info = vec![0u8; info_len as usize];
+            gl.GetProgramInfoLog(program, info_len as GLsizei, ptr::null_mut(), info.as_mut_ptr() as *mut GLchar);
+            info.set_len((info_len - 1) as usize);
+            return Err(format!(
+                "Failed to link CRT shaders, compiler output:\n{}",
+                std::str::from_utf8(&info).unwrap_or("<INVALID UTF-8>")
+            ))
+        }
+        gl.DeleteShader(vertex_shader);
+        gl.DeleteShader(fragment_shader);
+
+        let vertices: [f32; 24] = [
+            -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0,
+            -1.0, 1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0,
+        ];
+        let mut vao = 0;
+        let mut vbo = 0;
+        gl.GenVertexArrays(1, &mut vao);
+        gl.GenBuffers(1, &mut vbo);
+        gl.BindVertexArray(vao);
+        gl.BindBuffer(gl::ARRAY_BUFFER, vbo);
+        gl.BufferData(
+            gl::ARRAY_BUFFER,
+            (vertices.len() * size_of::<f32>()) as _,
+            vertices.as_ptr().cast(),
+            gl::STATIC_DRAW,
+        );
+        gl.EnableVertexAttribArray(0);
+        gl.VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, 4 * size_of::<f32>() as i32, ptr::null());
+        gl.EnableVertexAttribArray(1);
+        gl.VertexAttribPointer(
+            1,
+            2,
+            gl::FLOAT,
+            gl::FALSE,
+            4 * size_of::<f32>() as i32,
+            (2 * size_of::<f32>()) as *const _,
+        );
+        gl.BindVertexArray(0);
+
+        let loc = |name: &'static [u8]| gl.GetUniformLocation(program, name.as_ptr().cast());
+        Ok(Self {
+            program,
+            vao,
+            vbo,
+            loc_scene: loc(b"scene\0"),
+            loc_resolution: loc(b"resolution\0"),
+            loc_curvature: loc(b"curvature\0"),
+            loc_scanline: loc(b"scanline\0"),
+            loc_scanline_count: loc(b"scanline_count\0"),
+            loc_mask: loc(b"mask\0"),
+            loc_aberration: loc(b"aberration\0"),
+            loc_vignette: loc(b"vignette\0"),
+            loc_blur: loc(b"blur\0"),
+            loc_noise: loc(b"noise\0"),
+            loc_brightness: loc(b"brightness\0"),
+            loc_saturation: loc(b"saturation\0"),
+            loc_glow: loc(b"glow\0"),
+            loc_corner: loc(b"corner\0"),
+            loc_gb_strength: loc(b"gb_strength\0"),
+            loc_gb_dither: loc(b"gb_dither\0"),
+            loc_gb_contrast: loc(b"gb_contrast\0"),
+            loc_gb_brightness: loc(b"gb_brightness\0"),
+            loc_gb_invert: loc(b"gb_invert\0"),
+        })
+    }
+}
+
 static VERTEX_SHADER_SOURCE: &str = shader_file!("glsl/vertex.glsl");
 static FRAGMENT_SHADER_SOURCE: &str = shader_file!("glsl/fragment.glsl");
+static CRT_VERTEX_SHADER_SOURCE: &str = shader_file!("glsl/crt_vertex.glsl");
+static CRT_FRAGMENT_SHADER_SOURCE: &str = shader_file!("glsl/crt_fragment.glsl");
 
 unsafe fn shader_info_log(gl: &gl::Gl, name: &str, id: GLuint) -> String {
     let mut info_len: GLint = 0;
@@ -738,6 +868,14 @@ impl RendererImpl {
             gl.BindBufferBase(gl::UNIFORM_BUFFER, loc_state, buf_state);
             assert_eq!(gl.GetError(), 0);
 
+            let crt = match CrtEffect::new(&gl) {
+                Ok(effect) => Some(effect),
+                Err(err) => {
+                    eprintln!("[crt] no se pudo crear el efecto: {err}");
+                    None
+                },
+            };
+
             // Create Renderer
             let mut renderer = Self {
                 imp,
@@ -790,6 +928,10 @@ impl RendererImpl {
                 buf_state,
                 draw_offset: [0.0, 0.0],
                 interp_amount: 0.0,
+                crt,
+                crt_settings: None,
+                gb_settings: None,
+                gb_inverted: false,
 
                 #[cfg(target_os = "android")]
                 overlay: None,
@@ -3835,6 +3977,24 @@ impl RendererTrait for RendererImpl {
         self.render_state_updated = true;
     }
 
+    fn set_crt(&mut self, settings: Option<CrtSettings>) {
+        self.crt_settings = if self.crt.is_some() { settings } else { None };
+        if let Some(settings) = self.crt_settings {
+            eprintln!("[crt] activo: curvatura={} scanline={}", settings.curvature, settings.scanline);
+        }
+    }
+
+    fn set_gb(&mut self, settings: Option<GbSettings>) {
+        self.gb_settings = if self.crt.is_some() { settings } else { None };
+        if let Some(settings) = self.gb_settings {
+            eprintln!("[gb] activo: fuerza={} dither={}", settings.strength, settings.dither);
+        }
+    }
+
+    fn set_gb_inverted(&mut self, inverted: bool) {
+        self.gb_inverted = inverted;
+    }
+
     fn present(&mut self, window_width: u32, window_height: u32, scaling: Scaling) {
         if window_width == 0 || window_height == 0 {
             // if we continue, intel will dereference a null pointer
@@ -3901,32 +4061,81 @@ impl RendererTrait for RendererImpl {
             debug_assert_eq!(self.gl.GetError(), 0);
             self.clear_view((0.0, 0.0, 0.0).into(), 1.0); // to avoid weird strobe lights (???)
             debug_assert_eq!(self.gl.GetError(), 0);
-            self.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, self.framebuffer.fbo);
-            debug_assert_eq!(self.gl.GetError(), 0);
             // `display_rect` gives a rectangle in window coordinates, top-left origin (the same one
             // the touches use). GL's origin is the bottom-left, so the vertical position is flipped
             // here. For a full-height or centred rectangle the two agree, so only the keyboard inset
             // - which anchors the game to the top - actually needs the flip.
             let blit_y = window_height - w_y - w_h;
-            self.gl.BlitFramebuffer(
-                0,
-                fb_height,
-                fb_width,
-                0,
-                w_x,
-                blit_y,
-                w_x + w_w,
-                blit_y + w_h,
-                gl::COLOR_BUFFER_BIT,
-                if cfg!(target_os = "android") {
-                    gl::NEAREST
-                } else if self.next_render_state.interpolate_pixels.into() {
-                    gl::LINEAR
-                } else {
-                    gl::NEAREST
-                },
-            );
-            debug_assert_eq!(self.gl.GetError(), 0);
+            if (self.crt_settings.is_some() || self.gb_settings.is_some()) && self.crt.is_some() {
+                if w_w > 0 && w_h > 0 {
+                    let crt = self.crt.as_ref().expect("crt checked above");
+                    let settings = self.crt_settings.unwrap_or_else(CrtSettings::neutral);
+                    let gb = self.gb_settings.unwrap_or(GbSettings { strength: 0.0, ..GbSettings::default() });
+                    let blend_was_enabled = self.gl.IsEnabled(gl::BLEND) != 0;
+                    let depth_was_enabled = self.gl.IsEnabled(gl::DEPTH_TEST) != 0;
+                    self.gl.Disable(gl::BLEND);
+                    self.gl.Disable(gl::DEPTH_TEST);
+                    self.gl.Viewport(w_x, blit_y, w_w, w_h);
+                    self.gl.UseProgram(crt.program);
+                    self.gl.ActiveTexture(gl::TEXTURE0);
+                    self.gl.BindTexture(gl::TEXTURE_2D, self.framebuffer.texture);
+                    self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as _);
+                    self.gl.TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as _);
+                    self.gl.Uniform1i(crt.loc_scene, 0);
+                    self.gl.Uniform2f(crt.loc_resolution, w_w as f32, w_h as f32);
+                    self.gl.Uniform1f(crt.loc_curvature, settings.curvature);
+                    self.gl.Uniform1f(crt.loc_scanline, settings.scanline);
+                    self.gl.Uniform1f(crt.loc_scanline_count, settings.scanline_count);
+                    self.gl.Uniform1f(crt.loc_mask, settings.mask);
+                    self.gl.Uniform1f(crt.loc_aberration, settings.aberration);
+                    self.gl.Uniform1f(crt.loc_vignette, settings.vignette);
+                    self.gl.Uniform1f(crt.loc_blur, settings.blur);
+                    self.gl.Uniform1f(crt.loc_noise, settings.noise);
+                    self.gl.Uniform1f(crt.loc_brightness, settings.brightness);
+                    self.gl.Uniform1f(crt.loc_saturation, settings.saturation);
+                    self.gl.Uniform1f(crt.loc_glow, settings.glow);
+                    self.gl.Uniform1f(crt.loc_corner, settings.corner);
+                    self.gl.Uniform1f(crt.loc_gb_strength, gb.strength);
+                    self.gl.Uniform1f(crt.loc_gb_dither, gb.dither);
+                    self.gl.Uniform1f(crt.loc_gb_contrast, gb.contrast);
+                    self.gl.Uniform1f(crt.loc_gb_brightness, gb.brightness);
+                    self.gl.Uniform1f(crt.loc_gb_invert, if self.gb_inverted { 1.0 } else { 0.0 });
+                    self.gl.BindVertexArray(crt.vao);
+                    self.gl.DrawArrays(gl::TRIANGLES, 0, 6);
+                    self.gl.BindVertexArray(self.vao);
+                    self.gl.UseProgram(self.program);
+                    if blend_was_enabled {
+                        self.gl.Enable(gl::BLEND);
+                    }
+                    if depth_was_enabled {
+                        self.gl.Enable(gl::DEPTH_TEST);
+                    }
+                    self.current_texture = None;
+                    debug_assert_eq!(self.gl.GetError(), 0);
+                }
+            } else {
+                self.gl.BindFramebuffer(gl::READ_FRAMEBUFFER, self.framebuffer.fbo);
+                debug_assert_eq!(self.gl.GetError(), 0);
+                self.gl.BlitFramebuffer(
+                    0,
+                    fb_height,
+                    fb_width,
+                    0,
+                    w_x,
+                    blit_y,
+                    w_x + w_w,
+                    blit_y + w_h,
+                    gl::COLOR_BUFFER_BIT,
+                    if cfg!(target_os = "android") {
+                        gl::NEAREST
+                    } else if self.next_render_state.interpolate_pixels.into() {
+                        gl::LINEAR
+                    } else {
+                        gl::NEAREST
+                    },
+                );
+                debug_assert_eq!(self.gl.GetError(), 0);
+            }
             self.gl.BindFramebuffer(gl::DRAW_FRAMEBUFFER, fb_old as u32);
             debug_assert_eq!(self.gl.GetError(), 0);
 

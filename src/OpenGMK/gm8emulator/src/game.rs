@@ -2506,6 +2506,7 @@ impl Game {
 
         // Tell renderer to finish the frame
         if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+            self.renderer.set_gb_inverted(self.gb_menu_palette());
             self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
         }
 
@@ -2515,28 +2516,52 @@ impl Game {
         Ok(())
     }
 
-    fn mods_text(&mut self, x: f64, y: f64, text: &str, colour: i32) {
-        let string: gml::String = text.as_bytes().into();
-        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
-        self.draw_alpha = Real::from(1.0);
-        self.draw_string(
-            Real::from(x),
-            Real::from(y),
-            string,
-            None,
-            None,
-            Real::from(1.0),
-            Real::from(1.0),
-            Real::from(0.0),
-            Some((colour, colour, colour, colour)),
-            Real::from(1.0),
-        );
+    fn gb_menu_palette(&self) -> bool {
+        let name = self
+            .assets
+            .rooms
+            .get_asset(self.room.id)
+            .map(|room| room.name.to_string().to_ascii_lowercase())
+            .unwrap_or_default();
+        name.contains("menu")
+            || name.contains("inicio")
+            || name.contains("loader")
+            || name.contains("option")
+            || name.contains("opcion")
+            || name.contains("credito")
+            || name.contains("copy")
+            || name.contains("splash")
+            || name.contains("intro")
+            || name.contains("select")
+    }
+
+    fn apply_visual_settings(&mut self, root: &std::path::Path) {
+        let gb = crate::mods::gb_settings(root);
+        let flag = root.join("mods/gb.flag");
+        if gb.is_some() {
+            let _ = std::fs::write(flag, b"1");
+        } else {
+            let _ = std::fs::remove_file(flag);
+        }
+        self.renderer.set_crt(crate::mods::crt_settings(root));
+        self.renderer.set_gb(gb);
+    }
+
+    fn toggle_mod(&mut self, root: &std::path::Path, id: &str) {
+        let enabled = crate::mods::is_enabled(root, id);
+        if crate::mods::set_enabled(root, id, !enabled) {
+            eprintln!("[mods] {} alternado a {}", id, if enabled { "OFF" } else { "ON" });
+            self.apply_visual_settings(root);
+        }
     }
 
     fn mods_menu_input(&mut self) {
         let game_directory = self.decode_str(self.program_directory.as_ref()).into_owned();
-        let available = PathBuf::from(&game_directory).join("mods/active.flag").is_file();
+        let root = PathBuf::from(&game_directory);
+        let available = root.join("mods/active.flag").is_file();
+        let open_flag = root.join("mods/open.flag");
         if !available && !self.mods_menu_open {
+            let _ = std::fs::remove_file(&open_flag);
             return;
         }
         if !self.input.mouse_check_button_pressed(1) {
@@ -2544,47 +2569,35 @@ impl Game {
         }
         let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
         if self.mods_menu_open {
-            if (110..=210).contains(&x) && (140..=170).contains(&y) {
+            let menu = std::fs::read_to_string(root.join("mods/menu.txt")).unwrap_or_default();
+            let row = if (80..=240).contains(&x) && y >= 38 && y < 38 + 7 * 16 {
+                Some(((y - 38) / 16) as usize)
+            } else {
+                None
+            };
+            if let Some(line) = row.and_then(|row| menu.lines().nth(row)) {
+                let name = line.split("  [").next().unwrap_or("").trim().to_ascii_lowercase();
+                let id = if name == "crt" {
+                    Some("crt")
+                } else if name == "game boy" || name == "gb" {
+                    Some("gb")
+                } else {
+                    None
+                };
+                if let Some(id) = id {
+                    self.toggle_mod(&root, id);
+                }
+            } else if (110..=210).contains(&x) && (144..=162).contains(&y) {
                 self.mods_menu_open = false;
                 self.mods_close_lock = true;
+                let _ = std::fs::remove_file(&open_flag);
             }
         } else if self.room.id == 30 && (110..=210).contains(&x) && (133..=148).contains(&y) {
-            self.mods_menu_open = true;
-        }
-    }
-
-    fn draw_mods_menu(&mut self) {
-        self.renderer.set_view(0, 0, 320, 180, 0.0, 0, 0, 320, 180);
-        self.renderer.clear_view(Colour::new(0.0, 0.0, 0.0), 1.0);
-        let background_id = self
-            .assets
-            .rooms
-            .get(31)
-            .and_then(|room| room.as_ref())
-            .and_then(|room| room.backgrounds.first())
-            .map(|background| background.background_id)
-            .unwrap_or(15);
-        if let Some(Some(background)) = self.assets.backgrounds.get(background_id as usize) {
-            if let Some(atlas) = background.atlas_ref {
-                self.renderer
-                    .draw_sprite_tiled(atlas, 0.0, 0.0, 1.0, 1.0, 0xffffff, 1.0, Some(320.0), Some(180.0));
+            match std::fs::write(&open_flag, b"1") {
+                Ok(()) => self.mods_menu_open = true,
+                Err(err) => eprintln!("[mods] no se pudo abrir el menu: {err}"),
             }
         }
-        self.renderer.draw_rectangle(0.0, 0.0, 320.0, 180.0, 0x000000, 0.18);
-        self.draw_font_id = 0;
-        self.draw_halign = crate::game::draw::Halign::Middle;
-        self.draw_valign = crate::game::draw::Valign::Top;
-        self.mods_text(160.0, 16.0, "Mods", 0xff843e);
-        self.renderer
-            .draw_line(16.0, 30.0, 304.0, 30.0, None, 0xeb6c2a, 0xeb6c2a, 1.0);
-        let menu = PathBuf::from(self.decode_str(self.program_directory.as_ref()).as_ref()).join("mods/menu.txt");
-        let text = std::fs::read_to_string(menu).unwrap_or_default();
-        for (index, line) in text.lines().take(10).enumerate() {
-            self.mods_text(160.0, 50.0 + index as f64 * 12.0, line, 0xffffff);
-        }
-        self.renderer.draw_rectangle(118.0, 138.0, 202.0, 162.0, 0x503020, 1.0);
-        self.mods_text(160.0, 150.0, "Volver", 0x00ffff);
-        self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
     }
 
     pub fn process_window_events(&mut self) {
@@ -2785,6 +2798,7 @@ impl Game {
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let game_directory = self.decode_str(self.program_directory.as_ref()).into_owned();
         crate::mods::prepare(&game_directory);
+        self.apply_visual_settings(std::path::Path::new(&game_directory));
         self.init()?;
         handle_scene_change!(self);
 
@@ -2819,7 +2833,6 @@ impl Game {
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
             self.process_window_events();
-            self.mods_menu_input();
             if self.mods_close_lock {
                 self.mods_close_lock = false;
                 self.input.step();
@@ -2827,13 +2840,7 @@ impl Game {
                 accumulator = Duration::ZERO;
                 continue;
             }
-            if self.mods_menu_open {
-                self.draw_mods_menu();
-                self.input.step();
-                step_clock = Instant::now();
-                accumulator = Duration::ZERO;
-                continue;
-            }
+            self.mods_menu_input();
 
             // Experimental voxel view toggle. It is intentionally a debug key; the
             // normal launch flag is OPENGMK_VOXEL=1.

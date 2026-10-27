@@ -1,3 +1,4 @@
+use crate::render::{CrtSettings, GbSettings};
 use std::{
     collections::HashMap,
     fs,
@@ -34,6 +35,8 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let _ = fs::remove_file(mods_dir.join("open.flag"));
+    let _ = fs::remove_file(mods_dir.join("gb.flag"));
     let backup_root = mods_dir.join(".backup");
     let mut mods = Vec::new();
     for entry in fs::read_dir(&mods_dir)? {
@@ -95,6 +98,177 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let _ = fs::remove_file(&marker);
     }
     Ok(())
+}
+
+
+/// Reads the settings of the first enabled mod whose manifest says `effect=crt`.
+///
+/// The effect itself lives in the renderer; this only turns the mod's text file into the small
+/// parameter block the renderer understands. Missing keys keep their defaults, so a mod can tune
+/// just the values it cares about.
+pub fn crt_settings(root: &Path) -> Option<CrtSettings> {
+    let mods_dir = root.join("mods");
+    let entries = fs::read_dir(&mods_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("mod.ini");
+        if !manifest.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&manifest).ok()?;
+        let mut settings = CrtSettings::default();
+        let mut enabled = true;
+        let mut is_crt = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            let value_lower = value.to_ascii_lowercase();
+            match key.as_str() {
+                "enabled" => enabled = !matches!(value_lower.as_str(), "0" | "false" | "no" | "off"),
+                "effect" => is_crt = value_lower == "crt",
+                "curvature" => settings.curvature = parse_f32(value, settings.curvature),
+                "scanline" => settings.scanline = parse_f32(value, settings.scanline),
+                "scanline_count" => settings.scanline_count = parse_f32(value, settings.scanline_count),
+                "mask" => settings.mask = parse_f32(value, settings.mask),
+                "aberration" => settings.aberration = parse_f32(value, settings.aberration),
+                "vignette" => settings.vignette = parse_f32(value, settings.vignette),
+                "blur" => settings.blur = parse_f32(value, settings.blur),
+                "noise" => settings.noise = parse_f32(value, settings.noise),
+                "brightness" => settings.brightness = parse_f32(value, settings.brightness),
+                "saturation" => settings.saturation = parse_f32(value, settings.saturation),
+                "glow" => settings.glow = parse_f32(value, settings.glow),
+                "corner" => settings.corner = parse_f32(value, settings.corner),
+                _ => (),
+            }
+        }
+        if enabled && is_crt {
+            eprintln!("[crt] configuracion encontrada en {}", path.display());
+            return Some(settings);
+        }
+    }
+    None
+}
+
+fn parse_f32(value: &str, fallback: f32) -> f32 {
+    value.parse().unwrap_or(fallback)
+}
+
+
+/// Enables or disables a mod from inside the game. Only the manifest and the in-game menu are
+/// touched; data overlays keep their startup behavior until the next run.
+pub fn set_enabled(root: &Path, id: &str, enabled: bool) -> bool {
+    let manifest = root.join("mods").join(id).join("mod.ini");
+    let Ok(text) = fs::read_to_string(&manifest) else { return false };
+    let mut out = String::new();
+    let mut found = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !found && trimmed.split_once('=').is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("enabled")) {
+            out.push_str(&format!("enabled={}\n", if enabled { 1 } else { 0 }));
+            found = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !found {
+        out.push_str(&format!("enabled={}\n", if enabled { 1 } else { 0 }));
+    }
+    if fs::write(&manifest, out).is_err() {
+        return false;
+    }
+    refresh_menu(root);
+    true
+}
+
+/// Rewrites `mods/menu.txt` from the manifests, so the in-game list reflects a live toggle.
+pub fn refresh_menu(root: &Path) {
+    let mods_dir = root.join("mods");
+    let Ok(entries) = fs::read_dir(&mods_dir) else { return };
+    let mut mods = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("mod.ini");
+        if !manifest.is_file() {
+            continue;
+        }
+        let (name, enabled) = parse_manifest(&manifest);
+        mods.push((name, enabled));
+    }
+    mods.sort();
+    let mut text = String::new();
+    for (name, enabled) in &mods {
+        text.push_str(&format!("{}  [{}]\n", name, if *enabled { "ON" } else { "OFF" }));
+    }
+    let _ = fs::write(mods_dir.join("menu.txt"), text);
+    let marker = mods_dir.join("active.flag");
+    if mods.iter().any(|(_, enabled)| *enabled) {
+        let _ = fs::write(marker, b"1");
+    } else {
+        let _ = fs::remove_file(marker);
+    }
+}
+
+
+/// Same as [`crt_settings`], but for a mod whose manifest says `effect=gb`.
+pub fn gb_settings(root: &Path) -> Option<GbSettings> {
+    let mods_dir = root.join("mods");
+    let entries = fs::read_dir(&mods_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("mod.ini");
+        if !manifest.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&manifest).ok()?;
+        let mut settings = GbSettings::default();
+        let mut enabled = true;
+        let mut is_gb = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match key.as_str() {
+                "enabled" => {
+                    enabled = !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+                },
+                "effect" => is_gb = value.eq_ignore_ascii_case("gb"),
+                "strength" => settings.strength = parse_f32(value, settings.strength),
+                "dither" => settings.dither = parse_f32(value, settings.dither),
+                "contrast" => settings.contrast = parse_f32(value, settings.contrast),
+                "brightness" => settings.brightness = parse_f32(value, settings.brightness),
+                _ => (),
+            }
+        }
+        if enabled && is_gb {
+            eprintln!("[gb] configuracion encontrada en {}", path.display());
+            return Some(settings);
+        }
+    }
+    None
+}
+
+/// Whether a mod is currently enabled in its manifest.
+pub fn is_enabled(root: &Path, id: &str) -> bool {
+    parse_manifest(&root.join("mods").join(id).join("mod.ini")).1
 }
 
 fn parse_manifest(path: &Path) -> (String, bool) {

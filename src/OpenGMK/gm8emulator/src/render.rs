@@ -165,6 +165,82 @@ pub struct Fog {
     pub end: f32,
 }
 
+/// Optional CRT-style post-process applied to the entire presented frame.
+///
+/// Values are deliberately plain floats so they can be read from a mod's `mod.ini` without pulling
+/// the renderer into the mod loader's data model.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CrtSettings {
+    pub curvature: f32,
+    pub scanline: f32,
+    /// Number of scanline bands over the height of the picture. Kept independent of the window
+    /// resolution so a fullscreen picture has the same CRT texture as a windowed one.
+    pub scanline_count: f32,
+    pub mask: f32,
+    pub aberration: f32,
+    pub vignette: f32,
+    pub blur: f32,
+    pub noise: f32,
+    pub brightness: f32,
+    pub saturation: f32,
+    pub glow: f32,
+    pub corner: f32,
+}
+
+impl Default for CrtSettings {
+    fn default() -> Self {
+        Self {
+            curvature: 0.055,
+            scanline: 0.40,
+            scanline_count: 360.0,
+            mask: 0.60,
+            aberration: 0.0035,
+            vignette: 0.35,
+            blur: 0.0,
+            noise: 0.014,
+            brightness: 1.18,
+            saturation: 1.08,
+            glow: 0.15,
+            corner: 0.07,
+        }
+    }
+}
+
+impl CrtSettings {
+    /// A no-op CRT setup, used when only another post-process (Game Boy palette) is active.
+    pub fn neutral() -> Self {
+        Self {
+            curvature: 0.0,
+            scanline: 0.0,
+            scanline_count: 0.0,
+            mask: 0.0,
+            aberration: 0.0,
+            vignette: 0.0,
+            blur: 0.0,
+            noise: 0.0,
+            brightness: 1.0,
+            saturation: 1.0,
+            glow: 0.0,
+            corner: 0.0,
+        }
+    }
+}
+
+/// The four-shade, low-colour Game Boy look.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GbSettings {
+    pub strength: f32,
+    pub dither: f32,
+    pub contrast: f32,
+    pub brightness: f32,
+}
+
+impl Default for GbSettings {
+    fn default() -> Self {
+        Self { strength: 1.0, dither: 0.25, contrast: 0.90, brightness: 1.02 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Light {
     Directional { direction: [f32; 3], colour: i32 },
@@ -477,6 +553,9 @@ pub trait RendererTrait {
         port_h: i32,
     );
     fn flush_queue(&mut self);
+    fn set_crt(&mut self, _settings: Option<CrtSettings>) {}
+    fn set_gb(&mut self, _settings: Option<GbSettings>) {}
+    fn set_gb_inverted(&mut self, _inverted: bool) {}
     fn present(&mut self, window_width: u32, window_height: u32, scaling: Scaling);
     /// Presents one surface, stretched over the whole window. Used by the game's information window,
     /// which is drawn at window resolution instead of the game's small framebuffer.
@@ -1346,6 +1425,18 @@ impl Renderer {
 
     pub fn set_light(&mut self, id: usize, light: Light) {
         self.0.set_light(id, light)
+    }
+
+    pub fn set_crt(&mut self, settings: Option<CrtSettings>) {
+        self.0.set_crt(settings)
+    }
+
+    pub fn set_gb(&mut self, settings: Option<GbSettings>) {
+        self.0.set_gb(settings)
+    }
+
+    pub fn set_gb_inverted(&mut self, inverted: bool) {
+        self.0.set_gb_inverted(inverted)
     }
 
     pub fn present(&mut self, window_width: u32, window_height: u32, scaling: Scaling) {

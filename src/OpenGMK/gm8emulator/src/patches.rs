@@ -21,7 +21,7 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
                 .replace("mouse_y>=111 && mouse_y<=124", "mouse_y>=103 && mouse_y<=116")
                 .replace("mouse_y>=129 && mouse_y<=142", "mouse_y>=119 && mouse_y<=132")
                 .replace("mouse_y>=147 && mouse_y<=160", "mouse_y>=135 && mouse_y<=148");
-            Some(format!("{s} if(global.mods_available && mouse_x>=62 && mouse_x<=178 && mouse_y>=151 && mouse_y<=162){{SEL=5;MOUSE=5;exit;}}"))
+            Some(format!("if(file_exists(\"mods/open.flag\")) exit; {s} if(global.mods_available && mouse_x>=62 && mouse_x<=178 && mouse_y>=151 && mouse_y<=162){{SEL=5;MOUSE=5;exit;}}"))
         },
         "OptionsControlMouse" => Some(source.replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")),
         "InitializeInicioControl" => {
@@ -31,14 +31,20 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         },
         "KeyActionsInicioControl" => {
             let mut s = String::new();
-            // The native Mods screen owns the click; never let Enter/Z fall through to the old
-            // "Salir del juego" action while that row is selected.
+            // The native Mods screen owns the menu; never let title input fall through while it is open.
+            s.push_str(" if(file_exists(\"mods/open.flag\")) exit; ");
+            // Never let Enter/Z fall through to the old "Salir del juego" action while the Mods row
+            // is selected.
             s.push_str(" if(global.mods_available && SEL=4 && (keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion))){ exit; } ");
             s.push_str(source);
             Some(s)
         },
         "DrawInicioControl" => {
             let s = source
+                .replace(
+                    "if(SEL=4){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_red;}",
+                    "if(SEL=4){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_aqua;} if(SEL=5){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_white;}",
+                )
                 .replace("draw_text_color(160,74", "draw_text_color(160,70")
                 .replace("draw_text_color(160,92", "draw_text_color(160,86")
                 .replace("draw_text_color(160,110", "draw_text_color(160,102")
@@ -49,8 +55,26 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
                 .replace(",110-1+random(2)", ",102-1+random(2)")
                 .replace(",128-1+random(2)", ",118-1+random(2)")
                 .replace(",146-1+random(2)", ",134-1+random(2)");
-            Some(format!("{s} if(global.mods_available){{ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,150,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),149+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }}"))
+            let page = concat!(
+                "if(file_exists(\"mods/open.flag\")){ ",
+                "with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; ",
+                "draw_set_font(0); draw_set_halign(fa_center); ",
+                "draw_set_color(make_color_rgb(62,132,255)); draw_text(160,10,\"Mods\"); ",
+                "draw_set_color(make_color_rgb(42,108,235)); draw_line(0,29,320,29); ",
+                "draw_set_color(c_white); var f,line,i; f=file_text_open_read(\"mods/menu.txt\"); i=0; ",
+                "while(!file_text_eof(f) && i<7){ line=file_text_read_string(f); draw_text(160,38+i*16,line); file_text_readln(f); i+=1;} ",
+                "file_text_close(f); draw_set_color(c_yellow); draw_text(160,148,\"Volver\"); ",
+                "draw_set_color(c_gray); draw_text(160,160,\"Clic en un mod: On/Off\"); ",
+                "draw_set_halign(fa_left); exit;} ",
+                "with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true; "
+            );
+            Some(format!("{page}{s} if(global.mods_available){{ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,150,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),149+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }}"))
         },
+        // The Game Boy filter looks wrong with the day/night tint: the references are flat,
+        // light handheld screens. While that mod is active, leave the lighting overlay off.
+        "DrawOutdoorLighting" => Some(format!("if(file_exists(\"mods/gb.flag\")) exit; {source}")),
+        "DayNightManageCielo" => Some(format!("if(file_exists(\"mods/gb.flag\")) exit; {source}")),
+        "InitializeCielo" => Some(format!("if(file_exists(\"mods/gb.flag\")) exit; {source}")),
         _ => None,
     }
 }
