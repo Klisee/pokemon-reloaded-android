@@ -176,6 +176,7 @@ pub struct Game {
     pub models: HandleList<model::Model>,
     pub model_matrix_stack: Vec<[f32; 16]>,
     pub auto_draw: bool,
+    pub voxel_mode: bool,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
@@ -1387,6 +1388,7 @@ impl Game {
             models: HandleList::new(),
             model_matrix_stack: Vec::new(),
             auto_draw: true,
+            voxel_mode: false,
             last_instance_id,
             last_tile_id,
             uninit_fields_are_zero: settings.zero_uninitialized_vars,
@@ -1504,6 +1506,7 @@ impl Game {
 
         // Re-initialization after constants are done
         game.globals.fields.clear();
+        game.voxel_mode = std::env::var("OPENGMK_VOXEL").map(|v| v != "0").unwrap_or(false);
         game.globals.vars.clear();
         game.globalvars.clear();
 
@@ -2704,6 +2707,8 @@ impl Game {
 
     // Plays the game normally
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let game_directory = self.decode_str(self.program_directory.as_ref()).into_owned();
+        crate::mods::prepare(&game_directory);
         self.init()?;
         handle_scene_change!(self);
 
@@ -2738,6 +2743,13 @@ impl Game {
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
             self.process_window_events();
+
+            // Experimental voxel view toggle. It is intentionally a debug key; the
+            // normal launch flag is OPENGMK_VOXEL=1.
+            if self.input.keyboard_check_pressed(input::Button::F7 as u8) {
+                self.voxel_mode = !self.voxel_mode;
+                eprintln!("[voxel] modo 3D = {}", self.voxel_mode);
+            }
 
             // Test-only savestate hotkeys for the netplay determinism check.
             #[cfg(not(target_os = "android"))]

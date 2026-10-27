@@ -5,6 +5,9 @@
 
 /// Returns a corrected source for `name`, or `None` to compile the game's original.
 pub fn fixup(name: &str, source: &str) -> Option<String> {
+    if let Some(source) = crate::mods::script_override(name) {
+        return Some(source);
+    }
     match name {
         // The title menu and the options screen draw their entries horizontally centred on x=160
         // (so the text spans roughly x=110..210) but only accept clicks inside
