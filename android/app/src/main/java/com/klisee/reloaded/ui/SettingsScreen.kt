@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Delete
@@ -75,6 +76,7 @@ fun SettingsScreen(
     onTouchSettings: () -> Unit,
     onFpsSettings: () -> Unit,
     onMySaves: () -> Unit,
+    onMods: () -> Unit,
     onUpdateFound: (Update.Release) -> Unit,
     bottomBar: @Composable () -> Unit = {},
 ) {
@@ -198,6 +200,17 @@ fun SettingsScreen(
                     items = 1,
                     index = 0,
                     onClick = { showLanguage = true },
+                )
+            }
+
+            SettingsGroup("Mods") {
+                NavRow(
+                    icon = Icons.Filled.Build,
+                    title = "Gestionar mods",
+                    subtitle = "Activa o desactiva los mods instalados",
+                    items = 1,
+                    index = 0,
+                    onClick = onMods,
                 )
             }
 

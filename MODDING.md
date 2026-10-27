@@ -17,7 +17,8 @@ description=Prueba
 - Si pones `enabled=0`, el motor restaura los archivos respaldados.
 - `scripts/<NombreDeScript>.gml` sustituye el código GML de ese script. Tiene prioridad sobre los parches del motor.
 - Los scripts se cargan antes de `init()`.
-- No hay menú gráfico todavía: se activan/desactivan editando `mod.ini`. El siguiente paso es añadir el apartado visual.
+- En Android, el apartado visual está en **Ajustes → Mods**: lista los mods y permite activarlos/desactivarlos. Los cambios se aplican al reiniciar el juego.
+- En PC, por ahora se activan/desactivan editando `mod.ini`.
 
 ## 3D
 
