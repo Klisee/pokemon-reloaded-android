@@ -16,6 +16,7 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         // to a different option. Widen the box to cover the text as drawn.
         "MouseActionsInicioControl" => {
             let mut s = String::from("if(global.mods_menu_open || global.mods_ignore_mouse) exit; ");
+            s.push_str(" if(global.mods_available && mouse_check_button_pressed(mb_left) && mouse_x>=110 && mouse_x<=210 && mouse_y>=125 && mouse_y<=140){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;}");
             s.push_str(&source
                 .replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")
                 .replace("mouse_y>=75 && mouse_y<=88", "mouse_y>=71 && mouse_y<=84")
@@ -35,8 +36,9 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         "KeyActionsInicioControl" => {
             let mut s = String::new();
             s.push_str(" if(global.mods_ignore_input){ if(!keyboard_check(key_ini_entrar) && !keyboard_check(key_ini_accion) && !keyboard_check(key_ini_cancelar) && !keyboard_check(key_ini_salir)) global.mods_ignore_input=false; exit; }");
+            s.push_str(" if(!global.mods_menu_open && global.mods_available && mouse_check_button_pressed(mb_left) && mouse_x>=110 && mouse_x<=210 && mouse_y>=125 && mouse_y<=140){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;}");
             s.push_str(" if(global.mods_menu_open){ if(keyboard_check_pressed(key_ini_cancelar)||keyboard_check_pressed(key_ini_salir)||keyboard_check_pressed(vk_escape)||keyboard_check_pressed(ord('X'))||keyboard_check_pressed(key_ini_entrar)||keyboard_check_pressed(key_ini_accion)||(mouse_check_button_pressed(mb_left) && mouse_x>=110 && mouse_x<=210 && mouse_y>=142 && mouse_y<=160)){global.mods_menu_open=false; global.mods_ignore_mouse=true; global.mods_ignore_input=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true;} exit;}");
-            s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check_pressed(key_ini_entrar)||keyboard_check_pressed(key_ini_accion)){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
+            s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
             s.push_str(" if(global.mods_available && SEL=5){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){ ex(9498); exit;} if(keyboard_check(key_ini_subir)){SEL=4;exit;} if(keyboard_check(key_ini_bajar)){SEL=0;exit;} }");
             s.push_str(source);
             Some(s)
