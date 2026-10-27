@@ -2556,26 +2556,34 @@ impl Game {
     fn draw_mods_menu(&mut self) {
         self.renderer.set_view(0, 0, 320, 180, 0.0, 0, 0, 320, 180);
         self.renderer.clear_view(Colour::new(0.0, 0.0, 0.0), 1.0);
-        if let Some(Some(background)) = self.assets.backgrounds.get(85) {
+        let background_id = self
+            .assets
+            .rooms
+            .get(31)
+            .and_then(|room| room.as_ref())
+            .and_then(|room| room.backgrounds.first())
+            .map(|background| background.background_id)
+            .unwrap_or(15);
+        if let Some(Some(background)) = self.assets.backgrounds.get(background_id as usize) {
             if let Some(atlas) = background.atlas_ref {
                 self.renderer
                     .draw_sprite_tiled(atlas, 0.0, 0.0, 1.0, 1.0, 0xffffff, 1.0, Some(320.0), Some(180.0));
             }
         }
-        self.renderer.draw_rectangle(0.0, 0.0, 320.0, 180.0, 0x000000, 0.35);
+        self.renderer.draw_rectangle(0.0, 0.0, 320.0, 180.0, 0x000000, 0.18);
         self.draw_font_id = 0;
         self.draw_halign = crate::game::draw::Halign::Middle;
         self.draw_valign = crate::game::draw::Valign::Top;
-        self.mods_text(160.0, 16.0, "Mods", 0x3e84ff);
+        self.mods_text(160.0, 16.0, "Mods", 0xff843e);
         self.renderer
-            .draw_line(16.0, 30.0, 304.0, 30.0, None, 0x2a6ceb, 0x2a6ceb, 1.0);
+            .draw_line(16.0, 30.0, 304.0, 30.0, None, 0xeb6c2a, 0xeb6c2a, 1.0);
         let menu = PathBuf::from(self.decode_str(self.program_directory.as_ref()).as_ref()).join("mods/menu.txt");
         let text = std::fs::read_to_string(menu).unwrap_or_default();
         for (index, line) in text.lines().take(10).enumerate() {
             self.mods_text(160.0, 50.0 + index as f64 * 12.0, line, 0xffffff);
         }
-        self.renderer.draw_rectangle(118.0, 138.0, 202.0, 162.0, 0x202040, 1.0);
-        self.mods_text(160.0, 150.0, "Volver", 0xffff00);
+        self.renderer.draw_rectangle(118.0, 138.0, 202.0, 162.0, 0x503020, 1.0);
+        self.mods_text(160.0, 150.0, "Volver", 0x00ffff);
         self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
     }
 
