@@ -20,6 +20,13 @@ description=Prueba
 - En Android, el apartado visual está en **Ajustes → Mods**: lista los mods y permite activarlos/desactivarlos. Los cambios se aplican al reiniciar el juego.
 - En PC, por ahora se activan/desactivan editando `mod.ini`.
 
+## Menú in-game
+
+- Si hay al menos un mod activo, el motor crea `mods/menu.txt` y `mods/active.flag`.
+- El menú del título muestra una fila **Mods**; al pulsarla (teclado) se abre una lista de mods dentro del juego.
+- El menú in-game es de solo lectura por ahora; para activar/desactivar usa Ajustes → Mods en Android o edita `mod.ini` en PC.
+- ESC/X cierra la lista.
+
 ## 3D
 
 - Arranca con `-3` o `OPENGMK_VOXEL=1`.

@@ -78,6 +78,22 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("[mods] {} ({}) desactivado", entry.name, entry.id);
         }
     }
+
+    let active = mods.iter().filter(|m| m.enabled).count();
+    let menu = mods_dir.join("menu.txt");
+    let marker = mods_dir.join("active.flag");
+    if active > 0 {
+        let mut text = String::new();
+        for entry in &mods {
+            text.push_str(&format!("{}  [{}]\n", entry.name, if entry.enabled { "ON" } else { "OFF" }));
+        }
+        fs::write(&menu, text)?;
+        fs::write(&marker, b"1")?;
+        eprintln!("[mods] menu in-game disponible ({} activos)", active);
+    } else {
+        let _ = fs::remove_file(&menu);
+        let _ = fs::remove_file(&marker);
+    }
     Ok(())
 }
 
