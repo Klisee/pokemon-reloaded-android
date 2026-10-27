@@ -15,25 +15,26 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         // there confirms whatever entry was selected before — which looks like the game jumping
         // to a different option. Widen the box to cover the text as drawn.
         "MouseActionsInicioControl" => {
-            let mut s = source
+            let mut s = String::from("if(global.mods_menu_open || global.mods_ignore_mouse) exit; ");
+            s.push_str(&source
                 .replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")
                 .replace("mouse_y>=75 && mouse_y<=88", "mouse_y>=71 && mouse_y<=84")
                 .replace("mouse_y>=93 && mouse_y<=106", "mouse_y>=87 && mouse_y<=100")
                 .replace("mouse_y>=111 && mouse_y<=124", "mouse_y>=103 && mouse_y<=116")
                 .replace("mouse_y>=129 && mouse_y<=142", "mouse_y>=119 && mouse_y<=132")
-                .replace("mouse_y>=147 && mouse_y<=160", "mouse_y>=135 && mouse_y<=148");
+                .replace("mouse_y>=147 && mouse_y<=160", "mouse_y>=135 && mouse_y<=148"));
             s.push_str(" if(global.mods_available && mouse_x>=62 && mouse_x<=178 && mouse_y>=151 && mouse_y<=162){SEL=5;MOUSE=5;exit;}");
             Some(s)
         },
         "OptionsControlMouse" => Some(source.replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")),
         "InitializeInicioControl" => {
             let mut s = source.to_string();
-            s.push_str(" global.mods_menu_open=false; if(file_exists(\"mods/active.flag\")){global.mods_available=true; var tmp; tmp=text_op5; text_op5=\"Mods\"; text_op6=tmp;}else{global.mods_available=false;text_op6=\"\";}");
+            s.push_str(" global.mods_menu_open=false; global.mods_ignore_mouse=false; if(file_exists(\"mods/active.flag\")){global.mods_available=true; var tmp; tmp=text_op5; text_op5=\"Mods\"; text_op6=tmp;}else{global.mods_available=false;text_op6=\"\";}");
             Some(s)
         },
         "KeyActionsInicioControl" => {
             let mut s = String::new();
-            s.push_str(" if(global.mods_menu_open){ if(keyboard_check(key_ini_cancelar)||keyboard_check(key_ini_salir)||keyboard_check_pressed(vk_escape)||keyboard_check_pressed(ord('X'))||mouse_check_button_pressed(mb_left)){global.mods_menu_open=false; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true;} exit;}");
+            s.push_str(" if(global.mods_menu_open){ if(keyboard_check(key_ini_cancelar)||keyboard_check(key_ini_salir)||keyboard_check_pressed(vk_escape)||keyboard_check_pressed(ord('X'))||keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)||(mouse_check_button_pressed(mb_left) && mouse_x>=110 && mouse_x<=210 && mouse_y>=142 && mouse_y<=160)){global.mods_menu_open=false; global.mods_ignore_mouse=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true;} exit;}");
             s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
             s.push_str(" if(global.mods_available && SEL=5){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){ ex(9498); exit;} if(keyboard_check(key_ini_subir)){SEL=4;exit;} if(keyboard_check(key_ini_bajar)){SEL=0;exit;} }");
             s.push_str(source);
@@ -54,6 +55,7 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
                 .replace(",128-1+random(2)", ",118-1+random(2)")
                 .replace(",146-1+random(2)", ",134-1+random(2)");
             s.push_str(&s2);
+            s.push_str(" if(global.mods_ignore_mouse) global.mods_ignore_mouse=false; ");
             s.push_str(" if(global.mods_available){ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,150,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),149+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }");
             Some(s)
         },
