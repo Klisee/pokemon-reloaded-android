@@ -17,12 +17,12 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         "MouseActionsInicioControl" => {
             let mut s = source
                 .replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")
-                .replace("mouse_y>=75 && mouse_y<=88", "mouse_y>=77 && mouse_y<=90")
-                .replace("mouse_y>=93 && mouse_y<=106", "mouse_y>=93 && mouse_y<=106")
-                .replace("mouse_y>=111 && mouse_y<=124", "mouse_y>=109 && mouse_y<=122")
-                .replace("mouse_y>=129 && mouse_y<=142", "mouse_y>=125 && mouse_y<=138")
-                .replace("mouse_y>=147 && mouse_y<=160", "mouse_y>=141 && mouse_y<=154");
-            s.push_str(" if(global.mods_available && mouse_x>=62 && mouse_x<=178 && mouse_y>=157 && mouse_y<=168){SEL=5;MOUSE=5;exit;}");
+                .replace("mouse_y>=75 && mouse_y<=88", "mouse_y>=71 && mouse_y<=84")
+                .replace("mouse_y>=93 && mouse_y<=106", "mouse_y>=87 && mouse_y<=100")
+                .replace("mouse_y>=111 && mouse_y<=124", "mouse_y>=103 && mouse_y<=116")
+                .replace("mouse_y>=129 && mouse_y<=142", "mouse_y>=119 && mouse_y<=132")
+                .replace("mouse_y>=147 && mouse_y<=160", "mouse_y>=135 && mouse_y<=148");
+            s.push_str(" if(global.mods_available && mouse_x>=62 && mouse_x<=178 && mouse_y>=151 && mouse_y<=162){SEL=5;MOUSE=5;exit;}");
             Some(s)
         },
         "OptionsControlMouse" => Some(source.replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")),
@@ -41,17 +41,17 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         },
         "DrawInicioControl" => {
             let mut s = source
-                .replace("draw_text_color(160,74", "draw_text_color(160,76")
-                .replace("draw_text_color(160,92", "draw_text_color(160,92")
-                .replace("draw_text_color(160,110", "draw_text_color(160,108")
-                .replace("draw_text_color(160,128", "draw_text_color(160,124")
-                .replace("draw_text_color(160,146", "draw_text_color(160,140")
-                .replace(",74-1+random(2)", ",76-1+random(2)")
-                .replace(",92-1+random(2)", ",92-1+random(2)")
-                .replace(",110-1+random(2)", ",108-1+random(2)")
-                .replace(",128-1+random(2)", ",124-1+random(2)")
-                .replace(",146-1+random(2)", ",140-1+random(2)");
-            s.push_str(" if(global.mods_available){ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,156,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),155+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }");
+                .replace("draw_text_color(160,74", "draw_text_color(160,70")
+                .replace("draw_text_color(160,92", "draw_text_color(160,86")
+                .replace("draw_text_color(160,110", "draw_text_color(160,102")
+                .replace("draw_text_color(160,128", "draw_text_color(160,118")
+                .replace("draw_text_color(160,146", "draw_text_color(160,134")
+                .replace(",74-1+random(2)", ",70-1+random(2)")
+                .replace(",92-1+random(2)", ",86-1+random(2)")
+                .replace(",110-1+random(2)", ",102-1+random(2)")
+                .replace(",128-1+random(2)", ",118-1+random(2)")
+                .replace(",146-1+random(2)", ",134-1+random(2)");
+            s.push_str(" if(global.mods_available){ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,150,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),149+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }");
             s.push_str(" if(global.mods_menu_open){ draw_set_color(c_black); draw_set_alpha(1); draw_rectangle(0,0,320,180,false); draw_set_alpha(1); draw_set_color(c_white); draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,14,\"Mods\",c_aqua,c_aqua,c_aqua,c_aqua,1); draw_text(160,30,\"Mods instalados\"); draw_line(16,42,304,42); var f,line,i; f=file_text_open_read(\"mods/menu.txt\"); i=0; while(!file_text_eof(f) && i<10){ line=file_text_read_string(f); draw_text(160,52+i*11,line); file_text_readln(f); i+=1;} file_text_close(f); draw_text(160,164,\"ESC / X: Volver\"); draw_set_halign(fa_left); }");
             Some(s)
         },
