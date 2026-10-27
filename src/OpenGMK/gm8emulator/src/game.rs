@@ -177,6 +177,8 @@ pub struct Game {
     pub model_matrix_stack: Vec<[f32; 16]>,
     pub auto_draw: bool,
     pub voxel_mode: bool,
+    pub mods_menu_open: bool,
+    pub mods_close_lock: bool,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
@@ -1389,6 +1391,8 @@ impl Game {
             model_matrix_stack: Vec::new(),
             auto_draw: true,
             voxel_mode: false,
+            mods_menu_open: false,
+            mods_close_lock: false,
             last_instance_id,
             last_tile_id,
             uninit_fields_are_zero: settings.zero_uninitialized_vars,
@@ -2511,6 +2515,70 @@ impl Game {
         Ok(())
     }
 
+    fn mods_text(&mut self, x: f64, y: f64, text: &str, colour: i32) {
+        let string: gml::String = text.as_bytes().into();
+        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+        self.draw_alpha = Real::from(1.0);
+        self.draw_string(
+            Real::from(x),
+            Real::from(y),
+            string,
+            None,
+            None,
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            Some((colour, colour, colour, colour)),
+            Real::from(1.0),
+        );
+    }
+
+    fn mods_menu_input(&mut self) {
+        let game_directory = self.decode_str(self.program_directory.as_ref()).into_owned();
+        let available = PathBuf::from(&game_directory).join("mods/active.flag").is_file();
+        if !available && !self.mods_menu_open {
+            return;
+        }
+        if !self.input.mouse_check_button_pressed(1) {
+            return;
+        }
+        let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+        if self.mods_menu_open {
+            if (110..=210).contains(&x) && (140..=170).contains(&y) {
+                self.mods_menu_open = false;
+                self.mods_close_lock = true;
+            }
+        } else if self.room.id == 30 && (110..=210).contains(&x) && (133..=148).contains(&y) {
+            self.mods_menu_open = true;
+        }
+    }
+
+    fn draw_mods_menu(&mut self) {
+        self.renderer.set_view(0, 0, 320, 180, 0.0, 0, 0, 320, 180);
+        self.renderer.clear_view(Colour::new(0.0, 0.0, 0.0), 1.0);
+        if let Some(Some(background)) = self.assets.backgrounds.get(85) {
+            if let Some(atlas) = background.atlas_ref {
+                self.renderer
+                    .draw_sprite_tiled(atlas, 0.0, 0.0, 1.0, 1.0, 0xffffff, 1.0, Some(320.0), Some(180.0));
+            }
+        }
+        self.renderer.draw_rectangle(0.0, 0.0, 320.0, 180.0, 0x000000, 0.35);
+        self.draw_font_id = 0;
+        self.draw_halign = crate::game::draw::Halign::Middle;
+        self.draw_valign = crate::game::draw::Valign::Top;
+        self.mods_text(160.0, 16.0, "Mods", 0x3e84ff);
+        self.renderer
+            .draw_line(16.0, 30.0, 304.0, 30.0, None, 0x2a6ceb, 0x2a6ceb, 1.0);
+        let menu = PathBuf::from(self.decode_str(self.program_directory.as_ref()).as_ref()).join("mods/menu.txt");
+        let text = std::fs::read_to_string(menu).unwrap_or_default();
+        for (index, line) in text.lines().take(10).enumerate() {
+            self.mods_text(160.0, 50.0 + index as f64 * 12.0, line, 0xffffff);
+        }
+        self.renderer.draw_rectangle(118.0, 138.0, 202.0, 162.0, 0x202040, 1.0);
+        self.mods_text(160.0, 150.0, "Volver", 0xffff00);
+        self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+    }
+
     pub fn process_window_events(&mut self) {
         self.input.mouse_step();
         // What the system keyboard typed becomes events in the same queue the window is about to
@@ -2743,6 +2811,21 @@ impl Game {
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
             self.process_window_events();
+            self.mods_menu_input();
+            if self.mods_close_lock {
+                self.mods_close_lock = false;
+                self.input.step();
+                step_clock = Instant::now();
+                accumulator = Duration::ZERO;
+                continue;
+            }
+            if self.mods_menu_open {
+                self.draw_mods_menu();
+                self.input.step();
+                step_clock = Instant::now();
+                accumulator = Duration::ZERO;
+                continue;
+            }
 
             // Experimental voxel view toggle. It is intentionally a debug key; the
             // normal launch flag is OPENGMK_VOXEL=1.
