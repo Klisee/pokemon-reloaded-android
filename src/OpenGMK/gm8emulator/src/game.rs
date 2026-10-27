@@ -2511,39 +2511,6 @@ impl Game {
         Ok(())
     }
 
-    fn set_mods_instances_visible(&mut self, visible: bool) {
-        let mut it = self.room.instance_list.iter_by_drawing();
-        while let Some(handle) = it.next(&self.room.instance_list) {
-            let instance = self.room.instance_list.get(handle);
-            if matches!(instance.object_index.get(), 99 | 104 | 1452 | 381) {
-                instance.visible.set(visible);
-            }
-        }
-    }
-
-    fn mods_menu_input(&mut self) {
-        let key = |name: &[u8]| gml::Value::Str(name.to_vec().into());
-        let global_true = |game: &Game, name: &[u8]| {
-            matches!(game.variable_global_get(&[key(name)]), Ok(gml::Value::Real(value)) if f64::from(value) != 0.0)
-        };
-        let available = global_true(self, b"mods_available");
-        let open = global_true(self, b"mods_menu_open");
-        if !self.input.mouse_check_button_pressed(1) {
-            return;
-        }
-        let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
-        if !open && available && (110..=210).contains(&x) && (125..=140).contains(&y) {
-            self.set_mods_instances_visible(false);
-            let _ = self.variable_global_set(&[key(b"mods_menu_open"), gml::Value::Real(Real::from(1.0))]);
-            eprintln!("[mods] open");
-        } else if open && (80..=240).contains(&x) && (140..=170).contains(&y) {
-            self.set_mods_instances_visible(true);
-            let _ = self.variable_global_set(&[key(b"mods_menu_open"), gml::Value::Real(Real::from(0.0))]);
-            let _ = self.variable_global_set(&[key(b"mods_ignore_mouse"), gml::Value::Real(Real::from(1.0))]);
-            eprintln!("[mods] close");
-        }
-    }
-
     pub fn process_window_events(&mut self) {
         self.input.mouse_step();
         // What the system keyboard typed becomes events in the same queue the window is about to
@@ -2776,7 +2743,6 @@ impl Game {
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
             self.process_window_events();
-            self.mods_menu_input();
 
             // Experimental voxel view toggle. It is intentionally a debug key; the
             // normal launch flag is OPENGMK_VOXEL=1.

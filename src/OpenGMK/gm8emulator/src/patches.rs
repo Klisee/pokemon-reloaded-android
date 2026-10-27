@@ -34,8 +34,9 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         },
         "KeyActionsInicioControl" => {
             let mut s = String::new();
-            s.push_str(" if(global.mods_menu_open) exit;");
-            s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){global.mods_menu_open=true; with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
+            s.push_str(" if(global.mods_menu_open){ if(mouse_check_button_pressed(mb_left)){global.mods_menu_open=false; global.mods_ignore_mouse=true; show_debug_message(\"[mods] close\"); with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true;} exit;}");
+            s.push_str(" if(!global.mods_menu_open && global.mods_available && mouse_check_button_pressed(mb_left) && mouse_x>=110 && mouse_x<=210 && mouse_y>=125 && mouse_y<=140){global.mods_menu_open=true; show_debug_message(\"[mods] open click\"); with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;}");
+            s.push_str(" if(global.mods_available && SEL=4){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){global.mods_menu_open=true; show_debug_message(\"[mods] open key\"); with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; exit;} if(keyboard_check(key_ini_subir)){SEL=3;exit;} if(keyboard_check(key_ini_bajar)){SEL=5;exit;} }");
             s.push_str(" if(global.mods_available && SEL=5){ if(keyboard_check(key_ini_entrar)||keyboard_check(key_ini_accion)){ ex(9498); exit;} if(keyboard_check(key_ini_subir)){SEL=4;exit;} if(keyboard_check(key_ini_bajar)){SEL=0;exit;} }");
             s.push_str(source);
             Some(s)
