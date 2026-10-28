@@ -27,6 +27,7 @@ const AAUDIO_DIRECTION_OUTPUT: i32 = 0;
 const AAUDIO_FORMAT_PCM_FLOAT: i32 = 2;
 const AAUDIO_PERFORMANCE_MODE_LOW_LATENCY: i32 = 12;
 const AAUDIO_CALLBACK_RESULT_CONTINUE: i32 = 0;
+const AAUDIO_CALLBACK_RESULT_STOP: i32 = 1;
 // aaudio_stream_state_t, in header order.
 const AAUDIO_STREAM_STATE_UNINITIALIZED: i32 = 0;
 const AAUDIO_STREAM_STATE_CLOSED: i32 = 12;
@@ -43,9 +44,39 @@ static STREAM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 static CHANNELS: AtomicU32 = AtomicU32::new(0);
 static RATE: AtomicU32 = AtomicU32::new(0);
 
-/// Stops or resumes the output. Without this the music keeps playing behind the home screen, which
-/// is both wrong and how a game that never really paused gives itself away.
-pub fn set_paused(paused: bool) {
+/// The two independent reasons the output may be paused, kept in one lock so the UI thread
+/// (focus loss) and the activity pump (background/resume) cannot overwrite each other.
+struct PausedState {
+    activity: bool,
+    focus: bool,
+    applied: bool,
+}
+
+static PAUSED: Mutex<PausedState> = Mutex::new(PausedState {
+    activity: false,
+    focus: false,
+    applied: false,
+});
+
+fn update_paused(activity: Option<bool>, focus: Option<bool>) {
+    let (want, changed) = {
+        let mut state = PAUSED.lock().unwrap();
+        if let Some(value) = activity { state.activity = value; }
+        if let Some(value) = focus { state.focus = value; }
+        let want = state.activity || state.focus;
+        if want == state.applied {
+            (want, false)
+        } else {
+            state.applied = want;
+            (want, true)
+        }
+    };
+    if changed {
+        apply_paused(want);
+    }
+}
+
+fn apply_paused(paused: bool) {
     let stream = STREAM.load(Ordering::Relaxed) as *mut c_void;
     if stream.is_null() {
         return
@@ -77,6 +108,16 @@ pub fn set_paused(paused: bool) {
     }
 }
 
+/// Called by the activity pump when the window goes away or comes back.
+pub fn set_activity_paused(paused: bool) {
+    update_paused(Some(paused), None);
+}
+
+/// Called by the audio-focus listener. Focus loss must not resume sound while the activity is paused.
+pub fn set_focus_paused(paused: bool) {
+    update_paused(None, Some(paused));
+}
+
 /// Builds a stream with the parameters saved by [open]. Used to replace one Android reclaimed.
 unsafe fn reopen_stream() -> Result<(), String> {
     let channels = CHANNELS.load(Ordering::Relaxed);
@@ -85,6 +126,18 @@ unsafe fn reopen_stream() -> Result<(), String> {
         return Err("no hay parametros de audio guardados".into())
     }
     let stream = create_stream(rate as i32, channels as i32)?;
+    let actual_channels = AAudioStream_getChannelCount(stream).max(1) as u32;
+    let actual_rate = AAudioStream_getSampleRate(stream).max(8000) as u32;
+    // The mixer is fixed at the original channel count and rate. If routing changed what AAudio
+    // actually gave us, feeding it with the old layout would overrun the callback buffer. Refuse
+    // this stream instead: sound pauses, but the process and the next session stay intact.
+    if actual_channels != channels || actual_rate != rate {
+        AAudioStream_close(stream);
+        return Err(format!(
+            "AAudio cambio el formato: {} canales @ {} Hz, se esperaban {} @ {}",
+            actual_channels, actual_rate, channels, rate
+        ))
+    }
     STREAM.store(stream as usize, Ordering::Relaxed);
     check(AAudioStream_requestStart(stream), "AAudioStream_requestStart")
 }
@@ -146,6 +199,9 @@ extern "C" fn data_callback(
     audio_data: *mut c_void,
     num_frames: i32,
 ) -> i32 {
+    if crate::android_main::SHUTDOWN.load(Ordering::Relaxed) {
+        return AAUDIO_CALLBACK_RESULT_STOP
+    }
     let Ok(mut guard) = MIXER.try_lock() else {
         return AAUDIO_CALLBACK_RESULT_CONTINUE
     };
@@ -174,6 +230,25 @@ fn check(result: i32, what: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{} fallo (AAudio error {})", what, result))
+    }
+}
+
+/// Closes the stream left by a finished session. Called only after its worker has been joined.
+pub fn shutdown() {
+    let stream = STREAM.swap(0, Ordering::SeqCst) as *mut c_void;
+    if !stream.is_null() {
+        unsafe { AAudioStream_close(stream); }
+    }
+    if let Ok(mut guard) = MIXER.lock() {
+        *guard = None;
+    }
+    CHANNELS.store(0, Ordering::SeqCst);
+    RATE.store(0, Ordering::SeqCst);
+    SOUND.store(false, Ordering::SeqCst);
+    if let Ok(mut state) = PAUSED.lock() {
+        state.activity = false;
+        state.focus = false;
+        state.applied = false;
     }
 }
 

@@ -24,6 +24,13 @@ struct ModEntry {
     path: PathBuf,
 }
 
+/// The master switch is opt-in: no `enabled.flag` means no mods are loaded. `disabled.flag` is
+/// still honoured so an old "disabled" choice keeps winning if both files happen to exist.
+fn master_enabled(root: &Path) -> bool {
+    let mods = root.join("mods");
+    mods.join("enabled.flag").is_file() && !mods.join("disabled.flag").is_file()
+}
+
 pub fn prepare(game_directory: &str) {
     if let Err(err) = try_prepare(Path::new(game_directory)) {
         eprintln!("[mods] error: {}", err);
@@ -38,6 +45,7 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = fs::remove_file(mods_dir.join("open.flag"));
     let _ = fs::remove_file(mods_dir.join("gb.flag"));
+    let master_enabled = master_enabled(root);
     let backup_root = mods_dir.join(".backup");
     let mut mods = Vec::new();
     for entry in fs::read_dir(&mods_dir)? {
@@ -66,7 +74,7 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     for entry in &mods {
-        if entry.enabled {
+        if master_enabled && entry.enabled {
             let backup = backup_root.join(&entry.id);
             let installed = apply_overlay(&entry.path, root, &backup)?;
             let scripts = load_scripts(&entry.path)?;
@@ -83,7 +91,7 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let active = mods.iter().filter(|m| m.enabled).count();
+    let active = if master_enabled { mods.iter().filter(|m| m.enabled).count() } else { 0 };
     let menu = mods_dir.join("menu.txt");
     let marker = mods_dir.join("active.flag");
     if active > 0 {
@@ -108,6 +116,9 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// parameter block the renderer understands. Missing keys keep their defaults, so a mod can tune
 /// just the values it cares about.
 pub fn crt_settings(root: &Path) -> Option<CrtSettings> {
+    if !master_enabled(root) {
+        return None;
+    }
     let mods_dir = root.join("mods");
     let entries = fs::read_dir(&mods_dir).ok()?;
     for entry in entries.flatten() {
@@ -224,6 +235,9 @@ pub fn refresh_menu(root: &Path) {
 
 /// Same as [`crt_settings`], but for a mod whose manifest says `effect=gb`.
 pub fn gb_settings(root: &Path) -> Option<GbSettings> {
+    if !master_enabled(root) {
+        return None;
+    }
     let mods_dir = root.join("mods");
     let entries = fs::read_dir(&mods_dir).ok()?;
     for entry in entries.flatten() {
@@ -269,12 +283,18 @@ pub fn gb_settings(root: &Path) -> Option<GbSettings> {
 
 /// Whether a mod is currently enabled in its manifest.
 pub fn is_enabled(root: &Path, id: &str) -> bool {
+    if !master_enabled(root) {
+        return false;
+    }
     parse_manifest(&root.join("mods").join(id).join("mod.ini")).1
 }
 
 
 /// Reads the optional lo-fi audio settings of an enabled Game Boy mod.
 pub fn gb_audio_settings(root: &Path) -> Option<GbAudioSettings> {
+    if !master_enabled(root) {
+        return None;
+    }
     let mods_dir = root.join("mods");
     let entries = fs::read_dir(&mods_dir).ok()?;
     for entry in entries.flatten() {

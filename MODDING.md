@@ -10,15 +10,19 @@ Cada mod vive en `game/extraido/mods/<id>/` y necesita `mod.ini`:
 name=Mi mod
 version=0.1
 enabled=1
-description=Prueba
+author=Tu nombre
+description=Qué cambia el mod y para qué sirve
 ```
+
+Desde 0.4.0 los mods están **desactivados por defecto**. El interruptor general se guarda en
+`mods/enabled.flag`; si existe `mods/disabled.flag`, este último manda y el juego arranca sin mods.
 
 - `data/` se superpone sobre `game/extraido/data/`. Antes de sobrescribir se guarda una copia en `mods/.backup/<id>/`.
 - Si pones `enabled=0`, el motor restaura los archivos respaldados.
 - `scripts/<NombreDeScript>.gml` sustituye el código GML de ese script. Tiene prioridad sobre los parches del motor.
 - Los scripts se cargan antes de `init()`.
-- En Android, el apartado visual está en **Ajustes → Mods**: lista los mods y permite activarlos/desactivarlos. Los cambios se aplican al reiniciar el juego.
-- En PC, por ahora se activan/desactivan editando `mod.ini`.
+- En Android, el apartado visual está en **Ajustes → Mods**: el interruptor **Activar mods** empieza apagado. Actívalo para cargar los mods; la elección se conserva. Los cambios se aplican al reiniciar el juego.
+- En PC, crea `game/extraido/mods/enabled.flag` para habilitar los mods y edita `enabled=1`/`enabled=0` en cada `mod.ini`. Para apagarlos todos, crea `mods/disabled.flag`.
 
 ## Menú in-game
 

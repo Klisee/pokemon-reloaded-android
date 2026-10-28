@@ -320,8 +320,36 @@ class GameRepository(private val context: Context) {
      * Copies the bundled MIDI soundfont next to the game, which is where the emulator looks for it.
      * It ships inside the APK so music works on any device without depending on external paths.
      */
+
+    /** Copies the mod manifests that ship with the app once, without touching user edits. */
+    private fun installBundledMods() {
+        val modsDir = File(gameDir, "mods")
+        for (id in listOf("gb", "crt")) {
+            val target = File(modsDir, "$id/mod.ini")
+            if (target.isFile) continue
+            runCatching {
+                target.parentFile?.mkdirs()
+                context.assets.open("mods/$id/mod.ini").use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        }
+        // Mods are opt-in from 0.4.0. Record that default once so an old install which never
+        // touched the master switch does not keep loading them after the update. If the user
+        // already chose, leave their enabled.flag/disabled.flag alone.
+        val enabledFlag = File(modsDir, "enabled.flag")
+        val disabledFlag = File(modsDir, "disabled.flag")
+        if (!enabledFlag.isFile && !disabledFlag.isFile) {
+            runCatching {
+                modsDir.mkdirs()
+                disabledFlag.writeText("1")
+            }
+        }
+    }
+
     suspend fun prepare(): Unit = withContext(Dispatchers.IO) {
         recoverInterruptedInstall()
+        installBundledMods()
         val exe = findExe(gameDir)
         if (exe != null && File(gameDir, "data").isDirectory) {
             // Installs made before the launcher recorded these still need their size and date.

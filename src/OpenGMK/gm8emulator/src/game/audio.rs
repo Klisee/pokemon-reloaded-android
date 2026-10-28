@@ -29,6 +29,12 @@ pub fn sound_started() -> bool {
     aaudio::sound_started()
 }
 
+/// Releases audio resources left by an Activity that is going away.
+#[cfg(target_os = "android")]
+pub fn reset_after_activity_restart() {
+    aaudio::shutdown();
+}
+
 pub use self::midi::MidiHandle;
 use self::{
     mixer::{Mixer, MixerHandle},
@@ -628,9 +634,15 @@ pub(crate) fn check_mp3(file: Box<[u8]>) -> Result<(), String> {
 /// Stops and resumes the audio output when the app goes to the background and comes back.
 pub fn set_output_paused(paused: bool) {
     #[cfg(target_os = "android")]
-    aaudio::set_paused(paused);
+    aaudio::set_activity_paused(paused);
     #[cfg(not(target_os = "android"))]
     let _ = paused;
+}
+
+/// Pauses or resumes only because another app took or returned audio focus.
+#[cfg(target_os = "android")]
+pub fn set_focus_paused(paused: bool) {
+    aaudio::set_focus_paused(paused);
 }
 
 // This function takes a volume between 0.0 and 1.0 and converts it to the logarithmic scale used by DirectMusic.

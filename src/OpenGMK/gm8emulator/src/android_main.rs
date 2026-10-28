@@ -16,6 +16,10 @@ use android_activity::{
 
 use ramen::{input::Key, platform::android};
 
+/// Set when the Activity is going away and the emulator worker must stop.
+pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WORKER_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
 /// `AKEYCODE_*`, from <android/keycodes.h>. Letters are contiguous from `A`.
 type AKeyCode = i32;
 const AKEYCODE_A: AKeyCode = 29;
@@ -368,12 +372,35 @@ static POINTER_CONTROLS: Mutex<Option<HashMap<i32, usize>>> = Mutex::new(None);
 static WHEEL_PTR: Mutex<Option<i32>> = Mutex::new(None);
 static FIELD_POINTER: Mutex<Option<(i32,usize)>> = Mutex::new(None);
 
-/// Sends a key as a quick tap. The engine defers the release to the end of the poll, so the game
-/// still sees it as pressed.
+/// Keys tapped by the on-screen controls, waiting to be released.
+///
+/// A 120 Hz render loop can deliver a synthetic down and up between two game steps. The engine
+/// records the press, but a menu that asks `keyboard_check` (held, not pressed) would never see it.
+/// Keep the key down for a short game-step window, exactly like a finger tap does for the mouse.
+static DELAYED_KEY_UP: Mutex<Vec<(Instant, ramen::input::Key)>> = Mutex::new(Vec::new());
+
 fn tap_key(key: ramen::input::Key) {
     if crate::touch_controls::key_held_by_buttons(key) || joystick_holds(key) { return }
     android::push_input(ramen::platform::android::InputEvent::KeyDown { key, text: None });
-    android::push_input(ramen::platform::android::InputEvent::KeyUp { key });
+    DELAYED_KEY_UP.lock().unwrap().push((Instant::now() + Duration::from_millis(30), key));
+}
+
+fn flush_delayed_key_ups() {
+    let now = Instant::now();
+    let mut pending = DELAYED_KEY_UP.lock().unwrap();
+    let mut released = Vec::new();
+    pending.retain(|(at, key)| {
+        if *at <= now {
+            released.push(*key);
+            false
+        } else {
+            true
+        }
+    });
+    drop(pending);
+    for key in released {
+        android::push_input(ramen::platform::android::InputEvent::KeyUp { key });
+    }
 }
 
 fn joystick_holds(key: Key) -> bool {
@@ -1040,7 +1067,7 @@ pub extern "system" fn Java_com_klisee_reloaded_GameActivity_nativeAudioFocus<'l
     _this: jni::objects::JObject<'local>,
     lost: jni::sys::jboolean,
 ) {
-    crate::game::audio::set_output_paused(lost != 0);
+    crate::game::audio::set_focus_paused(lost != 0);
 }
 
 /// Whether the system keyboard is up, so it is only raised or dropped on a change.
@@ -1403,6 +1430,30 @@ extern "C" {
 /// Runs the emulator. `poll_events` must be driven from the thread `android_main` is called
 /// on, because android-activity asserts it, so the pump cannot live on a worker thread.
 /// The emulator itself runs on a worker thread instead.
+
+/// Stops the emulator worker before the Activity goes away.
+///
+/// The worker owns the EGL context and the AAudio stream. Letting a new Activity start another
+/// worker while the old one is still alive leaves both fighting over those statics, which is what
+/// produced the "last frame frozen forever" reports. Ask it to stop, give it a short grace period,
+/// then join it. If it will not stop, killing the process is safer than corrupting the next session.
+fn stop_worker() {
+    let Some(handle) = WORKER_HANDLE.lock().ok().and_then(|mut slot| slot.take()) else { return };
+    if !handle.is_finished() {
+        SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+        android::push_input(ramen::platform::android::InputEvent::CloseRequest);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if !handle.is_finished() {
+        logf("[lifecycle] el emulador no cerro en 2s; matando el proceso");
+        std::process::exit(0);
+    }
+    let _ = handle.join();
+}
+
 pub fn android_entry(app: AndroidApp) {
     // Resolve the app's real internal storage from the running Activity before anything reads a
     // setting or writes a log. `/data/data/<package>` is only user 0's data: in a work profile, a
@@ -1417,6 +1468,11 @@ pub fn android_entry(app: AndroidApp) {
     logf(&format!("almacenamiento: {}", storage_dir().display()));
     // Panics then land in the same log, with a backtrace.
     std::env::set_var("RUST_BACKTRACE", "1");
+    // An Activity recreation can happen in the same process. Do not start a second worker beside
+    // the one that still owns the old EGL context and audio stream.
+    stop_worker();
+    SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::game::audio::reset_after_activity_restart();
     // A recreated Activity must not inherit the previous session's held keys.
     reset_input_state();
 
@@ -1438,7 +1494,7 @@ pub fn android_entry(app: AndroidApp) {
     let game_over = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let game_over_thread = game_over.clone();
 
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         // The activity asks for landscape in the manifest, so the window is normally already the right
         // way round; the rotate still takes a moment on some phones. The engine lays its screens out
         // from the size of the window it is given, and whatever it gets here is what the whole session
@@ -1475,6 +1531,9 @@ pub fn android_entry(app: AndroidApp) {
         }
         game_over_thread.store(true, std::sync::atomic::Ordering::SeqCst);
     });
+    if let Ok(mut slot) = WORKER_HANDLE.lock() {
+        *slot = Some(worker);
+    }
 
     let mut destroying = false;
     let mut input_context = crate::touch_controls::current_context();
@@ -1499,6 +1558,7 @@ pub fn android_entry(app: AndroidApp) {
             control_key_up(index);
         }
         flush_delayed_mouse();
+        flush_delayed_key_ups();
         flush_pending_rotate();
         // The keyboard follows the game's text dialog: it comes up by itself the moment the game asks
         // for a name, and goes away when the dialog closes. Only the change is acted on, so closing
@@ -1592,6 +1652,8 @@ pub fn android_entry(app: AndroidApp) {
         game_over.load(std::sync::atomic::Ordering::SeqCst),
         destroying
     ));
+    stop_worker();
+    crate::game::audio::reset_after_activity_restart();
 }
 
 /// android-activity provides `ANativeActivity_onCreate`; this is the plain-Rust-ABI symbol

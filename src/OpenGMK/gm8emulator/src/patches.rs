@@ -14,14 +14,12 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
         // `mouse_x >= 62 && mouse_x <= 178`. Widen the box to cover the text as drawn, and move the
         // six title entries up so the extra Mods row fits above the footer.
         "MouseActionsInicioControl" => {
-            let s = source
-                .replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")
-                .replace("mouse_y>=75 && mouse_y<=88", "mouse_y>=71 && mouse_y<=84")
-                .replace("mouse_y>=93 && mouse_y<=106", "mouse_y>=87 && mouse_y<=100")
-                .replace("mouse_y>=111 && mouse_y<=124", "mouse_y>=103 && mouse_y<=116")
-                .replace("mouse_y>=129 && mouse_y<=142", "mouse_y>=119 && mouse_y<=132")
-                .replace("mouse_y>=147 && mouse_y<=160", "mouse_y>=135 && mouse_y<=148");
-            Some(format!("if(file_exists(\"mods/open.flag\")) exit; {s} if(global.mods_available && mouse_x>=62 && mouse_x<=178 && mouse_y>=151 && mouse_y<=162){{SEL=5;MOUSE=5;exit;}}"))
+            // The title has five rows at 18 px without Mods, and six compact rows at 16 px with
+            // Mods. Keep the hitboxes on the same layout as DrawInicioControl instead of always
+            // using the compact positions: otherwise disabling Mods leaves the menu shifted up and
+            // the bottom row with a gap under it.
+            let s = r#"var y0,h,step; y0=75; h=13; step=18; if(global.mods_available){y0=71;step=16;} if(file_exists("mods/open.flag")) exit; if(mouse_x>=80 && mouse_x<=240 && mouse_y>=y0 && mouse_y<=y0+h){SEL=0;MOUSE=0;exit;} if(mouse_x>=80 && mouse_x<=240 && mouse_y>=y0+step && mouse_y<=y0+step+h){SEL=1;MOUSE=1;exit;} if(mouse_x>=80 && mouse_x<=240 && mouse_y>=y0+2*step && mouse_y<=y0+2*step+h){SEL=2;MOUSE=2;exit;} if(mouse_x>=80 && mouse_x<=240 && mouse_y>=y0+3*step && mouse_y<=y0+3*step+h){SEL=3;MOUSE=3;exit;} if(mouse_x>=80 && mouse_x<=240 && mouse_y>=y0+4*step && mouse_y<=y0+4*step+h){SEL=4;MOUSE=4;exit;} if(global.mods_available && mouse_x>=80 && mouse_x<=240 && mouse_y>=y0+5*step && mouse_y<=y0+5*step+11){SEL=5;MOUSE=5;exit;} MOUSE=(-1);"#;
+            Some(s.to_string())
         },
         "OptionsControlMouse" => Some(source.replace("mouse_x>=62 && mouse_x<=178", "mouse_x>=80 && mouse_x<=240")),
         "InitializeInicioControl" => {
@@ -40,21 +38,25 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
             Some(s)
         },
         "DrawInicioControl" => {
+            // Rows are laid out from y0/step so the same script works both ways: five original
+            // rows (74 + 18n) when Mods is unavailable, or six compact rows (70 + 16n, with Mods
+            // at 150) when it is available. The old unconditional coordinate shift compressed the
+            // menu even after Mods was removed.
             let s = source
                 .replace(
                     "if(SEL=4){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_red;}",
-                    "if(SEL=4){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_aqua;} if(SEL=5){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_white;}",
+                    "if(SEL=4){col1=c_white;col2=c_white;col3=c_white;col4=c_white; if(global.mods_available)col5=c_aqua; else col5=c_red;} if(global.mods_available && SEL=5){col1=c_white;col2=c_white;col3=c_white;col4=c_white;col5=c_white;}",
                 )
-                .replace("draw_text_color(160,74", "draw_text_color(160,70")
-                .replace("draw_text_color(160,92", "draw_text_color(160,86")
-                .replace("draw_text_color(160,110", "draw_text_color(160,102")
-                .replace("draw_text_color(160,128", "draw_text_color(160,118")
-                .replace("draw_text_color(160,146", "draw_text_color(160,134")
-                .replace(",74-1+random(2)", ",70-1+random(2)")
-                .replace(",92-1+random(2)", ",86-1+random(2)")
-                .replace(",110-1+random(2)", ",102-1+random(2)")
-                .replace(",128-1+random(2)", ",118-1+random(2)")
-                .replace(",146-1+random(2)", ",134-1+random(2)");
+                .replace("draw_text_color(160,74", "draw_text_color(160,y0")
+                .replace("draw_text_color(160,92", "draw_text_color(160,y0+step")
+                .replace("draw_text_color(160,110", "draw_text_color(160,y0+2*step")
+                .replace("draw_text_color(160,128", "draw_text_color(160,y0+3*step")
+                .replace("draw_text_color(160,146", "draw_text_color(160,y0+4*step")
+                .replace(",74-1+random(2)", ",y0-1+random(2)")
+                .replace(",92-1+random(2)", ",y0+step-1+random(2)")
+                .replace(",110-1+random(2)", ",y0+2*step-1+random(2)")
+                .replace(",128-1+random(2)", ",y0+3*step-1+random(2)")
+                .replace(",146-1+random(2)", ",y0+4*step-1+random(2)");
             let page = concat!(
                 "if(file_exists(\"mods/open.flag\")){ ",
                 "with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=false; ",
@@ -68,7 +70,13 @@ pub fn fixup(name: &str, source: &str) -> Option<String> {
                 "draw_set_halign(fa_left); exit;} ",
                 "with(all) if(object_index=99 || object_index=104 || object_index=1452 || object_index=381) visible=true; "
             );
-            Some(format!("{page}{s} if(global.mods_available){{ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,150,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),149+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }}"))
+            let mut out = String::from(
+                "var y0,step; y0=74; step=18; if(global.mods_available){y0=70;step=16;} ",
+            );
+            out.push_str(page);
+            out.push_str(&s);
+            out.push_str(" if(global.mods_available){ var c6; c6=c_white; if(SEL=5)c6=c_red; draw_set_font(0); draw_set_halign(fa_center); draw_text_color(160,y0+5*step,text_op6,c6,c6,c6,c6,1); if(SEL=5)draw_text_color(160-1+random(2),y0+5*step-1+random(2),text_op6,c6,c6,c6,c6,0.3); draw_set_halign(fa_left); }");
+            Some(out)
         },
         // The Game Boy filter looks wrong with the day/night tint: the references are flat,
         // light handheld screens. While that mod is active, leave the lighting overlay off.

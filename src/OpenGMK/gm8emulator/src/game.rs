@@ -2834,6 +2834,11 @@ impl Game {
         let mut next_present = time_now;
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
+            #[cfg(target_os = "android")]
+            if crate::android_main::SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+                self.close_requested = true;
+                break Ok(self.run_game_end_events()?)
+            }
             self.process_window_events();
             if self.mods_close_lock {
                 self.mods_close_lock = false;
