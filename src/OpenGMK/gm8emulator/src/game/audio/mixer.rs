@@ -1,4 +1,4 @@
-use super::SoundParams;
+use super::{GbAudioParams, SoundParams};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     mpsc::{self, Receiver, Sender},
@@ -15,8 +15,12 @@ pub struct Mixer {
     sources: Vec<(Box<dyn Source + Send + 'static>, Arc<SoundParams>, i32)>,
     exclusive_source: Option<(Box<dyn Source + Send + 'static>, i32)>,
     global_volume: Arc<AtomicU32>,
+    gb_audio: Arc<GbAudioParams>,
     input_buffer: Vec<Sample>,
     receiver: Receiver<Command>,
+    lofi_phase: f64,
+    lofi_held: Vec<f32>,
+    lofi_lowpass: Vec<f32>,
 }
 
 enum Command {
@@ -49,7 +53,12 @@ pub enum Error {
 }
 
 impl Mixer {
-    pub fn new(sample_rate: SampleRate, channels: ChannelCount, global_volume: Arc<AtomicU32>) -> (Self, MixerHandle) {
+    pub fn new(
+        sample_rate: SampleRate,
+        channels: ChannelCount,
+        global_volume: Arc<AtomicU32>,
+        gb_audio: Arc<GbAudioParams>,
+    ) -> (Self, MixerHandle) {
         let (sender, receiver) = mpsc::channel();
         (
             Self {
@@ -58,11 +67,51 @@ impl Mixer {
                 sources: Vec::with_capacity(INIT_CAPACITY),
                 exclusive_source: None,
                 global_volume,
+                gb_audio,
                 input_buffer: Vec::new(),
                 receiver,
+                lofi_phase: 0.0,
+                lofi_held: Vec::new(),
+                lofi_lowpass: Vec::new(),
             },
             MixerHandle(sender),
         )
+    }
+
+    fn apply_gb_audio(&mut self, buffer: &mut [Sample]) {
+        if !self.gb_audio.enabled.load(Ordering::Acquire) {
+            return;
+        }
+        let bits = self.gb_audio.bits.load(Ordering::Acquire).clamp(4, 12);
+        let target_rate = self.gb_audio.sample_rate.load(Ordering::Acquire).clamp(4000, 48000) as f64;
+        let mono = self.gb_audio.mono.load(Ordering::Acquire);
+        let source_rate = self.sample_rate.get() as f64;
+        let channels = self.channels.get() as usize;
+        let hold_for = (source_rate / target_rate).max(1.0);
+        let levels = ((1u32 << bits) - 1) as f32;
+        self.lofi_held.resize(channels, 0.0);
+        self.lofi_lowpass.resize(channels, 0.0);
+
+        for frame in buffer.chunks_mut(channels) {
+            self.lofi_phase += 1.0;
+            if self.lofi_phase >= hold_for {
+                self.lofi_phase -= hold_for;
+                if mono {
+                    let average = frame.iter().copied().sum::<f32>() / channels as f32;
+                    self.lofi_held.fill(average);
+                } else {
+                    for (held, sample) in self.lofi_held.iter_mut().zip(frame.iter().copied()) {
+                        *held = sample;
+                    }
+                }
+            }
+            for (index, sample) in frame.iter_mut().enumerate() {
+                let lowpass = &mut self.lofi_lowpass[index];
+                *lowpass += (self.lofi_held[index] - *lowpass) * 0.32;
+                let crushed = (*lowpass * levels).round() / levels;
+                *sample = crushed.clamp(-1.0, 1.0);
+            }
+        }
     }
 }
 
@@ -115,6 +164,7 @@ impl Source for Mixer {
             count == input_buffer.len()
         });
 
+        self.apply_gb_audio(buffer);
         buffer.len()
     }
 

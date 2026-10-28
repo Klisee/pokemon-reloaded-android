@@ -402,6 +402,10 @@ impl Game {
             self.renderer.clear_zbuf();
         }
 
+        if self.voxel_mode && !self.is_menu_room() {
+            return crate::voxel::draw(self, src_x, src_y, src_w, src_h, self.voxel_settings);
+        }
+
         fn draw_instance(game: &mut Game, idx: usize) -> gml::Result<()> {
             let instance = game.room.instance_list.get(idx);
             if instance.visible.get() {

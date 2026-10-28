@@ -73,12 +73,23 @@ brightness=1.02
 
 El filtro comparte el mismo pase que el CRT, así que ambos pueden estar activos a la vez.
 
+Opcionalmente puede aplicar un audio lo-fi a toda la mezcla:
+
+```ini
+audio=gb
+audio_bits=6
+audio_rate=8000
+audio_mono=1
+```
+
 ## 3D
 
-- Arranca con `-3` o `OPENGMK_VOXEL=1`.
-- F7 alterna el modo en caliente.
-- Ahora mismo es un prototipo: dibuja los tiles y las instancias como bloques de color con una cámara isométrica. No usa texturas, no clasifica paredes y no dibuja la interfaz del juego.
-- El siguiente paso es añadir altura por tile, texturas y una cámara controlable.
+- Se activa como cualquier otro mod: `mods/3d/mod.ini` con `effect=voxel`, o directamente con `-3`/`OPENGMK_VOXEL=1`.
+- En el menú Mods, haz clic en la fila **3D** para activarlo/desactivarlo en caliente.
+- `camera` ajusta la inclinación (15, 35, 50, 75...) y `zoom` acerca o aleja.
+- F7 sigue alternando el modo para pruebas.
+- La base nueva usa texturas de tiles y sprites como billboards, pero sigue en fase experimental: faltan perspectiva, paredes/alturas reales, sombras y la capa de interfaz.
+- El siguiente paso es cerrar la fase de mundo texturizado y añadir la UI 2D encima; no se activa por defecto hasta entonces.
 
 ## Probar
 

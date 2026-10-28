@@ -19,6 +19,7 @@ use std::{
 use udon::source::{ChannelCount, Sample, SampleRate, Source};
 
 use super::mixer::{Mixer, MixerHandle};
+use super::GbAudioParams;
 
 // aaudio/AAudio.h
 const AAUDIO_OK: i32 = 0;
@@ -179,7 +180,10 @@ fn check(result: i32, what: &str) -> Result<(), String> {
 /// Opens the output stream and hands the mixer over to its callback. Returns the raw stream
 /// pointer (keep it alive for the process lifetime), the device channel count, its sample rate,
 /// and the handle used to add sounds.
-pub fn open(global_volume: Arc<AtomicU32>) -> Result<(usize, ChannelCount, SampleRate, MixerHandle), String> {
+pub fn open(
+    global_volume: Arc<AtomicU32>,
+    gb_audio: Arc<GbAudioParams>,
+) -> Result<(usize, ChannelCount, SampleRate, MixerHandle), String> {
     unsafe {
         let stream = create_stream(48000, 2)?;
 
@@ -188,7 +192,7 @@ pub fn open(global_volume: Arc<AtomicU32>) -> Result<(usize, ChannelCount, Sampl
         let channels = ChannelCount::new(channels as u16).ok_or("canal de audio invalido")?;
         let sample_rate = SampleRate::new(sample_rate).ok_or("frecuencia de audio invalida")?;
 
-        let (mixer, handle) = Mixer::new(sample_rate, channels, global_volume);
+        let (mixer, handle) = Mixer::new(sample_rate, channels, global_volume, gb_audio);
         *MIXER.lock().unwrap() = Some(mixer);
         CHANNELS.store(channels.get() as u32, Ordering::Relaxed);
         RATE.store(sample_rate.get() as u32, Ordering::Relaxed);

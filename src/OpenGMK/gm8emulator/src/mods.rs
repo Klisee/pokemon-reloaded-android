@@ -1,4 +1,6 @@
+use crate::game::audio::GbAudioSettings;
 use crate::render::{CrtSettings, GbSettings};
+use crate::voxel::VoxelSettings;
 use std::{
     collections::HashMap,
     fs,
@@ -269,6 +271,115 @@ pub fn gb_settings(root: &Path) -> Option<GbSettings> {
 /// Whether a mod is currently enabled in its manifest.
 pub fn is_enabled(root: &Path, id: &str) -> bool {
     parse_manifest(&root.join("mods").join(id).join("mod.ini")).1
+}
+
+
+/// Reads the optional lo-fi audio settings of an enabled Game Boy mod.
+pub fn gb_audio_settings(root: &Path) -> Option<GbAudioSettings> {
+    let mods_dir = root.join("mods");
+    let entries = fs::read_dir(&mods_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("mod.ini");
+        if !manifest.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&manifest).ok()?;
+        let mut enabled = true;
+        let mut audio = false;
+        let mut settings = GbAudioSettings::default();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match key.as_str() {
+                "enabled" => {
+                    enabled = !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+                },
+                "audio" => {
+                    audio = matches!(value.to_ascii_lowercase().as_str(), "gb" | "gameboy" | "game boy" | "1" | "on" | "yes")
+                },
+                "audio_bits" => {
+                    if let Ok(bits) = value.parse::<u32>() {
+                        settings.bits = bits;
+                    }
+                },
+                "audio_rate" => {
+                    if let Ok(rate) = value.parse::<u32>() {
+                        settings.sample_rate = rate;
+                    }
+                },
+                "audio_mono" => {
+                    settings.mono = !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+                },
+                _ => (),
+            }
+        }
+        if enabled && audio {
+            eprintln!("[gb-audio] configuracion encontrada en {}", path.display());
+            return Some(settings);
+        }
+    }
+    None
+}
+
+
+/// Reads the optional voxel/3D mod. Presence means the effect is enabled.
+pub fn voxel_settings(root: &Path) -> Option<VoxelSettings> {
+    let mods_dir = root.join("mods");
+    let entries = fs::read_dir(&mods_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("mod.ini");
+        if !manifest.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&manifest).ok()?;
+        let mut enabled = true;
+        let mut is_voxel = false;
+        let mut settings = VoxelSettings::default();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            match key.as_str() {
+                "enabled" => {
+                    enabled = !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+                },
+                "effect" => is_voxel = value.eq_ignore_ascii_case("voxel") || value.eq_ignore_ascii_case("3d"),
+                "camera" | "pitch" => {
+                    if let Ok(pitch) = value.parse::<f32>() {
+                        settings.pitch = pitch;
+                    }
+                },
+                "zoom" => {
+                    if let Ok(zoom) = value.parse::<f32>() {
+                        settings.zoom = zoom;
+                    }
+                },
+                _ => (),
+            }
+        }
+        if enabled && is_voxel {
+            eprintln!("[voxel] configuracion encontrada en {}", path.display());
+            return Some(settings);
+        }
+    }
+    None
 }
 
 fn parse_manifest(path: &Path) -> (String, bool) {

@@ -177,6 +177,7 @@ pub struct Game {
     pub model_matrix_stack: Vec<[f32; 16]>,
     pub auto_draw: bool,
     pub voxel_mode: bool,
+    pub voxel_settings: crate::voxel::VoxelSettings,
     pub mods_menu_open: bool,
     pub mods_close_lock: bool,
     pub uninit_fields_are_zero: bool,
@@ -1391,6 +1392,7 @@ impl Game {
             model_matrix_stack: Vec::new(),
             auto_draw: true,
             voxel_mode: false,
+            voxel_settings: Default::default(),
             mods_menu_open: false,
             mods_close_lock: false,
             last_instance_id,
@@ -2516,7 +2518,7 @@ impl Game {
         Ok(())
     }
 
-    fn gb_menu_palette(&self) -> bool {
+    fn is_menu_room(&self) -> bool {
         let name = self
             .assets
             .rooms
@@ -2535,6 +2537,10 @@ impl Game {
             || name.contains("select")
     }
 
+    fn gb_menu_palette(&self) -> bool {
+        self.is_menu_room()
+    }
+
     fn apply_visual_settings(&mut self, root: &std::path::Path) {
         let gb = crate::mods::gb_settings(root);
         let flag = root.join("mods/gb.flag");
@@ -2545,6 +2551,11 @@ impl Game {
         }
         self.renderer.set_crt(crate::mods::crt_settings(root));
         self.renderer.set_gb(gb);
+        self.audio.set_gb_audio(crate::mods::gb_audio_settings(root));
+        let voxel = crate::mods::voxel_settings(root);
+        self.voxel_settings = voxel.unwrap_or_default();
+        self.voxel_mode = voxel.is_some()
+            || std::env::var("OPENGMK_VOXEL").map(|value| value != "0").unwrap_or(false);
     }
 
     fn toggle_mod(&mut self, root: &std::path::Path, id: &str) {
@@ -2581,6 +2592,8 @@ impl Game {
                     Some("crt")
                 } else if name == "game boy" || name == "gb" {
                     Some("gb")
+                } else if name == "3d" || name == "voxel" {
+                    Some("3d")
                 } else {
                     None
                 };
@@ -2800,6 +2813,10 @@ impl Game {
         crate::mods::prepare(&game_directory);
         self.apply_visual_settings(std::path::Path::new(&game_directory));
         self.init()?;
+        if let Some(voxel) = crate::mods::voxel_settings(std::path::Path::new(&game_directory)) {
+            self.voxel_settings = voxel;
+            self.voxel_mode = true;
+        }
         handle_scene_change!(self);
 
         // The launcher pins this through `video.conf`; a desktop user can set `OPENGMK_RENDER`.
