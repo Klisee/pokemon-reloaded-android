@@ -1,4 +1,4 @@
-# Mods y modo 3D experimental
+# Mods experimentales
 
 Esta rama es un laboratorio. No toca la rama `traduccion-pt`.
 
@@ -81,15 +81,6 @@ audio_bits=6
 audio_rate=8000
 audio_mono=1
 ```
-
-## 3D
-
-- Se activa como cualquier otro mod: `mods/3d/mod.ini` con `effect=voxel`, o directamente con `-3`/`OPENGMK_VOXEL=1`.
-- En el menú Mods, haz clic en la fila **3D** para activarlo/desactivarlo en caliente.
-- `camera` ajusta la inclinación (15, 35, 50, 75...) y `zoom` acerca o aleja.
-- F7 sigue alternando el modo para pruebas.
-- La base nueva usa texturas de tiles y sprites como billboards, pero sigue en fase experimental: faltan perspectiva, paredes/alturas reales, sombras y la capa de interfaz.
-- El siguiente paso es cerrar la fase de mundo texturizado y añadir la UI 2D encima; no se activa por defecto hasta entonces.
 
 ## Probar
 

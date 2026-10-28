@@ -20,7 +20,6 @@ mod render;
 mod tile;
 mod types;
 mod util;
-mod voxel;
 
 #[cfg(target_os = "android")]
 mod android_main;

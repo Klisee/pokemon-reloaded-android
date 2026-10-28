@@ -41,7 +41,6 @@ pub fn run_game(args: Vec<String>) -> i32 {
     opts.optflag("c", "capture", "captures a recording");
     opts.optflagopt("l", "no-framelimit-until", "disables the frame-limiter until specified frame", "FRAME");
     opts.optopt("R", "render", "render pacing: native, auto (vsync), a number of FPS, or uncapped", "MODE");
-    opts.optflag("3", "voxel", "experimental 3D voxel view (toggle with F7)");
     opts.optflag("F", "show-fps", "draw the engine's real frame rate at the top of the game");
     opts.optopt("n", "project-name", "name of TAS project to create or load", "NAME");
     opts.optopt("f", "replay-file", "path to savestate file to replay", "FILE");
@@ -75,9 +74,6 @@ pub fn run_game(args: Vec<String>) -> i32 {
     }
     if matches.opt_present("F") {
         std::env::set_var("OPENGMK_SHOW_FPS", "1");
-    }
-    if matches.opt_present("3") {
-        std::env::set_var("OPENGMK_VOXEL", "1");
     }
 
     // Diagnostic mode: validate every external asset the game can load and exit.

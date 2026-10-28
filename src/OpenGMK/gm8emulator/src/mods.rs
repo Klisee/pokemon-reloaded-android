@@ -1,6 +1,5 @@
 use crate::game::audio::GbAudioSettings;
 use crate::render::{CrtSettings, GbSettings};
-use crate::voxel::VoxelSettings;
 use std::{
     collections::HashMap,
     fs,
@@ -330,57 +329,6 @@ pub fn gb_audio_settings(root: &Path) -> Option<GbAudioSettings> {
     None
 }
 
-
-/// Reads the optional voxel/3D mod. Presence means the effect is enabled.
-pub fn voxel_settings(root: &Path) -> Option<VoxelSettings> {
-    let mods_dir = root.join("mods");
-    let entries = fs::read_dir(&mods_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let manifest = path.join("mod.ini");
-        if !manifest.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&manifest).ok()?;
-        let mut enabled = true;
-        let mut is_voxel = false;
-        let mut settings = VoxelSettings::default();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                continue;
-            }
-            let Some((key, value)) = line.split_once('=') else { continue };
-            let key = key.trim().to_ascii_lowercase();
-            let value = value.trim();
-            match key.as_str() {
-                "enabled" => {
-                    enabled = !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
-                },
-                "effect" => is_voxel = value.eq_ignore_ascii_case("voxel") || value.eq_ignore_ascii_case("3d"),
-                "camera" | "pitch" => {
-                    if let Ok(pitch) = value.parse::<f32>() {
-                        settings.pitch = pitch;
-                    }
-                },
-                "zoom" => {
-                    if let Ok(zoom) = value.parse::<f32>() {
-                        settings.zoom = zoom;
-                    }
-                },
-                _ => (),
-            }
-        }
-        if enabled && is_voxel {
-            eprintln!("[voxel] configuracion encontrada en {}", path.display());
-            return Some(settings);
-        }
-    }
-    None
-}
 
 fn parse_manifest(path: &Path) -> (String, bool) {
     let text = fs::read_to_string(path).unwrap_or_default();

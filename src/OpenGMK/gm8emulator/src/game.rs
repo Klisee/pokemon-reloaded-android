@@ -176,8 +176,6 @@ pub struct Game {
     pub models: HandleList<model::Model>,
     pub model_matrix_stack: Vec<[f32; 16]>,
     pub auto_draw: bool,
-    pub voxel_mode: bool,
-    pub voxel_settings: crate::voxel::VoxelSettings,
     pub mods_menu_open: bool,
     pub mods_close_lock: bool,
     pub uninit_fields_are_zero: bool,
@@ -1391,8 +1389,6 @@ impl Game {
             models: HandleList::new(),
             model_matrix_stack: Vec::new(),
             auto_draw: true,
-            voxel_mode: false,
-            voxel_settings: Default::default(),
             mods_menu_open: false,
             mods_close_lock: false,
             last_instance_id,
@@ -1512,7 +1508,6 @@ impl Game {
 
         // Re-initialization after constants are done
         game.globals.fields.clear();
-        game.voxel_mode = std::env::var("OPENGMK_VOXEL").map(|v| v != "0").unwrap_or(false);
         game.globals.vars.clear();
         game.globalvars.clear();
 
@@ -2552,10 +2547,6 @@ impl Game {
         self.renderer.set_crt(crate::mods::crt_settings(root));
         self.renderer.set_gb(gb);
         self.audio.set_gb_audio(crate::mods::gb_audio_settings(root));
-        let voxel = crate::mods::voxel_settings(root);
-        self.voxel_settings = voxel.unwrap_or_default();
-        self.voxel_mode = voxel.is_some()
-            || std::env::var("OPENGMK_VOXEL").map(|value| value != "0").unwrap_or(false);
     }
 
     fn toggle_mod(&mut self, root: &std::path::Path, id: &str) {
@@ -2592,8 +2583,6 @@ impl Game {
                     Some("crt")
                 } else if name == "game boy" || name == "gb" {
                     Some("gb")
-                } else if name == "3d" || name == "voxel" {
-                    Some("3d")
                 } else {
                     None
                 };
@@ -2813,10 +2802,6 @@ impl Game {
         crate::mods::prepare(&game_directory);
         self.apply_visual_settings(std::path::Path::new(&game_directory));
         self.init()?;
-        if let Some(voxel) = crate::mods::voxel_settings(std::path::Path::new(&game_directory)) {
-            self.voxel_settings = voxel;
-            self.voxel_mode = true;
-        }
         handle_scene_change!(self);
 
         // The launcher pins this through `video.conf`; a desktop user can set `OPENGMK_RENDER`.
@@ -2858,13 +2843,6 @@ impl Game {
                 continue;
             }
             self.mods_menu_input();
-
-            // Experimental voxel view toggle. It is intentionally a debug key; the
-            // normal launch flag is OPENGMK_VOXEL=1.
-            if self.input.keyboard_check_pressed(input::Button::F7 as u8) {
-                self.voxel_mode = !self.voxel_mode;
-                eprintln!("[voxel] modo 3D = {}", self.voxel_mode);
-            }
 
             // Test-only savestate hotkeys for the netplay determinism check.
             #[cfg(not(target_os = "android"))]
