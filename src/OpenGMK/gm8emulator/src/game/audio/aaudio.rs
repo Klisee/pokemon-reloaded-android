@@ -229,6 +229,17 @@ fn check(result: i32, what: &str) -> Result<(), String> {
     }
 }
 
+/// Closes a stream owned by a finished game session, unless a newer session already replaced it.
+pub fn close_stream(stream: usize) {
+    let ptr = stream as *mut c_void;
+    if ptr.is_null() {
+        return
+    }
+    if STREAM.compare_exchange(stream, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+        unsafe { AAudioStream_close(ptr); }
+    }
+}
+
 /// Opens the output stream and hands the mixer over to its callback. Returns the raw stream
 /// pointer (keep it alive for the process lifetime), the device channel count, its sample rate,
 /// and the handle used to add sounds.
@@ -237,6 +248,16 @@ pub fn open(
     gb_audio: Arc<GbAudioParams>,
 ) -> Result<(usize, ChannelCount, SampleRate, MixerHandle), String> {
     unsafe {
+        // A game session can end and another one start inside the same Activity. Close the old
+        // stream first: two AAudio streams pulling from the same mixer split the samples and make
+        // the sound stutter or play at the wrong pitch.
+        let previous = STREAM.swap(0, Ordering::SeqCst) as *mut c_void;
+        if !previous.is_null() {
+            AAudioStream_close(previous);
+        }
+        if let Ok(mut mixer) = MIXER.lock() {
+            *mixer = None;
+        }
         let stream = create_stream(48000, 2)?;
 
         let channels = AAudioStream_getChannelCount(stream).max(1) as u32;

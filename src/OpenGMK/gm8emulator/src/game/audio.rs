@@ -158,6 +158,15 @@ fn session_api() -> Api {
     Api::SoundIo
 }
 
+impl Drop for AudioManager {
+    fn drop(&mut self) {
+        #[cfg(target_os = "android")]
+        if let Some(stream) = self.aaudio_stream.take() {
+            aaudio::close_stream(stream);
+        }
+    }
+}
+
 impl AudioManager {
     /// An audio manager that produces no output. Used on platforms without an audio backend yet.
     #[cfg(target_os = "android")]
