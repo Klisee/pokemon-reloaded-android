@@ -6,8 +6,9 @@
 
 use std::time::{Duration, Instant};
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use android_activity::{
     input::{Axis, InputEvent, KeyAction, MotionAction},
@@ -16,9 +17,51 @@ use android_activity::{
 
 use ramen::{input::Key, platform::android};
 
-/// Set when the Activity is going away and the emulator worker must stop.
-pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static WORKER_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+/// One emulator worker and the flag that asks it to stop. The flag belongs to that worker, not
+/// to the process: a notification or a transient Pause must never stop the session, but a new
+/// Activity must stop the old worker before it starts another one.
+struct Worker {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+static WORKER_HANDLE: Mutex<Option<Worker>> = Mutex::new(None);
+
+thread_local! {
+    static WORKER_STOP: RefCell<Option<Arc<std::sync::atomic::AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// True only on the worker that a newer Activity has asked to stop.
+pub fn worker_stop_requested() -> bool {
+    WORKER_STOP.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|stop| stop.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    })
+}
+
+/// Stops the worker left by a previous Activity, if any. This is called only when a new
+/// `android_entry` starts, never on Pause/Stop/Destroy. On timeout the old worker is left alone
+/// and the new one is not started: two EGL/AAudio owners are worse than a visible splash.
+fn stop_previous_worker() -> bool {
+    let Some(worker) = WORKER_HANDLE.lock().ok().and_then(|mut slot| slot.take()) else { return true };
+    if !worker.handle.is_finished() {
+        logf("[lifecycle] nueva Activity: pidiendo al worker anterior que cierre");
+        worker.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        android::push_input(ramen::platform::android::InputEvent::CloseRequest);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !worker.handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    if !worker.handle.is_finished() {
+        logf("[lifecycle] el worker anterior no cerro en 3s; no inicio otro");
+        return false
+    }
+    let _ = worker.handle.join();
+    true
+}
 
 /// `AKEYCODE_*`, from <android/keycodes.h>. Letters are contiguous from `A`.
 type AKeyCode = i32;
@@ -1430,31 +1473,10 @@ extern "C" {
 /// Runs the emulator. `poll_events` must be driven from the thread `android_main` is called
 /// on, because android-activity asserts it, so the pump cannot live on a worker thread.
 /// The emulator itself runs on a worker thread instead.
-
-/// Stops the emulator worker before the Activity goes away.
-///
-/// The worker owns the EGL context and the AAudio stream. Letting a new Activity start another
-/// worker while the old one is still alive leaves both fighting over those statics, which is what
-/// produced the "last frame frozen forever" reports. Ask it to stop, give it a short grace period,
-/// then join it. If it will not stop, killing the process is safer than corrupting the next session.
-fn stop_worker() {
-    let Some(handle) = WORKER_HANDLE.lock().ok().and_then(|mut slot| slot.take()) else { return };
-    if !handle.is_finished() {
-        SHUTDOWN.store(true, std::sync::atomic::Ordering::SeqCst);
-        android::push_input(ramen::platform::android::InputEvent::CloseRequest);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !handle.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-    if !handle.is_finished() {
-        logf("[lifecycle] el emulador no cerro en 2s; matando el proceso");
-        std::process::exit(0);
-    }
-    let _ = handle.join();
-}
-
 pub fn android_entry(app: AndroidApp) {
+    if !stop_previous_worker() {
+        return
+    }
     // Resolve the app's real internal storage from the running Activity before anything reads a
     // setting or writes a log. `/data/data/<package>` is only user 0's data: in a work profile, a
     // secondary user or a cloned app it points somewhere this process cannot write, which is what
@@ -1468,11 +1490,6 @@ pub fn android_entry(app: AndroidApp) {
     logf(&format!("almacenamiento: {}", storage_dir().display()));
     // Panics then land in the same log, with a backtrace.
     std::env::set_var("RUST_BACKTRACE", "1");
-    // An Activity recreation can happen in the same process. Do not start a second worker beside
-    // the one that still owns the old EGL context and audio stream.
-    stop_worker();
-    SHUTDOWN.store(false, std::sync::atomic::Ordering::SeqCst);
-    crate::game::audio::reset_after_activity_restart();
     // A recreated Activity must not inherit the previous session's held keys.
     reset_input_state();
 
@@ -1494,7 +1511,10 @@ pub fn android_entry(app: AndroidApp) {
     let game_over = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let game_over_thread = game_over.clone();
 
+    let worker_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_stop_thread = worker_stop.clone();
     let worker = std::thread::spawn(move || {
+        WORKER_STOP.with(|slot| *slot.borrow_mut() = Some(worker_stop_thread));
         // The activity asks for landscape in the manifest, so the window is normally already the right
         // way round; the rotate still takes a moment on some phones. The engine lays its screens out
         // from the size of the window it is given, and whatever it gets here is what the whole session
@@ -1532,7 +1552,7 @@ pub fn android_entry(app: AndroidApp) {
         game_over_thread.store(true, std::sync::atomic::Ordering::SeqCst);
     });
     if let Ok(mut slot) = WORKER_HANDLE.lock() {
-        *slot = Some(worker);
+        *slot = Some(Worker { stop: worker_stop, handle: worker });
     }
 
     let mut destroying = false;
@@ -1540,9 +1560,26 @@ pub fn android_entry(app: AndroidApp) {
     let mut input_identity=crate::touch_navigation::identity();
     let mut ime_check = Instant::now();
     let mut text_entry_was_open = false;
+    let mut surface_retry = Instant::now();
+    let mut resumed = false;
     loop {
         if game_over.load(std::sync::atomic::Ordering::SeqCst) || destroying {
             break
+        }
+        if resumed && surface_retry.elapsed() >= Duration::from_millis(100) {
+            surface_retry = Instant::now();
+            if let Some(window) = game_app.native_window() {
+                if !crate::render::opengl::egl::has_surface() {
+                    unsafe {
+                        let ptr = window.ptr().as_ptr() as *mut std::ffi::c_void;
+                        crate::render::opengl::egl::attach_surface(ptr);
+                    }
+                    if crate::render::opengl::egl::has_surface() {
+                        ramen::platform::android::set_paused(false);
+                        crate::game::audio::set_output_paused(false);
+                    }
+                }
+            }
         }
         let context = crate::touch_controls::current_context();
         let identity=crate::touch_navigation::identity();
@@ -1595,6 +1632,7 @@ pub fn android_entry(app: AndroidApp) {
                 | android_activity::MainEvent::Resume { .. }
                 | android_activity::MainEvent::GainedFocus
                 | android_activity::MainEvent::Start => {
+                    resumed = true;
                     publish_window(&game_app);
                     if let Some(window) = game_app.native_window() {
                         // The activity has given us a window: build the GL surface for it now, while
@@ -1620,6 +1658,7 @@ pub fn android_entry(app: AndroidApp) {
                 android_activity::MainEvent::TerminateWindow { .. }
                 | android_activity::MainEvent::Pause { .. }
                 | android_activity::MainEvent::Stop => {
+                    resumed = false;
                     ramen::platform::android::set_paused(true);
                     crate::game::audio::set_output_paused(true);
                     unsafe { crate::render::opengl::egl::detach_surface() };
@@ -1639,7 +1678,10 @@ pub fn android_entry(app: AndroidApp) {
                 },
                 // The system is tearing the activity down (the app was closed): stop pumping so
                 // `android_main` can return and the activity really goes away.
-                android_activity::MainEvent::Destroy => destroying = true,
+                android_activity::MainEvent::Destroy => {
+                    resumed = false;
+                    destroying = true;
+                },
                 _ => {},
             },
             PollEvent::Wake => {},
@@ -1652,8 +1694,6 @@ pub fn android_entry(app: AndroidApp) {
         game_over.load(std::sync::atomic::Ordering::SeqCst),
         destroying
     ));
-    stop_worker();
-    crate::game::audio::reset_after_activity_restart();
 }
 
 /// android-activity provides `ANativeActivity_onCreate`; this is the plain-Rust-ABI symbol

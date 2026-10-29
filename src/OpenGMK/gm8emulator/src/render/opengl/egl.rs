@@ -160,6 +160,13 @@ fn detach_guard() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
     FRAME.write().ok()
 }
 
+/// Never make the Activity pump wait for a frame: if the render thread is inside a
+/// driver call (or wedged in one), skipping the surface change is safer than blocking
+/// the lifecycle forever. The pump retries later.
+fn try_detach_guard() -> Option<std::sync::RwLockWriteGuard<'static, ()>> {
+    FRAME.try_write().ok()
+}
+
 /// Creates the surface for a window the activity has just handed over, while it is still valid.
 /// Deliberately does not touch the context: that belongs to the render thread, and binding it from
 /// another thread takes it away from the one that actually draws.
@@ -167,24 +174,32 @@ pub unsafe fn attach_surface(native_window: *mut c_void) {
     if native_window.is_null() {
         return
     }
-    // Keep the frame gate for the whole replacement, not just the destroy: a frame that starts
-    // between destroying the old surface and creating the new one sees EGL_NO_SURFACE, or worse,
-    // the new window while the old surface is being torn down. The order is the same as the render
-    // thread (frame, then GL).
-    let _no_frame = detach_guard();
+    // A surface built on a window that Android has already replaced is worse than none: it is not
+    // EGL_NO_SURFACE, so the renderer believes it can draw, but every swap goes nowhere. Destroy it
+    // before building the new one. The frame lock is taken first, in the same order as the render
+    // thread (frame, then GL), so no frame is in flight while the surface goes away.
+    let stale = {
+        let Ok(slot) = GL.lock() else { return };
+        slot.as_ref().map(|gl| gl.surface != EGL_NO_SURFACE && gl.window_ptr != native_window).unwrap_or(false)
+    };
+    if stale {
+        let _no_frame = detach_guard();
+        let Ok(mut slot) = GL.lock() else { return };
+        if let Some(gl) = slot.as_mut() {
+            if gl.surface != EGL_NO_SURFACE && gl.window_ptr != native_window {
+                eglDestroySurface(gl.display, gl.surface);
+                gl.surface = EGL_NO_SURFACE;
+                gl.bound = EGL_NO_SURFACE;
+            }
+        }
+    }
     let Ok(mut slot) = GL.lock() else { return };
     let Some(gl) = slot.as_mut() else { return };
-    if gl.surface != EGL_NO_SURFACE && gl.window_ptr != native_window {
-        eglDestroySurface(gl.display, gl.surface);
-        gl.surface = EGL_NO_SURFACE;
-        gl.bound = EGL_NO_SURFACE;
-    }
     if gl.surface != EGL_NO_SURFACE {
         return
     }
     let surface = eglCreateWindowSurface(gl.display, gl.config, native_window, ptr::null());
     if surface == EGL_NO_SURFACE {
-        eprintln!("[gl] no pude crear la superficie para la ventana nueva");
         return
     }
     gl.surface = surface;
@@ -194,8 +209,10 @@ pub unsafe fn attach_surface(native_window: *mut c_void) {
 /// Destroys the surface, while the window it was built on still exists: the only moment EGL can be
 /// told about it cleanly.
 pub unsafe fn detach_surface() {
-    // Waits for any frame in flight to finish before pulling the surface out from under it.
-    let _no_frame = detach_guard();
+    // Do not block the Activity thread on a render frame that may itself be waiting on EGL.
+    let Some(_no_frame) = try_detach_guard() else {
+        return
+    };
     let Ok(mut slot) = GL.lock() else { return };
     let Some(gl) = slot.as_mut() else { return };
     if gl.surface == EGL_NO_SURFACE {

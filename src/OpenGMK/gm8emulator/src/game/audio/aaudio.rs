@@ -27,7 +27,6 @@ const AAUDIO_DIRECTION_OUTPUT: i32 = 0;
 const AAUDIO_FORMAT_PCM_FLOAT: i32 = 2;
 const AAUDIO_PERFORMANCE_MODE_LOW_LATENCY: i32 = 12;
 const AAUDIO_CALLBACK_RESULT_CONTINUE: i32 = 0;
-const AAUDIO_CALLBACK_RESULT_STOP: i32 = 1;
 // aaudio_stream_state_t, in header order.
 const AAUDIO_STREAM_STATE_UNINITIALIZED: i32 = 0;
 const AAUDIO_STREAM_STATE_CLOSED: i32 = 12;
@@ -199,9 +198,6 @@ extern "C" fn data_callback(
     audio_data: *mut c_void,
     num_frames: i32,
 ) -> i32 {
-    if crate::android_main::SHUTDOWN.load(Ordering::Relaxed) {
-        return AAUDIO_CALLBACK_RESULT_STOP
-    }
     let Ok(mut guard) = MIXER.try_lock() else {
         return AAUDIO_CALLBACK_RESULT_CONTINUE
     };
@@ -230,25 +226,6 @@ fn check(result: i32, what: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{} fallo (AAudio error {})", what, result))
-    }
-}
-
-/// Closes the stream left by a finished session. Called only after its worker has been joined.
-pub fn shutdown() {
-    let stream = STREAM.swap(0, Ordering::SeqCst) as *mut c_void;
-    if !stream.is_null() {
-        unsafe { AAudioStream_close(stream); }
-    }
-    if let Ok(mut guard) = MIXER.lock() {
-        *guard = None;
-    }
-    CHANNELS.store(0, Ordering::SeqCst);
-    RATE.store(0, Ordering::SeqCst);
-    SOUND.store(false, Ordering::SeqCst);
-    if let Ok(mut state) = PAUSED.lock() {
-        state.activity = false;
-        state.focus = false;
-        state.applied = false;
     }
 }
 

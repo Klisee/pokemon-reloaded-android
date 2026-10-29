@@ -29,12 +29,6 @@ pub fn sound_started() -> bool {
     aaudio::sound_started()
 }
 
-/// Releases audio resources left by an Activity that is going away.
-#[cfg(target_os = "android")]
-pub fn reset_after_activity_restart() {
-    aaudio::shutdown();
-}
-
 pub use self::midi::MidiHandle;
 use self::{
     mixer::{Mixer, MixerHandle},

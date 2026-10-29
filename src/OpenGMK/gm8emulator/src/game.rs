@@ -2300,12 +2300,12 @@ impl Game {
                 self.scene_change = Some(SceneChange::End);
                 return Ok(())
             }
+            // Bind/release first: after a destroyed surface the context may still be current on
+            // this thread, which makes the next eglCreateWindowSurface fail with EGL_BAD_ALLOC.
+            unsafe { crate::render::opengl::egl::bind_surface() };
             if !crate::render::opengl::egl::has_surface() {
                 return Ok(())
             }
-            // The window may have been replaced while we were away, so bind whatever is current now,
-            // before the frame touches anything at all.
-            unsafe { crate::render::opengl::egl::bind_surface() };
         }
 
         // The touch overlay shows different controls depending on where we are in the game.
@@ -2835,9 +2835,9 @@ impl Game {
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
             #[cfg(target_os = "android")]
-            if crate::android_main::SHUTDOWN.load(std::sync::atomic::Ordering::SeqCst) {
+            if crate::android_main::worker_stop_requested() {
                 self.close_requested = true;
-                break Ok(self.run_game_end_events()?)
+                break Ok(self.run_game_end_events()?);
             }
             self.process_window_events();
             if self.mods_close_lock {
@@ -3081,13 +3081,13 @@ impl Game {
                 self.scene_change = Some(SceneChange::End);
                 return Ok(())
             }
+            unsafe { crate::render::opengl::egl::bind_surface() };
             if !crate::render::opengl::egl::has_surface() {
                 // There is nothing to draw to while the activity is in the background. Native mode
                 // already sleeps once per step; Uncapped would spin the CPU without this.
                 std::thread::sleep(Duration::from_millis(8));
                 return Ok(())
             }
-            unsafe { crate::render::opengl::egl::bind_surface() };
         }
 
         if self.close_requested {
