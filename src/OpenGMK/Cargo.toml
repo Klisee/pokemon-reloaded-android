@@ -4,6 +4,7 @@ exclude = ["gm8emulator-wow64"]
 members = [
     # main projects
     "gm8emulator",
+    "online",
     "gm8decompiler",
     "gml-parser",
     "gm8exe",

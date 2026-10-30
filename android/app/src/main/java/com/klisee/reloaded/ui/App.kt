@@ -43,7 +43,7 @@ import com.klisee.reloaded.installUpdate
 import kotlinx.coroutines.launch
 
 /** Screens reached from a tab rather than being tabs themselves. */
-private enum class Pushed { About, Controls, Discord, TouchSettings, Fps, TouchLayout, MySaves, Mods }
+private enum class Pushed { About, Controls, Discord, TouchSettings, Fps, TouchLayout, MySaves, Mods, ReloadedOnline }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -202,6 +202,15 @@ fun App(repo: GameRepository, prefs: Preferences) {
         Pushed.TouchLayout -> TouchLayoutScreen(prefs = prefs, onBack = { pushed = null })
         Pushed.MySaves -> MySavesScreen(repo = repo, onBack = { pushed = null })
         Pushed.Mods -> ModsScreen(filesDir = context.filesDir, onBack = { pushed = null })
+        Pushed.ReloadedOnline -> ReloadedOnlineScreen(
+            repo = repo,
+            onBack = { pushed = null },
+            onStart = {
+                launching = true
+                DiscordRpcManager.setLauncherScreen(null)
+                Emulator.start(context)
+            },
+        )
         null -> Box(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
                 when (Tab.entries[page]) {
@@ -212,6 +221,7 @@ fun App(repo: GameRepository, prefs: Preferences) {
                         onRequestNetwork = { requestNetwork.launch(Manifest.permission.INTERNET) },
                         onLog = { scope.launch { pagerState.animateScrollToPage(Tab.Log.ordinal) } },
                         onAbout = { pushed = Pushed.About },
+                        onReloadedOnline = { pushed = Pushed.ReloadedOnline },
                         onLaunch = {
                             launching = true
                             DiscordRpcManager.setLauncherScreen(null)

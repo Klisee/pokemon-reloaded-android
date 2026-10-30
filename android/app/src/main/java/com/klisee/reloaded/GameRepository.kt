@@ -75,6 +75,39 @@ class GameRepository(private val context: Context) {
         )
     }
 
+    data class ReloadedOnlineConfig(
+        val enabled: Boolean,
+        val server: String,
+        val name: String,
+        val room: String,
+        val bridgeUpstream: String = "",
+    )
+
+    /** Reads the Reloaded Online startup config, or sensible defaults when it is absent. */
+    fun reloadedOnlineConfig(): ReloadedOnlineConfig {
+        val file = File(gameDir, "reloaded-online.json")
+        val json = runCatching { JSONObject(file.readText()) }.getOrNull()
+        return ReloadedOnlineConfig(
+            enabled = json?.optBoolean("enabled", false) ?: false,
+            server = json?.optString("server")?.ifBlank { null } ?: "127.0.0.1:7777",
+            name = json?.optString("name")?.ifBlank { null } ?: "Jugador",
+            room = json?.optString("room")?.ifBlank { null } ?: "mundo",
+            bridgeUpstream = json?.optString("bridge_upstream")?.ifBlank { null } ?: "",
+        )
+    }
+
+    /** Writes the config the native side reads once, at game startup. */
+    fun writeReloadedOnline(config: ReloadedOnlineConfig): Result<Unit> = runCatching {
+        if (!gameDir.isDirectory) error("Primero instala el juego.")
+        val json = JSONObject()
+            .put("enabled", config.enabled)
+            .put("server", config.server.trim())
+            .put("name", config.name.trim().ifEmpty { "Jugador" })
+            .put("room", config.room.trim().ifEmpty { "mundo" })
+            .put("bridge_upstream", config.bridgeUpstream.trim())
+        File(gameDir, "reloaded-online.json").writeText(json.toString())
+    }
+
     /** The first version-looking number in a name, or null if it has none. */
     private fun versionFromName(name: String): String? =
         Regex("""\d+\.\d+(?:\.\d+){1,2}""").find(name)?.value

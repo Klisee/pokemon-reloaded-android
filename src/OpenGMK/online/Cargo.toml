@@ -1,0 +1,22 @@
+[package]
+name = "reloaded-online"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Clean-room online world/battle transport for Pokemon Reloaded"
+
+[lib]
+name = "reloaded_online"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reloaded-online-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "reloaded-online-bridge"
+path = "src/bin/bridge.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

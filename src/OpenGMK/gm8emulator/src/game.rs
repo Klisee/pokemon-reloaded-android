@@ -39,7 +39,7 @@ use crate::{
     gml::{self, ds, ev, file, rand::Random, runtime::Instruction, Compiler, Context},
     handleman::{HandleArray, HandleList, HandleManager},
     input::{self, Input},
-    instance::{DummyFieldHolder, Instance, InstanceState},
+    instance::{DummyFieldHolder, Field, Instance, InstanceState},
     instancelist::{InstanceList, TileList},
     math::Real,
     render::{atlas::AtlasBuilder, RenderMode, Renderer, RendererOptions, Scaling},
@@ -178,6 +178,27 @@ pub struct Game {
     pub auto_draw: bool,
     pub mods_menu_open: bool,
     pub mods_close_lock: bool,
+    pub online_menu_open: bool,
+    pub online_menu_dismissed: bool,
+    pub online_menu_from_main: bool,
+    pub online_menu_ignore_trigger: bool,
+    pub online_menu_just_opened: bool,
+    pub online_menu_selection: usize,
+    pub interaction_menu_open: bool,
+    pub interaction_menu_selection: usize,
+    pub interaction_menu_just_opened: bool,
+    pub interaction_target: Option<u64>,
+    pub interaction_target_name: String,
+    pub interaction_request: Option<(u64, String, String, String)>,
+    pub interaction_response: Option<(String, bool)>,
+    pub interaction_pending_kind: Option<String>,
+    pub battle_pending: bool,
+    pub battle_target: Option<u64>,
+    pub battle_sync_active: bool,
+    pub battle_opponent: Option<u64>,
+    pub battle_remote_mask: u32,
+    pub battle_room: Option<i32>,
+    pub last_battle_input: Instant,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
@@ -247,6 +268,7 @@ pub struct Game {
     pub ffmpeg_recorder: Option<Child>,
 
     pub audio: audio::AudioManager,
+    pub reloaded_online: crate::reloaded_online::ReloadedOnline,
 
     // winit windowing
     pub window: Window,
@@ -1328,6 +1350,7 @@ impl Game {
 
         renderer.push_atlases(atlases)?;
 
+        let reloaded_online = crate::reloaded_online::ReloadedOnline::new(program_directory);
         let mut game = Self {
             compiler,
             text_files: HandleArray::new(),
@@ -1391,6 +1414,27 @@ impl Game {
             auto_draw: true,
             mods_menu_open: false,
             mods_close_lock: false,
+            online_menu_open: false,
+            online_menu_dismissed: false,
+            online_menu_from_main: false,
+            online_menu_ignore_trigger: false,
+            online_menu_just_opened: false,
+            online_menu_selection: 1,
+            interaction_menu_open: false,
+            interaction_menu_selection: 0,
+            interaction_menu_just_opened: false,
+            interaction_target: None,
+            interaction_target_name: String::new(),
+            interaction_request: None,
+            interaction_response: None,
+            interaction_pending_kind: None,
+            battle_pending: false,
+            battle_target: None,
+            battle_sync_active: false,
+            battle_opponent: None,
+            battle_remote_mask: 0,
+            battle_room: None,
+            last_battle_input: Instant::now(),
             last_instance_id,
             last_tile_id,
             uninit_fields_are_zero: settings.zero_uninitialized_vars,
@@ -1442,6 +1486,7 @@ impl Game {
             info_text: None,
             info_surface: None,
             audio,
+            reloaded_online,
             window,
             window_border,
             window_icons,
@@ -2308,6 +2353,59 @@ impl Game {
             }
         }
 
+        self.battle_input_tick();
+
+        if self.input.keyboard_check_pressed(input::Button::F3 as u8) {
+            eprintln!("[battle-test] F3");
+            let _ = self.start_test_battle();
+        }
+
+        // Intercept the main menu's Multijugador action before InicioControl opens the game's
+        // classic confirmation dialog. This is an engine-level overlay; no GML is changed.
+        if self.online_menu_ignore_trigger && !self.input.keyboard_check(input::Button::M as u8) {
+            self.online_menu_ignore_trigger = false;
+        }
+        if self.play_type == PlayType::Normal
+            && self.room.id == 30
+            && !self.online_menu_open
+            && !self.online_menu_ignore_trigger
+            && self.online_menu_trigger()
+        {
+            self.online_menu_open = true;
+            self.online_menu_from_main = true;
+            self.online_menu_just_opened = true;
+            self.online_menu_selection = 1;
+        }
+        if self.online_menu_open {
+            if self.online_menu_just_opened {
+                self.online_menu_just_opened = false;
+            } else {
+                self.online_menu_input();
+            }
+            self.draw()?;
+            if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                self.renderer.set_gb_inverted(self.gb_menu_palette());
+                self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+            }
+            if self.scene_change.is_some() {
+                eprintln!("[online-menu] leaving frame room={} scene_change set", self.room.id);
+            }
+            self.input.step();
+            return Ok(())
+        }
+
+        self.interaction_trigger();
+        if self.interaction_any_open() {
+            self.interaction_input();
+            self.draw()?;
+            if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                self.renderer.set_gb_inverted(self.gb_menu_palette());
+                self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+            }
+            self.input.step();
+            return Ok(())
+        }
+
         // The touch overlay shows different controls depending on where we are in the game.
         #[cfg(target_os = "android")]
         self.sync_overlay();
@@ -2469,6 +2567,10 @@ impl Game {
         // Clear out any deleted instances
         self.room.instance_list.remove_with(|instance| instance.state.get() == InstanceState::Deleted);
 
+        // Resolve online player collisions before drawing so the corrected position is what
+        // actually gets rendered (instead of moving forward for one frame and snapping back).
+        self.reloaded_online.fix_collisions(&self.room, &self.assets);
+
         // Draw everything, including running draw events
         if self.auto_draw {
             self.draw()?;
@@ -2506,6 +2608,8 @@ impl Game {
             self.renderer.set_gb_inverted(self.gb_menu_palette());
             self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
         }
+
+        self.reloaded_online.tick(&self.room, &self.assets);
 
         // Clear inputs for this frame
         self.input.step();
@@ -2600,6 +2704,667 @@ impl Game {
                 Err(err) => eprintln!("[mods] no se pudo abrir el menu: {err}"),
             }
         }
+    }
+
+    fn online_menu_panel(&self) -> (i32, i32, i32, i32) {
+        let w = self.unscaled_width as i32;
+        let h = self.unscaled_height as i32;
+        (w / 16, h / 10, w * 15 / 16, h * 9 / 10)
+    }
+
+    fn online_menu_row(&self, index: usize) -> (i32, i32, i32, i32) {
+        let (x1, y1, x2, y2) = self.online_menu_panel();
+        let row_h = ((y2 - y1) / 8).max(1);
+        let top = y1 + row_h + index as i32 * row_h;
+        (x1 + 8, top, x2 - 8, top + row_h)
+    }
+
+    fn inicio_control_multijugador_selected(&self) -> bool {
+        let Some(object_index) = self.assets.objects.iter().position(|object| {
+            object
+                .as_ref()
+                .map(|object| object.name.as_ref() == b"InicioControl")
+                .unwrap_or(false)
+        }) else {
+            return false
+        };
+        let Some(handle) = self
+            .room
+            .instance_list
+            .iter_by_identity(object_index as crate::types::ID)
+            .next(&self.room.instance_list)
+        else {
+            return false
+        };
+        let Some(field_id) = self.compiler.find_field_id(b"SEL") else { return false };
+        let instance = self.room.instance_list.get(handle);
+        let value = instance.fields.borrow().get(&field_id).and_then(|field| field.get(0));
+        matches!(value, Some(gml::Value::Real(value)) if value.into_inner() == 2.0)
+    }
+
+    fn online_menu_trigger(&self) -> bool {
+        if self.input.keyboard_check_pressed(input::Button::M as u8) {
+            return true
+        }
+        if self.inicio_control_multijugador_selected()
+            && (self.input.keyboard_check_pressed(input::Button::Return as u8)
+                || self.input.keyboard_check_pressed(input::Button::Space as u8))
+        {
+            return true
+        }
+        if self.input.mouse_check_button_pressed(1) {
+            let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+            if (62..=178).contains(&x) && (111..=124).contains(&y) {
+                return true
+            }
+        }
+        false
+    }
+
+    fn online_menu_input(&mut self) {
+        let mut selection = self.online_menu_selection.min(2);
+        let mut activate = false;
+        if self.input.keyboard_check_pressed(input::Button::UpArrow as u8) {
+            selection = (selection + 2) % 3;
+        }
+        if self.input.keyboard_check_pressed(input::Button::DownArrow as u8) {
+            selection = (selection + 1) % 3;
+        }
+        if self.input.keyboard_check_pressed(input::Button::Return as u8)
+            || self.input.keyboard_check_pressed(input::Button::Space as u8)
+        {
+            activate = true;
+        }
+        if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+            selection = 2;
+            activate = true;
+        }
+        if self.input.mouse_check_button_pressed(1) {
+            let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+            for index in 0..3 {
+                let (x1, y1, x2, y2) = self.online_menu_row(index);
+                if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
+                    selection = index;
+                    activate = true;
+                    break
+                }
+            }
+        }
+        self.online_menu_selection = selection;
+        if !activate {
+            return
+        }
+        self.online_menu_open = false;
+        self.online_menu_dismissed = true;
+        let from_main = self.online_menu_from_main;
+        self.online_menu_from_main = false;
+        eprintln!("[online-menu] activate selection={selection} from_main={from_main} room={}", self.room.id);
+        match selection {
+            0 => {
+                self.reloaded_online.stop();
+                if from_main {
+                    // Let the game's normal Local flow continue, including its classic dialog.
+                    self.online_menu_ignore_trigger = true;
+                    self.input.keyboard_key_press(input::Button::M as i32);
+                }
+            },
+            1 => {
+                // Local server mode: connect to the configured reloaded-online-server and open
+                // the game's loader. Clear the selection input so LoaderControl does not see the
+                // same Enter/click and immediately back out to the main menu.
+                self.input.keyboard_clear_all();
+                self.input.mouse_release(1, false);
+                self.reloaded_online.start_own();
+                self.scene_change = Some(SceneChange::Room(43));
+            },
+            _ => (),
+        }
+    }
+
+    fn set_instance_number(&mut self, handle: usize, name: &[u8], value: f64) {
+        self.set_instance_array_number(handle, name, 0, value);
+    }
+
+    fn set_instance_array_number(&mut self, handle: usize, name: &[u8], index: u32, value: f64) {
+        let field = self.compiler.get_field_id(name);
+        let instance = self.room.instance_list.get(handle);
+        instance
+            .fields
+            .borrow_mut()
+            .entry(field)
+            .or_insert_with(|| Field::new(index, gml::Value::Real(Real::from(value))))
+            .set(index, gml::Value::Real(Real::from(value)));
+    }
+
+    fn copy_global_array(&mut self, from: &[u8], to: &[u8]) {
+        for index in 0..6u32 {
+            let value = self
+                .variable_global_array_get(&[gml::Value::Str(gml::String::from(from)), index.into()])
+                .unwrap_or_default();
+            let _ = self.variable_global_array_set(&[
+                gml::Value::Str(gml::String::from(to)),
+                index.into(),
+                value,
+            ]);
+        }
+    }
+
+    fn local_player_sprite(&self) -> Option<i32> {
+        let object_index = self.assets.objects.iter().position(|object| {
+            object
+                .as_ref()
+                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .unwrap_or(false)
+        })?;
+        let handle = self
+            .room
+            .instance_list
+            .iter_by_identity(object_index as crate::types::ID)
+            .next(&self.room.instance_list)?;
+        Some(self.room.instance_list.get(handle).sprite_index.get())
+    }
+
+    fn run_instance_script(&mut self, handle: usize, name: &[u8]) -> gml::Result<()> {
+        let Some(script) = self.assets.scripts.iter().find_map(|script| {
+            script
+                .as_ref()
+                .filter(|script| script.name.as_ref() == name)
+                .map(|script| script.compiled.clone())
+        }) else {
+            return Ok(())
+        };
+        let mut context = Context::with_single_instance(handle);
+        self.execute(&script, &mut context)?;
+        Ok(())
+    }
+
+    fn start_test_battle(&mut self) -> gml::Result<()> {
+        let Some(object_index) = self.assets.objects.iter().position(|object| {
+            object
+                .as_ref()
+                .map(|object| object.name.as_ref() == b"MULTIPLAYER")
+                .unwrap_or(false)
+        }) else {
+            return Ok(())
+        };
+        let id = self.instance_create(&[0.0.into(), 0.0.into(), (object_index as i32).into()])?;
+        let instance_id = match id {
+            gml::Value::Real(value) => value.to_i32(),
+            _ => return Ok(()),
+        };
+        let Some(handle) = self.room.instance_list.get_by_instid(instance_id) else {
+            return Ok(())
+        };
+        let local_sprite = self.local_player_sprite().unwrap_or(1860);
+        let local_index = match self
+            .variable_global_array_get(&[gml::Value::Str(gml::String::from("prota_index")), 0.into()])
+            .unwrap_or_default()
+        {
+            gml::Value::Real(value) => value.into_inner(),
+            _ => 0.0,
+        };
+        self.set_instance_number(handle, b"p2_sprR", local_sprite as f64);
+        self.set_instance_number(handle, b"sprINDEX2", local_sprite as f64);
+        self.set_instance_number(handle, b"index2", local_index);
+        self.set_instance_number(handle, b"sp_char2", 0.0);
+        let _ = self.variable_global_set(&[
+            gml::Value::Str(gml::String::from("ENTR_SPR")),
+            gml::Value::Real(Real::from(local_sprite as f64)),
+        ]);
+        let _ = self.variable_global_set(&[
+            gml::Value::Str(gml::String::from("TRAINER_SPR")),
+            gml::Value::Real(Real::from(local_sprite as f64)),
+        ]);
+        // Test battle: use the local party on both sides.
+        for index in 0..6 {
+            let species = match self
+                .variable_global_array_get(&[gml::Value::Str(gml::String::from("pkmn1")), index.into()])
+                .unwrap_or_default()
+            {
+                gml::Value::Real(value) => value.into_inner(),
+                _ => 0.0,
+            };
+            self.set_instance_number(handle, b"PKMN1", species);
+            self.set_instance_number(handle, b"PKMN2", species as f64);
+        }
+        self.copy_global_array(b"pkmn1", b"pkmn2");
+        self.copy_global_array(b"indexnivel", b"nivel2");
+        self.copy_global_array(b"pkmnsex1", b"pkmnsex2");
+        self.copy_global_array(b"exp1", b"exp2");
+        self.copy_global_array(b"IV", b"IV2");
+        self.copy_global_array(b"objpoke1", b"objpoke2");
+        self.copy_global_array(b"selue_pk1", b"selue_pk2");
+        self.set_instance_number(handle, b"PLAYER1_INI", 1.0);
+        self.set_instance_number(handle, b"PLAYER2_INI", 1.0);
+        self.set_instance_number(handle, b"NUM_POKEMON1", 6.0);
+        self.set_instance_number(handle, b"NUM_POKEMON2", 6.0);
+        self.run_instance_script(handle, b"MultiplayerImportPlayerOne")?;
+        self.run_instance_script(handle, b"MultiplayerImportPlayerTwo")?;
+        self.run_instance_script(handle, b"MultiplayerGoBattle")?;
+        Ok(())
+    }
+
+    fn global_num(&self, name: &str, index: u32) -> f64 {
+        match self
+            .variable_global_array_get(&[gml::Value::Str(gml::String::from(name)), index.into()])
+            .unwrap_or_default()
+        {
+            gml::Value::Real(value) => value.into_inner(),
+            _ => 0.0,
+        }
+    }
+
+    fn global_json(&self, name: &str, index: u32) -> serde_json::Value {
+        match self
+            .variable_global_array_get(&[gml::Value::Str(gml::String::from(name)), index.into()])
+            .unwrap_or_default()
+        {
+            gml::Value::Real(value) => serde_json::json!(value.into_inner()),
+            gml::Value::Str(value) => serde_json::json!(value.to_string()),
+        }
+    }
+
+    fn set_global_num(&mut self, name: &str, index: u32, value: f64) {
+        let _ = self.variable_global_array_set(&[
+            gml::Value::Str(gml::String::from(name)),
+            index.into(),
+            gml::Value::Real(Real::from(value)),
+        ]);
+    }
+
+    fn set_global_json(&mut self, name: &str, index: u32, value: &serde_json::Value) {
+        let value = if let Some(number) = value.as_f64() {
+            gml::Value::Real(Real::from(number))
+        } else {
+            gml::Value::Str(gml::String::from(value.as_str().unwrap_or("")))
+        };
+        let _ = self.variable_global_array_set(&[
+            gml::Value::Str(gml::String::from(name)),
+            index.into(),
+            value,
+        ]);
+    }
+
+    fn battle_team_snapshot(&self) -> Option<String> {
+        let mut team = Vec::new();
+        for index in 0..6u32 {
+            let moves = (1..=4)
+                .map(|move_index| self.global_json("attack1", index * 32000 + move_index))
+                .collect::<Vec<_>>();
+            let info = (0..17)
+                .map(|field| self.global_json("info", index * 32000 + field))
+                .collect::<Vec<_>>();
+            team.push(serde_json::json!({
+                "species": self.global_num("pkmn1", index),
+                "level": self.global_num("indexnivel", index),
+                "sex": self.global_num("pkmnsex1", index),
+                "exp": self.global_num("exp1", index),
+                "iv": self.global_num("IV", index),
+                "item": self.global_num("objpoke1", index),
+                "selue": self.global_num("selue_pk1", index),
+                "moves": moves,
+                "info": info,
+            }));
+        }
+        serde_json::to_string(&serde_json::json!({ "team": team })).ok()
+    }
+
+    fn apply_remote_battle_team(&mut self, data: &str) -> bool {
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(data) else { return false };
+        let Some(team) = root.get("team").and_then(|value| value.as_array()) else { return false };
+        for (index, pokemon) in team.iter().take(6).enumerate() {
+            let index = index as u32;
+            let number = |key: &str| pokemon.get(key).and_then(|value| value.as_f64()).unwrap_or(0.0);
+            self.set_global_num("pkmn2", index, number("species"));
+            self.set_global_num("nivel2", index, number("level"));
+            self.set_global_num("pkmnsex2", index, number("sex"));
+            self.set_global_num("exp2", index, number("exp"));
+            self.set_global_num("IV2", index, number("iv"));
+            self.set_global_num("objpoke2", index, number("item"));
+            self.set_global_num("selue_pk2", index, number("selue"));
+            if let Some(moves) = pokemon.get("moves").and_then(|value| value.as_array()) {
+                for (move_index, value) in moves.iter().take(4).enumerate() {
+                    self.set_global_json("attack2", index * 32000 + move_index as u32 + 1, value);
+                }
+            }
+            if let Some(info) = pokemon.get("info").and_then(|value| value.as_array()) {
+                for (field, value) in info.iter().take(17).enumerate() {
+                    self.set_global_json("info2", index * 32000 + field as u32, value);
+                }
+            }
+        }
+        true
+    }
+
+    fn start_battle_with_remote_team(&mut self, remote_data: &str, target: u64) -> gml::Result<()> {
+        if !self.apply_remote_battle_team(remote_data) {
+            return Ok(())
+        }
+        let Some(object_index) = self.assets.objects.iter().position(|object| {
+            object
+                .as_ref()
+                .map(|object| object.name.as_ref() == b"MULTIPLAYER")
+                .unwrap_or(false)
+        }) else {
+            return Ok(())
+        };
+        let id = self.instance_create(&[0.0.into(), 0.0.into(), (object_index as i32).into()])?;
+        let instance_id = match id {
+            gml::Value::Real(value) => value.to_i32(),
+            _ => return Ok(()),
+        };
+        let Some(handle) = self.room.instance_list.get_by_instid(instance_id) else {
+            return Ok(())
+        };
+        let local_id = self.reloaded_online.local_id().unwrap_or(1);
+        let seed = (local_id.min(target) * 1_000_003 + local_id.max(target)) as i32;
+        self.rand.set_seed(seed.max(1));
+        let local_sprite = self.local_player_sprite().unwrap_or(1860);
+        let local_index = self.global_num("prota_index", 0);
+        self.set_instance_number(handle, b"p2_sprR", local_sprite as f64);
+        self.set_instance_number(handle, b"sprINDEX2", local_sprite as f64);
+        self.set_instance_number(handle, b"index2", local_index);
+        self.set_instance_number(handle, b"sp_char2", 0.0);
+        self.set_instance_number(handle, b"BTTBACK_INDEX", f64::from((seed.unsigned_abs() % 253) + 1));
+        let _ = self.variable_global_set(&[
+            gml::Value::Str(gml::String::from("ENTR_SPR")),
+            gml::Value::Real(Real::from(local_sprite as f64)),
+        ]);
+        let _ = self.variable_global_set(&[
+            gml::Value::Str(gml::String::from("TRAINER_SPR")),
+            gml::Value::Real(Real::from(local_sprite as f64)),
+        ]);
+        let mut count1: f64 = 0.0;
+        let mut count2: f64 = 0.0;
+        for index in 0..6u32 {
+            let species1 = self.global_num("pkmn1", index);
+            let species2 = self.global_num("pkmn2", index);
+            self.set_instance_array_number(handle, b"PKMN1", index, species1);
+            self.set_instance_array_number(handle, b"PKMN2", index, species2);
+            if species1 > 0.0 {
+                count1 += 1.0;
+            }
+            if species2 > 0.0 {
+                count2 += 1.0;
+            }
+        }
+        self.set_instance_number(handle, b"PLAYER1_INI", 1.0);
+        self.set_instance_number(handle, b"PLAYER2_INI", 1.0);
+        self.set_instance_number(handle, b"NUM_POKEMON1", count1.max(1.0));
+        self.set_instance_number(handle, b"NUM_POKEMON2", count2.max(1.0));
+        self.run_instance_script(handle, b"MultiplayerImportPlayerOne")?;
+        self.run_instance_script(handle, b"MultiplayerImportPlayerTwo")?;
+        self.run_instance_script(handle, b"MultiplayerGoBattle")?;
+        self.battle_sync_active = true;
+        self.battle_opponent = Some(target);
+        self.battle_remote_mask = 0;
+        self.battle_room = None;
+        self.last_battle_input = Instant::now();
+        Ok(())
+    }
+
+    fn battle_input_tick(&mut self) {
+        if !self.battle_sync_active {
+            return
+        }
+        if self.battle_room.is_none() {
+            self.battle_room = Some(self.room.id);
+        } else if self.battle_room != Some(self.room.id) {
+            self.battle_sync_active = false;
+            self.battle_opponent = None;
+            self.battle_remote_mask = 0;
+            return
+        }
+        while let Some((id, mask)) = self.reloaded_online.take_battle_input() {
+            if Some(id) == self.battle_opponent {
+                self.battle_remote_mask = mask;
+            }
+        }
+        let p2_keys = [
+            (input::Button::U as u8, 1u32 << 0),
+            (input::Button::J as u8, 1u32 << 1),
+            (input::Button::H as u8, 1u32 << 2),
+            (input::Button::K as u8, 1u32 << 3),
+            (input::Button::Q as u8, 1u32 << 4),
+            (input::Button::W as u8, 1u32 << 5),
+            (input::Button::E as u8, 1u32 << 6),
+            (input::Button::R as u8, 1u32 << 7),
+            (input::Button::Y as u8, 1u32 << 8),
+            (input::Button::I as u8, 1u32 << 9),
+            (input::Button::O as u8, 1u32 << 10),
+        ];
+        for (key, bit) in p2_keys {
+            self.input.set_key_state(key, self.battle_remote_mask & bit != 0);
+        }
+        let p1_keys = [
+            (input::Button::UpArrow as u8, 1u32 << 0),
+            (input::Button::DownArrow as u8, 1u32 << 1),
+            (input::Button::LeftArrow as u8, 1u32 << 2),
+            (input::Button::RightArrow as u8, 1u32 << 3),
+            (input::Button::Z as u8, 1u32 << 4),
+            (input::Button::X as u8, 1u32 << 5),
+            (input::Button::C as u8, 1u32 << 6),
+            (input::Button::V as u8, 1u32 << 7),
+            (input::Button::S as u8, 1u32 << 8),
+            (input::Button::A as u8, 1u32 << 9),
+            (input::Button::M as u8, 1u32 << 10),
+        ];
+        let mut mask = 0u32;
+        for (key, bit) in p1_keys {
+            if self.input.keyboard_check(key) {
+                mask |= bit;
+            }
+        }
+        if self.last_battle_input.elapsed() >= Duration::from_millis(50) {
+            self.last_battle_input = Instant::now();
+            if let Some(target) = self.battle_opponent {
+                self.reloaded_online.send_battle_input(target, mask);
+            }
+        }
+    }
+
+    fn local_player_position(&self) -> Option<(f64, f64)> {
+        let object_index = self.assets.objects.iter().position(|object| {
+            object
+                .as_ref()
+                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .unwrap_or(false)
+        })?;
+        let handle = self
+            .room
+            .instance_list
+            .iter_by_identity(object_index as crate::types::ID)
+            .next(&self.room.instance_list)?;
+        let instance = self.room.instance_list.get(handle);
+        Some((instance.x.get().into_inner(), instance.y.get().into_inner()))
+    }
+
+    fn interaction_row(&self, index: usize) -> (i32, i32, i32, i32) {
+        let (x1, y1, x2, y2) = self.online_menu_panel();
+        let row_h = ((y2 - y1) / 8).max(1);
+        let top = y1 + row_h + index as i32 * row_h;
+        (x1 + 8, top, x2 - 8, top + row_h)
+    }
+
+    fn interaction_any_open(&self) -> bool {
+        self.interaction_menu_open || self.interaction_request.is_some() || self.interaction_response.is_some()
+    }
+
+    fn interaction_trigger(&mut self) {
+        if !self.reloaded_online.is_active() {
+            return
+        }
+        if self.interaction_any_open() {
+            return
+        }
+        if let Some(request) = self.reloaded_online.take_request() {
+            self.interaction_menu_open = false;
+            self.interaction_request = Some((request.id, request.name, request.kind, request.info));
+            self.interaction_menu_selection = 0;
+            return
+        }
+        if let Some(response) = self.reloaded_online.take_response() {
+            let kind = self.interaction_pending_kind.take();
+            if response.accept && kind.as_deref() == Some("F") {
+                if let Some(data) = self.battle_team_snapshot() {
+                    self.battle_pending = self.reloaded_online.send_battle_team(response.id, &data);
+                    self.battle_target = Some(response.id);
+                    eprintln!("[battle] equipo enviado a {}; esperando equipo remoto", response.name);
+                }
+                return
+            }
+            self.interaction_response = Some((
+                if response.accept {
+                    format!("{} acepto la solicitud.", response.name)
+                } else {
+                    format!("{} rechazo la solicitud.", response.name)
+                },
+                response.accept,
+            ));
+            return
+        }
+        if let Some((id, data)) = self.reloaded_online.take_battle_team() {
+            if self.battle_pending && self.battle_target == Some(id) {
+                self.battle_pending = false;
+                self.battle_target = None;
+                eprintln!("[battle] equipo remoto recibido; arrancando combate");
+                let _ = self.start_battle_with_remote_team(&data, id);
+            }
+            return
+        }
+
+        if !self.input.keyboard_check_pressed(input::Button::Z as u8) {
+            return
+        }
+        let Some((x, y)) = self.local_player_position() else { return };
+        let Some((id, name)) = self.reloaded_online.nearest_remote(self.room.id, x, y, 24.0) else { return };
+        self.interaction_target = Some(id);
+        self.interaction_target_name = name;
+        self.interaction_menu_selection = 0;
+        self.interaction_menu_open = true;
+        self.interaction_menu_just_opened = true;
+    }
+
+    fn interaction_input(&mut self) {
+        if self.interaction_menu_just_opened {
+            self.interaction_menu_just_opened = false;
+            return
+        }
+        if self.interaction_request.is_some() {
+            let mut selection = self.interaction_menu_selection.min(1);
+            let mut activate = false;
+            if self.input.keyboard_check_pressed(input::Button::LeftArrow as u8)
+                || self.input.keyboard_check_pressed(input::Button::UpArrow as u8)
+            {
+                selection = 0;
+            }
+            if self.input.keyboard_check_pressed(input::Button::RightArrow as u8)
+                || self.input.keyboard_check_pressed(input::Button::DownArrow as u8)
+            {
+                selection = 1;
+            }
+            if self.input.keyboard_check_pressed(input::Button::Return as u8)
+                || self.input.keyboard_check_pressed(input::Button::Space as u8)
+            {
+                activate = true;
+            }
+            if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+                selection = 1;
+                activate = true;
+            }
+            if self.input.mouse_check_button_pressed(1) {
+                let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+                let (x1, y1, x2, y2) = self.interaction_row(2);
+                if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
+                    selection = 0;
+                    activate = true;
+                }
+                let (x1, y1, x2, y2) = self.interaction_row(3);
+                if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
+                    selection = 1;
+                    activate = true;
+                }
+            }
+            self.interaction_menu_selection = selection;
+            if !activate {
+                return
+            }
+            if let Some((id, _name, kind, _)) = self.interaction_request.take() {
+                let accept = selection == 0;
+                self.reloaded_online.send_response(id, accept);
+                if accept && kind == "F" {
+                    if let Some(data) = self.battle_team_snapshot() {
+                        self.battle_pending = self.reloaded_online.send_battle_team(id, &data);
+                        self.battle_target = Some(id);
+                        eprintln!("[battle] equipo enviado; esperando equipo remoto");
+                    }
+                }
+            }
+            return
+        }
+        if self.interaction_response.is_some() {
+            let close = self.input.keyboard_check_pressed_any()
+                || self.input.mouse_check_button_pressed_any();
+            if close {
+                self.interaction_response = None;
+            }
+            return
+        }
+        if !self.interaction_menu_open {
+            return
+        }
+        let mut selection = self.interaction_menu_selection.min(3);
+        let mut activate = false;
+        if self.input.keyboard_check_pressed(input::Button::UpArrow as u8) {
+            selection = (selection + 3) % 4;
+        }
+        if self.input.keyboard_check_pressed(input::Button::DownArrow as u8) {
+            selection = (selection + 1) % 4;
+        }
+        if self.input.keyboard_check_pressed(input::Button::Return as u8)
+            || self.input.keyboard_check_pressed(input::Button::Space as u8)
+        {
+            activate = true;
+        }
+        if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+            selection = 3;
+            activate = true;
+        }
+        if self.input.mouse_check_button_pressed(1) {
+            let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+            for index in 0..4 {
+                let (x1, y1, x2, y2) = self.interaction_row(index);
+                if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
+                    selection = index;
+                    activate = true;
+                    break
+                }
+            }
+        }
+        self.interaction_menu_selection = selection;
+        if !activate {
+            return
+        }
+        if selection == 3 {
+            self.interaction_menu_open = false;
+            self.interaction_target = None;
+            return
+        }
+        let kind = match selection {
+            0 => "F",
+            1 => "T",
+            _ => "G",
+        };
+        if let Some(target) = self.interaction_target {
+            self.interaction_pending_kind = Some(kind.to_string());
+            let sent = self.reloaded_online.send_request(target, kind);
+            if !sent {
+                self.interaction_pending_kind = None;
+                self.interaction_response = Some(("No se pudo enviar la solicitud.".into(), false));
+            }
+        }
+        self.interaction_menu_open = false;
+        self.interaction_target = None;
     }
 
     pub fn process_window_events(&mut self) {
