@@ -874,6 +874,9 @@ impl Game {
         }
         let local_name = self.reloaded_online.local_name().to_string();
         let remote_labels = self.reloaded_online.remote_labels(self.room.id, &self.assets);
+        if remote_labels.is_empty() {
+            return
+        }
         let local_label = self
             .assets
             .objects
