@@ -19,8 +19,6 @@ Desde 0.4.0 los mods están **desactivados por defecto**. El interruptor general
 
 - `data/` se superpone sobre `game/extraido/data/`. Antes de sobrescribir se guarda una copia en `mods/.backup/<id>/`.
 - Si pones `enabled=0`, el motor restaura los archivos respaldados.
-- `scripts/<NombreDeScript>.gml` sustituye el código GML de ese script al compilar.
-- Los scripts se cargan antes de `init()`. El motor no incluye parches GML internos.
 - En Android, el apartado visual está en **Ajustes → Mods**: el interruptor **Activar mods** empieza apagado. Actívalo para cargar los mods; la elección se conserva. Los cambios se aplican al reiniciar el juego.
 - En PC, crea `game/extraido/mods/enabled.flag` para habilitar los mods y edita `enabled=1`/`enabled=0` en cada `mod.ini`. Para apagarlos todos, crea `mods/disabled.flag`.
 
