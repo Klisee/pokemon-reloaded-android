@@ -43,8 +43,6 @@ fn try_prepare(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let _ = fs::remove_file(mods_dir.join("open.flag"));
-    let _ = fs::remove_file(mods_dir.join("gb.flag"));
     let master_enabled = master_enabled(root);
     let backup_root = mods_dir.join(".backup");
     let mut mods = Vec::new();

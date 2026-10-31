@@ -177,7 +177,8 @@ pub struct Game {
     pub model_matrix_stack: Vec<[f32; 16]>,
     pub auto_draw: bool,
     pub mods_menu_open: bool,
-    pub mods_close_lock: bool,
+    pub mods_click_handled: bool,
+    pub gb_filter_active: bool,
     pub online_menu_open: bool,
     pub online_menu_dismissed: bool,
     pub online_menu_from_main: bool,
@@ -1107,9 +1108,7 @@ impl Game {
             .into_iter()
             .map(|t| {
                 t.map(|b| {
-                    // Compile a corrected copy of known-broken scripts, without touching the game.
-                    let original = String::from_utf8_lossy(&b.source.0);
-                    let fixed = crate::patches::fixup(&b.name.to_string(), &original);
+                    let fixed = crate::mods::script_override(&b.name.to_string());
                     let source: &[u8] = match &fixed {
                         Some(text) => text.as_bytes(),
                         None => &b.source.0,
@@ -1413,7 +1412,8 @@ impl Game {
             model_matrix_stack: Vec::new(),
             auto_draw: true,
             mods_menu_open: false,
-            mods_close_lock: false,
+            mods_click_handled: false,
+            gb_filter_active: false,
             online_menu_open: false,
             online_menu_dismissed: false,
             online_menu_from_main: false,
@@ -2355,6 +2355,18 @@ impl Game {
 
         self.battle_input_tick();
 
+        let mods_was_open = self.mods_menu_open;
+        self.mods_menu_input();
+        if mods_was_open || self.mods_menu_open {
+            self.draw()?;
+            if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                self.renderer.set_gb_inverted(self.gb_menu_palette());
+                self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+            }
+            self.input.step();
+            return Ok(())
+        }
+
         if self.input.keyboard_check_pressed(input::Button::F3 as u8) {
             eprintln!("[battle-test] F3");
             let _ = self.start_test_battle();
@@ -2642,15 +2654,26 @@ impl Game {
 
     fn apply_visual_settings(&mut self, root: &std::path::Path) {
         let gb = crate::mods::gb_settings(root);
-        let flag = root.join("mods/gb.flag");
-        if gb.is_some() {
-            let _ = std::fs::write(flag, b"1");
-        } else {
-            let _ = std::fs::remove_file(flag);
-        }
+        self.gb_filter_active = gb.is_some();
         self.renderer.set_crt(crate::mods::crt_settings(root));
         self.renderer.set_gb(gb);
         self.audio.set_gb_audio(crate::mods::gb_audio_settings(root));
+    }
+
+    pub(crate) fn gb_script_skipped(&self, script_id: i32) -> bool {
+        if !self.gb_filter_active {
+            return false;
+        }
+        self.assets
+            .scripts
+            .get_asset(script_id)
+            .map(|script| {
+                matches!(
+                    script.name.as_ref(),
+                    b"DrawOutdoorLighting" | b"DayNightManageCielo" | b"InitializeCielo"
+                )
+            })
+            .unwrap_or(false)
     }
 
     fn toggle_mod(&mut self, root: &std::path::Path, id: &str) {
@@ -2661,27 +2684,80 @@ impl Game {
         }
     }
 
+    fn game_root(&self) -> PathBuf {
+        PathBuf::from(self.decode_str(self.program_directory.as_ref()).into_owned())
+    }
+
+    fn mods_available(&self) -> bool {
+        self.game_root().join("mods/active.flag").is_file()
+    }
+
+    fn mods_menu_lines(&self) -> Vec<String> {
+        std::fs::read_to_string(self.game_root().join("mods/menu.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn mods_button_rect(&self) -> (i32, i32, i32, i32) {
+        let w = self.unscaled_width as i32;
+        (w - 64, 8, w - 8, 28)
+    }
+
+    fn mods_menu_panel(&self) -> (i32, i32, i32, i32) {
+        let w = self.unscaled_width as i32;
+        let h = self.unscaled_height as i32;
+        (w / 16, h / 16, w * 15 / 16, h * 15 / 16)
+    }
+
+    fn mods_menu_row(&self, index: usize) -> (i32, i32, i32, i32) {
+        let (x1, y1, x2, y2) = self.mods_menu_panel();
+        let row_h = ((y2 - y1 - 58) / 7).clamp(12, 18);
+        let top = y1 + 30 + index as i32 * row_h;
+        (x1 + 8, top, x2 - 8, top + row_h)
+    }
+
+    fn mods_menu_close_rect(&self) -> (i32, i32, i32, i32) {
+        let (x1, _, x2, y2) = self.mods_menu_panel();
+        let center = (x1 + x2) / 2;
+        (center - 40, y2 - 28, center + 40, y2 - 10)
+    }
+
     fn mods_menu_input(&mut self) {
-        let game_directory = self.decode_str(self.program_directory.as_ref()).into_owned();
-        let root = PathBuf::from(&game_directory);
-        let available = root.join("mods/active.flag").is_file();
-        let open_flag = root.join("mods/open.flag");
+        if !self.input.mouse_check_button(1) {
+            self.mods_click_handled = false;
+        }
+        let available = self.mods_available();
         if !available && !self.mods_menu_open {
-            let _ = std::fs::remove_file(&open_flag);
             return;
         }
-        if !self.input.mouse_check_button_pressed(1) {
+        if !self.mods_menu_open {
+            if self.room.id != 30 || !self.input.mouse_check_button_pressed(1) || self.mods_click_handled {
+                return;
+            }
+            self.mods_click_handled = true;
+            let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+            let (x1, y1, x2, y2) = self.mods_button_rect();
+            if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
+                self.mods_menu_open = true;
+            }
             return;
         }
+        if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+            self.mods_menu_open = false;
+            return;
+        }
+        if !self.input.mouse_check_button_pressed(1) || self.mods_click_handled {
+            return;
+        }
+        self.mods_click_handled = true;
         let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
-        if self.mods_menu_open {
-            let menu = std::fs::read_to_string(root.join("mods/menu.txt")).unwrap_or_default();
-            let row = if (80..=240).contains(&x) && y >= 38 && y < 38 + 7 * 16 {
-                Some(((y - 38) / 16) as usize)
-            } else {
-                None
-            };
-            if let Some(line) = row.and_then(|row| menu.lines().nth(row)) {
+        let root = self.game_root();
+        let lines = self.mods_menu_lines();
+        for (index, line) in lines.iter().take(7).enumerate() {
+            let (x1, y1, x2, y2) = self.mods_menu_row(index);
+            if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
                 let name = line.split("  [").next().unwrap_or("").trim().to_ascii_lowercase();
                 let id = if name == "crt" {
                     Some("crt")
@@ -2693,16 +2769,12 @@ impl Game {
                 if let Some(id) = id {
                     self.toggle_mod(&root, id);
                 }
-            } else if (110..=210).contains(&x) && (144..=162).contains(&y) {
-                self.mods_menu_open = false;
-                self.mods_close_lock = true;
-                let _ = std::fs::remove_file(&open_flag);
+                return;
             }
-        } else if self.room.id == 30 && (110..=210).contains(&x) && (133..=148).contains(&y) {
-            match std::fs::write(&open_flag, b"1") {
-                Ok(()) => self.mods_menu_open = true,
-                Err(err) => eprintln!("[mods] no se pudo abrir el menu: {err}"),
-            }
+        }
+        let (x1, y1, x2, y2) = self.mods_menu_close_rect();
+        if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
+            self.mods_menu_open = false;
         }
     }
 
@@ -3605,14 +3677,6 @@ impl Game {
                 break Ok(self.run_game_end_events()?);
             }
             self.process_window_events();
-            if self.mods_close_lock {
-                self.mods_close_lock = false;
-                self.input.step();
-                step_clock = Instant::now();
-                accumulator = Duration::ZERO;
-                continue;
-            }
-            self.mods_menu_input();
 
             // Test-only savestate hotkeys for the netplay determinism check.
             #[cfg(not(target_os = "android"))]

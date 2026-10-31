@@ -3282,6 +3282,9 @@ impl Game {
 
     pub fn action_execute_script(&mut self, context: &mut Context, args: &[Value]) -> gml::Result<Value> {
         let (script_id, arg1, arg2, arg3, arg4, arg5) = expect_args!(args, [int, any, any, any, any, any])?;
+        if self.gb_script_skipped(script_id) {
+            return Ok(Default::default());
+        }
         if let Some(script) = self.assets.scripts.get_asset(script_id) {
             let instructions = script.compiled.clone();
 
@@ -9658,6 +9661,9 @@ impl Game {
     pub fn script_execute(&mut self, context: &mut Context, args: &[Value]) -> gml::Result<Value> {
         if let Some(script_id) = args.get(0) {
             let script_id = script_id.round();
+            if self.gb_script_skipped(script_id) {
+                return Ok(Default::default());
+            }
             if let Some(script) = self.assets.scripts.get_asset(script_id) {
                 let instructions = script.compiled.clone();
                 let mut new_args: [Value; 16] = Default::default();

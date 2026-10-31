@@ -35,8 +35,6 @@ pub mod touch_navigation;
 
 mod main_impl;
 
-mod patches;
-
 mod scan;
 
 pub use main_impl::{help, run_game};

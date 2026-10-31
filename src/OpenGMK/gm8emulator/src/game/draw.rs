@@ -259,6 +259,12 @@ impl Game {
         if self.show_fps {
             self.draw_fps_overlay();
         }
+        if self.room.id == 30 && self.mods_available() && !self.mods_menu_open {
+            self.draw_mods_button();
+        }
+        if self.mods_menu_open {
+            self.draw_mods_menu();
+        }
         if self.online_menu_open {
             self.draw_online_menu();
         }
@@ -429,6 +435,192 @@ impl Game {
         let Some((message, _)) = self.interaction_response.as_ref() else { return };
         let message = message.clone();
         self.draw_interaction_panel("Reloaded Online", &message, &[], None, 0);
+    }
+
+    fn draw_mods_button(&mut self) {
+        let (x1, y1, x2, y2) = self.mods_button_rect();
+        let old_font = self.draw_font_id;
+        let old_colour = self.draw_colour;
+        let old_alpha = self.draw_alpha;
+        let old_halign = self.draw_halign;
+        let old_valign = self.draw_valign;
+        let old_depth = self.renderer.get_depth();
+        let old_depth_test = self.renderer.get_depth_test();
+        let old_write_depth = self.renderer.get_write_depth();
+        let old_alpha_blending = self.renderer.get_alpha_blending();
+        let old_blend_mode = self.renderer.get_blend_mode();
+        self.draw_font_id = if self.assets.fonts.get_asset(0).is_some() { 0 } else { -1 };
+        self.draw_halign = Halign::Middle;
+        self.draw_valign = Valign::Top;
+        self.draw_alpha = Real::from(1.0);
+        self.renderer.set_draw_offset(0.0, 0.0);
+        self.renderer.set_depth(-32000.0);
+        self.renderer.set_depth_test(false);
+        self.renderer.set_write_depth(false);
+        self.renderer.set_alpha_blending(true);
+        self.renderer.set_blend_mode(BlendType::SrcAlpha, BlendType::InvSrcAlpha);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0, 0, 0.65, false);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0xffffff, 0xffffff, 0.5, true);
+        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+        self.draw_string(
+            Real::from(f64::from(x1 + x2) * 0.5),
+            Real::from(f64::from(y1) + 4.0),
+            gml::String::from("Mods"),
+            None,
+            None,
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            None,
+            Real::from(1.0),
+        );
+        self.renderer.set_depth(old_depth);
+        self.renderer.set_depth_test(old_depth_test);
+        self.renderer.set_write_depth(old_write_depth);
+        self.renderer.set_alpha_blending(old_alpha_blending);
+        self.renderer.set_blend_mode(old_blend_mode.0, old_blend_mode.1);
+        self.draw_font_id = old_font;
+        self.draw_colour = old_colour;
+        self.draw_alpha = old_alpha;
+        self.draw_halign = old_halign;
+        self.draw_valign = old_valign;
+    }
+
+    fn draw_mods_menu(&mut self) {
+        let (x1, y1, x2, y2) = self.mods_menu_panel();
+        let (mouse_x, mouse_y) = (self.input.mouse_x(), self.input.mouse_y());
+        let old_font = self.draw_font_id;
+        let old_colour = self.draw_colour;
+        let old_alpha = self.draw_alpha;
+        let old_halign = self.draw_halign;
+        let old_valign = self.draw_valign;
+        let old_depth = self.renderer.get_depth();
+        let old_depth_test = self.renderer.get_depth_test();
+        let old_write_depth = self.renderer.get_write_depth();
+        let old_alpha_blending = self.renderer.get_alpha_blending();
+        let old_blend_mode = self.renderer.get_blend_mode();
+        self.draw_font_id = if self.assets.fonts.get_asset(17).is_some() {
+            17
+        } else if self.assets.fonts.get_asset(0).is_some() {
+            0
+        } else {
+            -1
+        };
+        self.draw_halign = Halign::Middle;
+        self.draw_valign = Valign::Top;
+        self.draw_alpha = Real::from(1.0);
+        self.renderer.set_draw_offset(0.0, 0.0);
+        self.renderer.set_depth(-32000.0);
+        self.renderer.set_depth_test(false);
+        self.renderer.set_write_depth(false);
+        self.renderer.set_alpha_blending(true);
+        self.renderer.set_blend_mode(BlendType::SrcAlpha, BlendType::InvSrcAlpha);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0, 0, 0.94, false);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0xffffff, 0xffffff, 0.45, true);
+        let center = f64::from(x1 + x2) * 0.5;
+        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+        self.draw_string(
+            Real::from(center),
+            Real::from(f64::from(y1) + 5.0),
+            gml::String::from("Mods"),
+            None,
+            None,
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            None,
+            Real::from(1.0),
+        );
+        let lines = self.mods_menu_lines();
+        for (index, line) in lines.iter().take(7).enumerate() {
+            let (rx1, ry1, rx2, ry2) = self.mods_menu_row(index);
+            let hovered = mouse_x >= rx1 && mouse_x <= rx2 && mouse_y >= ry1 && mouse_y <= ry2;
+            if hovered {
+                self.renderer.draw_roundrect(
+                    rx1 as f64,
+                    ry1 as f64,
+                    rx2 as f64,
+                    ry2 as f64,
+                    0xffffff,
+                    0xffffff,
+                    0.16,
+                    false,
+                );
+            }
+            self.draw_colour = if line.contains("[ON]") {
+                Colour::from(0x7fffd4u32)
+            } else {
+                Colour::new(0.75, 0.75, 0.75)
+            };
+            self.draw_string(
+                Real::from(center),
+                Real::from(f64::from(ry1) + 2.0),
+                gml::String::from(line.as_str()),
+                None,
+                None,
+                Real::from(1.0),
+                Real::from(1.0),
+                Real::from(0.0),
+                None,
+                Real::from(1.0),
+            );
+        }
+        if lines.is_empty() {
+            self.draw_colour = Colour::new(0.75, 0.75, 0.75);
+            self.draw_string(
+                Real::from(center),
+                Real::from(f64::from(y1) + 40.0),
+                gml::String::from("Sin mods activos"),
+                None,
+                None,
+                Real::from(1.0),
+                Real::from(1.0),
+                Real::from(0.0),
+                None,
+                Real::from(1.0),
+            );
+        }
+        let (cx1, cy1, cx2, cy2) = self.mods_menu_close_rect();
+        let close_hovered = mouse_x >= cx1 && mouse_x <= cx2 && mouse_y >= cy1 && mouse_y <= cy2;
+        if close_hovered {
+            self.renderer.draw_roundrect(
+                cx1 as f64,
+                cy1 as f64,
+                cx2 as f64,
+                cy2 as f64,
+                0xffffff,
+                0xffffff,
+                0.16,
+                false,
+            );
+        }
+        self.draw_colour = if close_hovered {
+            Colour::from(0x00ffffu32)
+        } else {
+            Colour::new(1.0, 1.0, 1.0)
+        };
+        self.draw_string(
+            Real::from(center),
+            Real::from(f64::from(cy1) + 2.0),
+            gml::String::from("Volver"),
+            None,
+            None,
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            None,
+            Real::from(1.0),
+        );
+        self.renderer.set_depth(old_depth);
+        self.renderer.set_depth_test(old_depth_test);
+        self.renderer.set_write_depth(old_write_depth);
+        self.renderer.set_alpha_blending(old_alpha_blending);
+        self.renderer.set_blend_mode(old_blend_mode.0, old_blend_mode.1);
+        self.draw_font_id = old_font;
+        self.draw_colour = old_colour;
+        self.draw_alpha = old_alpha;
+        self.draw_halign = old_halign;
+        self.draw_valign = old_valign;
     }
 
     fn draw_online_menu(&mut self) {

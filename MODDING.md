@@ -19,15 +19,15 @@ Desde 0.4.0 los mods están **desactivados por defecto**. El interruptor general
 
 - `data/` se superpone sobre `game/extraido/data/`. Antes de sobrescribir se guarda una copia en `mods/.backup/<id>/`.
 - Si pones `enabled=0`, el motor restaura los archivos respaldados.
-- `scripts/<NombreDeScript>.gml` sustituye el código GML de ese script. Tiene prioridad sobre los parches del motor.
-- Los scripts se cargan antes de `init()`.
+- `scripts/<NombreDeScript>.gml` sustituye el código GML de ese script al compilar.
+- Los scripts se cargan antes de `init()`. El motor no incluye parches GML internos.
 - En Android, el apartado visual está en **Ajustes → Mods**: el interruptor **Activar mods** empieza apagado. Actívalo para cargar los mods; la elección se conserva. Los cambios se aplican al reiniciar el juego.
 - En PC, crea `game/extraido/mods/enabled.flag` para habilitar los mods y edita `enabled=1`/`enabled=0` en cada `mod.ini`. Para apagarlos todos, crea `mods/disabled.flag`.
 
 ## Menú in-game
 
 - Si hay al menos un mod activo, el motor crea `mods/menu.txt` y `mods/active.flag`.
-- El menú del título muestra una fila **Mods** (con las opciones recolocadas para no invadir el pie); al pulsarla se abre una pantalla propia a tamaño completo, como la de Opciones, con la lista de mods.
+- Con mods activos aparece un botón **Mods** en la esquina superior derecha del título; al pulsarlo se abre una pantalla propia a tamaño completo, como la de Opciones, con la lista de mods.
 - En el menú in-game puedes hacer clic en **CRT** o **Game Boy** para activarlos/desactivarlos en caliente. Los demás mods se siguen activando desde Ajustes → Mods en Android o editando `mod.ini` en PC.
 - Solo **Volver** cierra la lista; el resto del título queda bloqueado mientras está abierta.
 

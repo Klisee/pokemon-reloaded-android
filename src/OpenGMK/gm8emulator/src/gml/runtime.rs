@@ -642,6 +642,9 @@ impl Game {
                 function.0(&arg_values[..args.len()])
             },
             Node::Script { args, script_id } => {
+                if self.gb_script_skipped(*script_id as i32) {
+                    return Ok(Default::default());
+                }
                 if let Some(Some(script)) = self.assets.scripts.get(*script_id) {
                     let instructions = script.compiled.clone();
 
