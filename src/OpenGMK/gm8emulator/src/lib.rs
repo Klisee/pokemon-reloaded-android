@@ -16,7 +16,6 @@ mod instance;
 mod instancelist;
 mod math;
 mod mods;
-mod reloaded_online;
 mod render;
 mod tile;
 mod types;

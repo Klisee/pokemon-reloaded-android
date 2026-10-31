@@ -28,7 +28,6 @@ getopts = "0.2"
 getrandom = "0.2"  # 0.3.4
 glob = "0.3"
 gm8exe = { path = "../gm8exe" }
-reloaded-online-net = { package = "reloaded-online", path = "../online" }
 gml-parser = { path = "../gml-parser", features = ["runner-serde-derives"] }
 hex = "0.4"
 image = { version = "0.25.6", features = ["bmp", "gif", "ico", "jpeg", "png", "tga", "tiff"], default-features = false }
@@ -42,7 +41,6 @@ rect_packer = "0.2"
 rmp3 = { version = "0.3", features = ["float"] }
 rust-ini = "0.21"
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = "1.0"
 serde_with = { version = "3.16.1", features = ["alloc", "macros"], default-features = false }
 time = { version = "0.3.41", features = ["local-offset", "macros"] }
 

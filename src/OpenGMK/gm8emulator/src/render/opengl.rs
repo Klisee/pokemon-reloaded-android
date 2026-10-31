@@ -3776,7 +3776,7 @@ impl RendererTrait for RendererImpl {
             self.gl.GetIntegerv(gl::DRAW_FRAMEBUFFER_BINDING, &mut fb_current);
             debug_assert_eq!(self.gl.GetError(), 0);
         }
-        if fb_current == self.framebuffer.fbo as i32 {
+        if fb_current == self.framebuffer.fbo as _ {
             // Set viewport (gl::Viewport, gl::Scissor)
             if port_x >= 0 && port_y >= 0 && port_w >= 0 && port_h >= 0 {
                 unsafe {

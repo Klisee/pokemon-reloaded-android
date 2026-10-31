@@ -1179,22 +1179,6 @@ impl Input {
     }
 
     /// Queues a simulated key press, to be applied on the next event poll.
-    /// Sets a synthetic key state (used by the online battle input bridge). This updates
-    /// press/release edges as well as the held state, so menu code sees the same transitions.
-    pub fn set_key_state(&mut self, key: u8, pressed: bool) {
-        let index = key as usize;
-        if index >= self.button_state.len() {
-            return
-        }
-        let was_pressed = self.button_state[index];
-        self.button_state[index] = pressed;
-        if pressed && !was_pressed {
-            self.button_state_press[index] = true;
-        } else if !pressed && was_pressed {
-            self.button_state_release[index] = true;
-        }
-    }
-
     pub fn keyboard_key_press(&mut self, key: i32) {
         if let Ok(vk) = u8::try_from(key) {
             self.pending_input.push((vk, true));

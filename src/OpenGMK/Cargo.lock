@@ -482,12 +482,10 @@ dependencies = [
  "phf",
  "ramen",
  "rect_packer",
- "reloaded-online",
  "rmp3",
  "rust-ini",
  "rustysynth",
  "serde",
- "serde_json",
  "serde_with",
  "time",
  "udon",
@@ -1072,14 +1070,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.11.1",
-]
-
-[[package]]
-name = "reloaded-online"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

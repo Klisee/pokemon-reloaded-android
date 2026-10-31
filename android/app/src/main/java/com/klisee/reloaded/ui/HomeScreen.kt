@@ -25,7 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -37,7 +36,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -78,7 +76,6 @@ fun HomeScreen(
     onRequestNetwork: () -> Unit,
     onLog: () -> Unit,
     onAbout: () -> Unit,
-    onReloadedOnline: () -> Unit,
     onLaunch: () -> Unit,
     launching: Boolean = false,
     onSettings: () -> Unit,
@@ -208,16 +205,6 @@ fun HomeScreen(
                         }
                         Spacer(Modifier.width(12.dp))
                         Text(if (launching) "Cargando..." else "Jugar", style = MaterialTheme.typography.titleLarge)
-                    }
-                    OutlinedButton(
-                        onClick = onReloadedOnline,
-                        enabled = installed != null && !busy && !launching,
-                        modifier = Modifier.fillMaxWidth().height(52.dp),
-                        shape = MaterialTheme.shapes.extraLarge,
-                    ) {
-                        Icon(Icons.Filled.Language, contentDescription = null, modifier = Modifier.size(22.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text("Reloaded Online")
                     }
                     if (installed == null) {
                         Text(
