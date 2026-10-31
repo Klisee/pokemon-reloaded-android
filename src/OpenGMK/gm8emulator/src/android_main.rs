@@ -537,7 +537,9 @@ fn pointer_down(id: i32, x: f32, y: f32) {
                 return;
             }
             if crate::touch_controls::controls()[index].name == crate::touch_controls::PARTY_NAME {
-                // Holding it opens the party wheel instead of pressing a key of its own.
+                if let Some(key) = crate::touch_controls::battle_switch_key() {
+                    tap_key(key);
+                }
                 crate::touch_controls::set_wheel_open(true);
                 *WHEEL_PTR.lock().unwrap() = Some(id);
             } else {

@@ -47,7 +47,16 @@ pub enum ClientMessage {
     Request { target: u64, kind: String, info: String },
     Response { target: u64, accept: bool },
     BattleTeam { target: u64, data: String },
-    BattleInput { target: u64, mask: u32 },
+    BattleInput {
+        target: u64,
+        mask: u32,
+        #[serde(default)]
+        seq: u32,
+        #[serde(default)]
+        frame: u32,
+        #[serde(default)]
+        checksum: u32,
+    },
     Chat { text: String },
     Leave,
 }
@@ -79,7 +88,16 @@ pub enum ServerMessage {
     Request { id: u64, name: String, kind: String, info: String },
     Response { id: u64, name: String, accept: bool },
     BattleTeam { id: u64, name: String, data: String },
-    BattleInput { id: u64, mask: u32 },
+    BattleInput {
+        id: u64,
+        mask: u32,
+        #[serde(default)]
+        seq: u32,
+        #[serde(default)]
+        frame: u32,
+        #[serde(default)]
+        checksum: u32,
+    },
     Chat { id: u64, name: String, text: String },
     Left { id: u64 },
     Error { message: String },
@@ -109,7 +127,13 @@ pub enum Event {
     Request { id: u64, name: String, kind: String, info: String },
     Response { id: u64, name: String, accept: bool },
     BattleTeam { id: u64, name: String, data: String },
-    BattleInput { id: u64, mask: u32 },
+    BattleInput {
+        id: u64,
+        mask: u32,
+        seq: u32,
+        frame: u32,
+        checksum: u32,
+    },
     Chat { id: u64, name: String, text: String },
     Left { id: u64 },
     Error(String),
@@ -191,9 +215,9 @@ impl OnlineClient {
         .map_err(|e| format!("enviando solicitud: {e}"))
     }
 
-    pub fn send_battle_input(&self, target: u64, mask: u32) -> Result<(), String> {
+    pub fn send_battle_input(&self, target: u64, mask: u32, seq: u32, frame: u32, checksum: u32) -> Result<(), String> {
         let mut stream = self.writer.lock().map_err(|_| "socket lock poisoned".to_string())?;
-        write_line(&mut stream, &ClientMessage::BattleInput { target, mask })
+        write_line(&mut stream, &ClientMessage::BattleInput { target, mask, seq, frame, checksum })
             .map_err(|e| format!("enviando input de combate: {e}"))
     }
 
@@ -263,7 +287,9 @@ fn read_loop(stream: TcpStream, tx: Sender<Event>) {
             ServerMessage::Request { id, name, kind, info } => Event::Request { id, name, kind, info },
             ServerMessage::Response { id, name, accept } => Event::Response { id, name, accept },
             ServerMessage::BattleTeam { id, name, data } => Event::BattleTeam { id, name, data },
-            ServerMessage::BattleInput { id, mask } => Event::BattleInput { id, mask },
+            ServerMessage::BattleInput { id, mask, seq, frame, checksum } => {
+                Event::BattleInput { id, mask, seq, frame, checksum }
+            },
             ServerMessage::Chat { id, name, text } => Event::Chat { id, name, text },
             ServerMessage::Left { id } => Event::Left { id },
             ServerMessage::Error { message } => Event::Error(message),
@@ -419,12 +445,14 @@ impl Relay {
                 let msg = ServerMessage::BattleTeam { id, name, data: data.chars().take(65536).collect() };
                 let _ = Self::send(target_peer, &msg);
             },
-            ClientMessage::BattleInput { target, mask } => {
+            ClientMessage::BattleInput { target, mask, seq, frame, checksum } => {
                 let Some((peer_room, _)) = self.peers.get(&id).map(|p| (p.room.clone(), ())) else { return };
-                eprintln!("[relay] battle_input id={id} target={target} mask={mask} room={peer_room}");
+                eprintln!(
+                    "[relay] battle_input id={id} target={target} mask={mask} seq={seq} frame={frame} checksum={checksum} room={peer_room}"
+                );
                 let Some(target_peer) = self.peers.get(&target) else { return };
                 if target_peer.room != peer_room { return }
-                let msg = ServerMessage::BattleInput { id, mask };
+                let msg = ServerMessage::BattleInput { id, mask, seq, frame, checksum };
                 let _ = Self::send(target_peer, &msg);
             },
             ClientMessage::Chat { text } => {

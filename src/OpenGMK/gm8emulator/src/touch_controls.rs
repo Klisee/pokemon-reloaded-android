@@ -1312,6 +1312,23 @@ pub fn party_version() -> u64 {
 
 static WHEEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static WHEEL_SEL: AtomicI32 = AtomicI32::new(-1);
+static BATTLE_ROLE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_battle_role(local_p1: bool) {
+    BATTLE_ROLE.store(if local_p1 { 1 } else { 2 }, Ordering::Relaxed);
+}
+
+pub fn clear_battle_role() {
+    BATTLE_ROLE.store(0, Ordering::Relaxed);
+}
+
+pub fn battle_switch_key() -> Option<Key> {
+    match BATTLE_ROLE.load(Ordering::Relaxed) {
+        1 => Some(Key::S),
+        2 => Some(Key::Y),
+        _ => None,
+    }
+}
 
 pub fn wheel_open() -> bool {
     WHEEL.load(Ordering::Relaxed) && index_of(PARTY_NAME).is_some_and(is_active)

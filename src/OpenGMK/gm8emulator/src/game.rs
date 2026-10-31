@@ -198,8 +198,14 @@ pub struct Game {
     pub battle_sync_active: bool,
     pub battle_opponent: Option<u64>,
     pub battle_remote_mask: u32,
+    pub battle_remote_frame: u32,
+    pub battle_remote_checksum: u32,
+    pub battle_input_seq: u32,
+    pub battle_frame: u32,
+    pub battle_local_p1: bool,
+    pub battle_local_checksum: u32,
+    pub battle_desync: bool,
     pub battle_room: Option<i32>,
-    pub last_battle_input: Instant,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
@@ -1433,8 +1439,14 @@ impl Game {
             battle_sync_active: false,
             battle_opponent: None,
             battle_remote_mask: 0,
+            battle_remote_frame: 0,
+            battle_remote_checksum: 0,
+            battle_input_seq: 0,
+            battle_frame: 0,
+            battle_local_p1: true,
+            battle_local_checksum: 0,
+            battle_desync: false,
             battle_room: None,
-            last_battle_input: Instant::now(),
             last_instance_id,
             last_tile_id,
             uninit_fields_are_zero: settings.zero_uninitialized_vars,
@@ -2211,7 +2223,6 @@ impl Game {
     }
 
     /// The custom trainer id of the player instance (`(3).char2`), or -1 for the base roster.
-    #[cfg(target_os = "android")]
     fn player_char2(&self) -> i32 {
         let Some(field_id) = self.compiler.find_field_id(b"char2") else {
             return -1
@@ -2241,7 +2252,6 @@ impl Game {
     }
 
     /// Some number in a GML global, if the game has declared it.
-    #[cfg(target_os = "android")]
     fn global_number(&self, name: &[u8], index: u32) -> Option<i32> {
         let field_id = self.compiler.find_field_id(name)?;
         match self.globals.fields.get(&field_id)?.get(index)? {
@@ -2353,8 +2363,6 @@ impl Game {
             }
         }
 
-        self.battle_input_tick();
-
         let mods_was_open = self.mods_menu_open;
         self.mods_menu_input();
         if mods_was_open || self.mods_menu_open {
@@ -2366,6 +2374,8 @@ impl Game {
             self.input.step();
             return Ok(())
         }
+
+        self.battle_sync_tick();
 
         if self.input.keyboard_check_pressed(input::Button::F3 as u8) {
             eprintln!("[battle-test] F3");
@@ -2622,6 +2632,10 @@ impl Game {
         }
 
         self.reloaded_online.tick(&self.room, &self.assets);
+
+        if self.battle_sync_active {
+            self.battle_frame = self.battle_frame.wrapping_add(1);
+        }
 
         // Clear inputs for this frame
         self.input.step();
@@ -3059,6 +3073,9 @@ impl Game {
 
     fn battle_team_snapshot(&self) -> Option<String> {
         let mut team = Vec::new();
+        let prota = self.global_number(b"prota_index", 0).unwrap_or(-1);
+        let sprite = self.local_player_sprite().unwrap_or(1860);
+        let char2 = self.player_char2();
         for index in 0..6u32 {
             let moves = (1..=4)
                 .map(|move_index| self.global_json("attack1", index * 32000 + move_index))
@@ -3078,40 +3095,124 @@ impl Game {
                 "info": info,
             }));
         }
-        serde_json::to_string(&serde_json::json!({ "team": team })).ok()
+        serde_json::to_string(&serde_json::json!({
+            "prota": prota,
+            "sprite": sprite,
+            "char2": char2,
+            "team": team,
+        }))
+        .ok()
     }
 
-    fn apply_remote_battle_team(&mut self, data: &str) -> bool {
-        let Ok(root) = serde_json::from_str::<serde_json::Value>(data) else { return false };
-        let Some(team) = root.get("team").and_then(|value| value.as_array()) else { return false };
+    fn battle_appearance(data: &str) -> Option<(i32, i32, i32)> {
+        let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
+        Some((
+            root.get("prota").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
+            root.get("sprite").and_then(|value| value.as_i64()).unwrap_or(1860) as i32,
+            root.get("char2").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
+        ))
+    }
+
+    fn apply_battle_team(&mut self, data: &str, side: u8) -> Option<(i32, i32, i32)> {
+        let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
+        let team = root.get("team")?.as_array()?;
+        let fields = if side == 1 {
+            ("pkmn1", "indexnivel", "pkmnsex1", "exp1", "IV", "objpoke1", "selue_pk1", "attack1", "info")
+        } else {
+            ("pkmn2", "nivel2", "pkmnsex2", "exp2", "IV2", "objpoke2", "selue_pk2", "attack2", "info2")
+        };
         for (index, pokemon) in team.iter().take(6).enumerate() {
             let index = index as u32;
             let number = |key: &str| pokemon.get(key).and_then(|value| value.as_f64()).unwrap_or(0.0);
-            self.set_global_num("pkmn2", index, number("species"));
-            self.set_global_num("nivel2", index, number("level"));
-            self.set_global_num("pkmnsex2", index, number("sex"));
-            self.set_global_num("exp2", index, number("exp"));
-            self.set_global_num("IV2", index, number("iv"));
-            self.set_global_num("objpoke2", index, number("item"));
-            self.set_global_num("selue_pk2", index, number("selue"));
+            self.set_global_num(fields.0, index, number("species"));
+            self.set_global_num(fields.1, index, number("level"));
+            self.set_global_num(fields.2, index, number("sex"));
+            self.set_global_num(fields.3, index, number("exp"));
+            self.set_global_num(fields.4, index, number("iv"));
+            self.set_global_num(fields.5, index, number("item"));
+            self.set_global_num(fields.6, index, number("selue"));
             if let Some(moves) = pokemon.get("moves").and_then(|value| value.as_array()) {
                 for (move_index, value) in moves.iter().take(4).enumerate() {
-                    self.set_global_json("attack2", index * 32000 + move_index as u32 + 1, value);
+                    self.set_global_json(fields.7, index * 32000 + move_index as u32 + 1, value);
                 }
             }
             if let Some(info) = pokemon.get("info").and_then(|value| value.as_array()) {
                 for (field, value) in info.iter().take(17).enumerate() {
-                    self.set_global_json("info2", index * 32000 + field as u32, value);
+                    self.set_global_json(fields.8, index * 32000 + field as u32, value);
                 }
             }
         }
-        true
+        Some((
+            root.get("prota").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
+            root.get("sprite").and_then(|value| value.as_i64()).unwrap_or(1860) as i32,
+            root.get("char2").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
+        ))
+    }
+
+    fn set_control_char2(&mut self, value: i32) {
+        if let Some(handle) = self
+            .room
+            .instance_list
+            .iter_by_object(3)
+            .next(&self.room.instance_list)
+        {
+            self.set_instance_number(handle, b"char2", value as f64);
+        }
+    }
+
+    fn restore_local_battle_team(&mut self) {
+        crate::touch_controls::clear_battle_role();
+        if self.battle_local_p1 {
+            return
+        }
+        for index in 0..6u32 {
+            let species = self.global_num("pkmn2", index);
+            let level = self.global_num("nivel2", index);
+            let sex = self.global_num("pkmnsex2", index);
+            let exp = self.global_num("exp2", index);
+            let iv = self.global_num("IV2", index);
+            let item = self.global_num("objpoke2", index);
+            let selue = self.global_num("selue_pk2", index);
+            self.set_global_num("pkmn1", index, species);
+            self.set_global_num("indexnivel", index, level);
+            self.set_global_num("pkmnsex1", index, sex);
+            self.set_global_num("exp1", index, exp);
+            self.set_global_num("IV", index, iv);
+            self.set_global_num("objpoke1", index, item);
+            self.set_global_num("selue_pk1", index, selue);
+            for move_index in 1..=4u32 {
+                let value = self.global_json("attack2", index * 32000 + move_index);
+                self.set_global_json("attack1", index * 32000 + move_index, &value);
+            }
+            for field in 0..17u32 {
+                let value = self.global_json("info2", index * 32000 + field);
+                self.set_global_json("info", index * 32000 + field, &value);
+            }
+        }
+        let _ = self.variable_global_set(&[
+            gml::Value::Str(gml::String::from("PLAYER2")),
+            gml::Value::Real(Real::from(0.0)),
+        ]);
+        self.battle_local_p1 = true;
     }
 
     fn start_battle_with_remote_team(&mut self, remote_data: &str, target: u64) -> gml::Result<()> {
-        if !self.apply_remote_battle_team(remote_data) {
-            return Ok(())
+        if !self.battle_local_p1 {
+            self.restore_local_battle_team();
         }
+        let local_id = self.reloaded_online.local_id().unwrap_or(0);
+        let host = local_id < target;
+        eprintln!("[battle] rol {} local_id={} target={}", if host { "P1" } else { "P2" }, local_id, target);
+        let Some(local_data) = self.battle_team_snapshot() else { return Ok(()) };
+        let Some(local_appearance) = Self::battle_appearance(&local_data) else { return Ok(()) };
+        let (p1_appearance, p2_appearance) = if host {
+            let Some(remote_appearance) = self.apply_battle_team(remote_data, 2) else { return Ok(()) };
+            (local_appearance, remote_appearance)
+        } else {
+            let Some(remote_appearance) = self.apply_battle_team(remote_data, 1) else { return Ok(()) };
+            let Some(local_appearance) = self.apply_battle_team(&local_data, 2) else { return Ok(()) };
+            (remote_appearance, local_appearance)
+        };
         let Some(object_index) = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
@@ -3128,24 +3229,30 @@ impl Game {
         let Some(handle) = self.room.instance_list.get_by_instid(instance_id) else {
             return Ok(())
         };
-        let local_id = self.reloaded_online.local_id().unwrap_or(1);
         let seed = (local_id.min(target) * 1_000_003 + local_id.max(target)) as i32;
         self.rand.set_seed(seed.max(1));
-        let local_sprite = self.local_player_sprite().unwrap_or(1860);
-        let local_index = self.global_num("prota_index", 0);
-        self.set_instance_number(handle, b"p2_sprR", local_sprite as f64);
-        self.set_instance_number(handle, b"sprINDEX2", local_sprite as f64);
-        self.set_instance_number(handle, b"index2", local_index);
-        self.set_instance_number(handle, b"sp_char2", 0.0);
+        let original_prota = self.global_num("prota_index", 0);
+        let original_char2 = self.player_char2();
+        self.set_instance_number(handle, b"p2_sprR", p2_appearance.1 as f64);
+        self.set_instance_number(handle, b"sprINDEX2", p2_appearance.1 as f64);
+        self.set_instance_number(handle, b"index2", p2_appearance.0 as f64);
+        self.set_instance_number(handle, b"sp_char2", p2_appearance.2 as f64);
         self.set_instance_number(handle, b"BTTBACK_INDEX", f64::from((seed.unsigned_abs() % 253) + 1));
         let _ = self.variable_global_set(&[
             gml::Value::Str(gml::String::from("ENTR_SPR")),
-            gml::Value::Real(Real::from(local_sprite as f64)),
+            gml::Value::Real(Real::from(p1_appearance.1 as f64)),
         ]);
         let _ = self.variable_global_set(&[
             gml::Value::Str(gml::String::from("TRAINER_SPR")),
-            gml::Value::Real(Real::from(local_sprite as f64)),
+            gml::Value::Real(Real::from(p2_appearance.1 as f64)),
         ]);
+        if !host {
+            let _ = self.variable_global_set(&[
+                gml::Value::Str(gml::String::from("prota_index")),
+                gml::Value::Real(Real::from(p1_appearance.0 as f64)),
+            ]);
+            self.set_control_char2(p1_appearance.2);
+        }
         let mut count1: f64 = 0.0;
         let mut count2: f64 = 0.0;
         for index in 0..6u32 {
@@ -3167,46 +3274,108 @@ impl Game {
         self.run_instance_script(handle, b"MultiplayerImportPlayerOne")?;
         self.run_instance_script(handle, b"MultiplayerImportPlayerTwo")?;
         self.run_instance_script(handle, b"MultiplayerGoBattle")?;
+        if !host {
+            let _ = self.variable_global_set(&[
+                gml::Value::Str(gml::String::from("prota_index")),
+                gml::Value::Real(Real::from(original_prota)),
+            ]);
+            self.set_control_char2(original_char2);
+        }
+        self.battle_local_p1 = host;
+        crate::touch_controls::set_battle_role(host);
         self.battle_sync_active = true;
         self.battle_opponent = Some(target);
         self.battle_remote_mask = 0;
+        self.battle_remote_frame = 0;
+        self.battle_remote_checksum = 0;
+        self.battle_input_seq = 0;
+        self.battle_frame = 0;
+        self.battle_local_checksum = 0;
+        self.battle_desync = false;
         self.battle_room = None;
-        self.last_battle_input = Instant::now();
         Ok(())
     }
 
-    fn battle_input_tick(&mut self) {
+    fn battle_checksum(&self) -> u32 {
+        let mut hash = 2_166_136_261u32;
+        let mut add = |value: i32| {
+            hash ^= value as u32;
+            hash = hash.wrapping_mul(16_777_619);
+        };
+        add(self.room.id);
+        add(self.global_number(b"battle", 0).unwrap_or(-1));
+        add(self.global_number(b"battleTurnos", 0).unwrap_or(-1));
+        let actual1 = self.global_number(b"actual1", 0).unwrap_or(-1);
+        let actual2 = self.global_number(b"actual2", 0).unwrap_or(-1);
+        add(actual1 ^ actual2);
+        let pairs: [(&[u8], &[u8]); 6] = [
+            (b"pkmn1".as_slice(), b"pkmn2".as_slice()),
+            (b"nivel1".as_slice(), b"nivel2".as_slice()),
+            (b"PS_1".as_slice(), b"PS_2".as_slice()),
+            (b"MAX_PS_1".as_slice(), b"MAX_PS_2".as_slice()),
+            (b"PP_1".as_slice(), b"PP_2".as_slice()),
+            (b"STD1".as_slice(), b"STD2".as_slice()),
+        ];
+        for (left, right) in pairs {
+            for index in 0..6 {
+                let left = self.global_number(left, index).unwrap_or(0);
+                let right = self.global_number(right, index).unwrap_or(0);
+                add(left ^ right);
+            }
+        }
+        hash
+    }
+
+    fn remap_battle_local_key(&self, vk: u8) -> u8 {
+        if !self.battle_sync_active || self.battle_local_p1 {
+            return vk
+        }
+        match vk {
+            x if x == input::Button::UpArrow as u8 => input::Button::U as u8,
+            x if x == input::Button::DownArrow as u8 => input::Button::J as u8,
+            x if x == input::Button::LeftArrow as u8 => input::Button::H as u8,
+            x if x == input::Button::RightArrow as u8 => input::Button::K as u8,
+            x if x == input::Button::Z as u8 => input::Button::Q as u8,
+            x if x == input::Button::X as u8 => input::Button::W as u8,
+            x if x == input::Button::C as u8 => input::Button::E as u8,
+            x if x == input::Button::V as u8 => input::Button::R as u8,
+            x if x == input::Button::S as u8 => input::Button::Y as u8,
+            x if x == input::Button::A as u8 => input::Button::I as u8,
+            x if x == input::Button::M as u8 => input::Button::O as u8,
+            _ => vk,
+        }
+    }
+
+    fn battle_sync_tick(&mut self) -> bool {
         if !self.battle_sync_active {
-            return
+            return true
         }
         if self.battle_room.is_none() {
             self.battle_room = Some(self.room.id);
         } else if self.battle_room != Some(self.room.id) {
+            self.restore_local_battle_team();
             self.battle_sync_active = false;
             self.battle_opponent = None;
             self.battle_remote_mask = 0;
-            return
+            return true
         }
-        while let Some((id, mask)) = self.reloaded_online.take_battle_input() {
-            if Some(id) == self.battle_opponent {
-                self.battle_remote_mask = mask;
+        while let Some(input) = self.reloaded_online.take_battle_input() {
+            if Some(input.id) != self.battle_opponent {
+                continue;
             }
-        }
-        let p2_keys = [
-            (input::Button::U as u8, 1u32 << 0),
-            (input::Button::J as u8, 1u32 << 1),
-            (input::Button::H as u8, 1u32 << 2),
-            (input::Button::K as u8, 1u32 << 3),
-            (input::Button::Q as u8, 1u32 << 4),
-            (input::Button::W as u8, 1u32 << 5),
-            (input::Button::E as u8, 1u32 << 6),
-            (input::Button::R as u8, 1u32 << 7),
-            (input::Button::Y as u8, 1u32 << 8),
-            (input::Button::I as u8, 1u32 << 9),
-            (input::Button::O as u8, 1u32 << 10),
-        ];
-        for (key, bit) in p2_keys {
-            self.input.set_key_state(key, self.battle_remote_mask & bit != 0);
+            self.battle_remote_frame = input.frame;
+            self.battle_remote_checksum = input.checksum;
+            self.battle_remote_mask = input.mask;
+            if input.frame == self.battle_frame
+                && input.checksum != self.battle_local_checksum
+                && !self.battle_desync
+            {
+                self.battle_desync = true;
+                eprintln!(
+                    "[battle] desincronizacion frame={} local={:#010x} remoto={:#010x}",
+                    input.frame, self.battle_local_checksum, input.checksum
+                );
+            }
         }
         let p1_keys = [
             (input::Button::UpArrow as u8, 1u32 << 0),
@@ -3221,18 +3390,45 @@ impl Game {
             (input::Button::A as u8, 1u32 << 9),
             (input::Button::M as u8, 1u32 << 10),
         ];
+        let p2_keys = [
+            (input::Button::U as u8, 1u32 << 0),
+            (input::Button::J as u8, 1u32 << 1),
+            (input::Button::H as u8, 1u32 << 2),
+            (input::Button::K as u8, 1u32 << 3),
+            (input::Button::Q as u8, 1u32 << 4),
+            (input::Button::W as u8, 1u32 << 5),
+            (input::Button::E as u8, 1u32 << 6),
+            (input::Button::R as u8, 1u32 << 7),
+            (input::Button::Y as u8, 1u32 << 8),
+            (input::Button::I as u8, 1u32 << 9),
+            (input::Button::O as u8, 1u32 << 10),
+        ];
+        let (local_keys, remote_keys) = if self.battle_local_p1 {
+            (&p1_keys, &p2_keys)
+        } else {
+            (&p2_keys, &p1_keys)
+        };
+        for (key, bit) in remote_keys {
+            self.input.set_key_state(*key, self.battle_remote_mask & bit != 0);
+        }
         let mut mask = 0u32;
-        for (key, bit) in p1_keys {
-            if self.input.keyboard_check(key) {
-                mask |= bit;
+        for (key, bit) in local_keys {
+            if self.input.keyboard_check(*key) {
+                mask |= *bit;
             }
         }
-        if self.last_battle_input.elapsed() >= Duration::from_millis(50) {
-            self.last_battle_input = Instant::now();
-            if let Some(target) = self.battle_opponent {
-                self.reloaded_online.send_battle_input(target, mask);
-            }
+        self.battle_input_seq = self.battle_input_seq.wrapping_add(1);
+        self.battle_local_checksum = self.battle_checksum();
+        if let Some(target) = self.battle_opponent {
+            self.reloaded_online.send_battle_input(
+                target,
+                mask,
+                self.battle_input_seq,
+                self.battle_frame,
+                self.battle_local_checksum,
+            );
         }
+        true
     }
 
     fn local_player_position(&self) -> Option<(f64, f64)> {
@@ -3462,7 +3658,7 @@ impl Game {
                 for event in self.window.events().into_iter().copied() {
                     match event {
                         Event::KeyboardDown(key) => {
-                            let vk = input::ramen2vk(key);
+                            let vk = self.remap_battle_local_key(input::ramen2vk(key));
                             self.input.button_press(vk, true);
                             // Game Maker's `keyboard_string` drops its last character on backspace.
                             // The game's text dialog relies on that instead of handling the key
@@ -3477,7 +3673,7 @@ impl Game {
                             }
                         },
                         Event::KeyboardUp(key) => {
-                            let vk = input::ramen2vk(key);
+                            let vk = self.remap_battle_local_key(input::ramen2vk(key));
                             if was_held(vk) {
                                 self.input.button_release(vk, true);
                             } else {

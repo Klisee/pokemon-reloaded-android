@@ -86,6 +86,15 @@ pub struct IncomingResponse {
     pub accept: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct IncomingBattleInput {
+    pub id: u64,
+    pub mask: u32,
+    pub seq: u32,
+    pub frame: u32,
+    pub checksum: u32,
+}
+
 pub struct ReloadedOnline {
     connection: Option<Connection>,
     remotes: HashMap<u64, Remote>,
@@ -100,7 +109,7 @@ pub struct ReloadedOnline {
     requests: Vec<IncomingRequest>,
     responses: Vec<IncomingResponse>,
     battle_teams: Vec<(u64, String)>,
-    battle_inputs: Vec<(u64, u32)>,
+    battle_inputs: Vec<IncomingBattleInput>,
     status: String,
 }
 
@@ -235,9 +244,9 @@ impl ReloadedOnline {
         }
     }
 
-    pub fn send_battle_input(&mut self, target: u64, mask: u32) -> bool {
+    pub fn send_battle_input(&mut self, target: u64, mask: u32, seq: u32, frame: u32, checksum: u32) -> bool {
         let Some(Connection::Ready(client)) = &self.connection else { return false };
-        match client.send_battle_input(target, mask) {
+        match client.send_battle_input(target, mask, seq, frame, checksum) {
             Ok(()) => true,
             Err(error) => {
                 self.status = error;
@@ -246,7 +255,7 @@ impl ReloadedOnline {
         }
     }
 
-    pub fn take_battle_input(&mut self) -> Option<(u64, u32)> {
+    pub fn take_battle_input(&mut self) -> Option<IncomingBattleInput> {
         if self.battle_inputs.is_empty() {
             None
         } else {
@@ -605,8 +614,8 @@ impl ReloadedOnline {
                 Event::BattleTeam { id, data, .. } => {
                     self.battle_teams.push((id, data));
                 },
-                Event::BattleInput { id, mask } => {
-                    self.battle_inputs.push((id, mask));
+                Event::BattleInput { id, mask, seq, frame, checksum } => {
+                    self.battle_inputs.push(IncomingBattleInput { id, mask, seq, frame, checksum });
                 },
                 Event::Chat { name, text, .. } => {
                     eprintln!("[reloaded-online] {name}: {text}");
