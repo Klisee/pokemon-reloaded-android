@@ -36,6 +36,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Reject derived GML
+        shell: bash
+        run: |
+          if grep -R -n -E 'global\.mods_available|file_exists\("mods/|text_op5|draw_text_color\(160|var y0,h,step|mouse_x>=80 && mouse_x<=240' --include='*.rs' src/OpenGMK/gm8emulator/src; then
+            echo "::error::Derived GML found"
+            exit 1
+          fi
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
