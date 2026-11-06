@@ -1119,7 +1119,7 @@ pub extern "system" fn Java_com_klisee_reloaded_GameActivity_nativeAudioFocus<'l
 static IME_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Raises or drops the system keyboard, but only when that is a change.
-fn ime_set(visible: bool) {
+pub(crate) fn ime_set(visible: bool) {
     if IME_SHOWN.swap(visible, std::sync::atomic::Ordering::Relaxed) != visible {
         jni_set_ime(visible);
     }
@@ -1786,7 +1786,15 @@ fn find_exe(dir: &Path) -> Option<PathBuf> {
         })
         .collect::<Vec<_>>();
     found.sort();
-    found.into_iter().next()
+    // Prefer the original game executable over online/mod launchers.
+    found.iter()
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.to_ascii_lowercase().contains("online"))
+        })
+        .cloned()
+        .or_else(|| found.into_iter().next())
 }
 
 fn logf(msg: &str) {

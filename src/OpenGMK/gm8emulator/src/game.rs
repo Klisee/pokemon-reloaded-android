@@ -8,12 +8,16 @@ pub mod includedfile;
 pub mod info_window;
 pub mod model;
 pub mod movement;
+mod online_snapshot;
+mod team_file;
+mod trade;
 pub mod particle;
 pub mod pathfinding;
 pub mod platform;
 pub mod recording;
 pub mod replay;
 pub mod savestate;
+pub(crate) mod save_guard;
 pub mod surface;
 pub mod transition;
 pub mod view;
@@ -66,10 +70,12 @@ use std::{
     fs::File,
     io::Write,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::Child,
     rc::Rc,
     time::{Duration, Instant},
 };
+#[cfg(not(target_os = "android"))]
+use std::process::{Command, Stdio};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum GameClock {
@@ -185,6 +191,8 @@ pub struct Game {
     pub online_menu_ignore_trigger: bool,
     pub online_menu_just_opened: bool,
     pub online_menu_selection: usize,
+    pub online_list_open: bool,
+    pub online_chat_open: bool,
     pub interaction_menu_open: bool,
     pub interaction_menu_selection: usize,
     pub interaction_menu_just_opened: bool,
@@ -193,8 +201,10 @@ pub struct Game {
     pub interaction_request: Option<(u64, String, String, String)>,
     pub interaction_response: Option<(String, bool)>,
     pub interaction_pending_kind: Option<String>,
+    pub trade: Option<trade::TradeSession>,
     pub battle_pending: bool,
     pub battle_target: Option<u64>,
+    pub battle_offer: Option<crate::reloaded_online::BattleTeamMeta>,
     pub battle_sync_active: bool,
     pub battle_opponent: Option<u64>,
     pub battle_remote_mask: u32,
@@ -206,6 +216,7 @@ pub struct Game {
     pub battle_local_checksum: u32,
     pub battle_desync: bool,
     pub battle_room: Option<i32>,
+    pub battle_snapshot: Option<online_snapshot::OnlineSnapshot>,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
     pub swap_creation_events: bool,
@@ -276,6 +287,7 @@ pub struct Game {
 
     pub audio: audio::AudioManager,
     pub reloaded_online: crate::reloaded_online::ReloadedOnline,
+    pub roz_online: external::roz_net::RozRuntime,
 
     // winit windowing
     pub window: Window,
@@ -700,6 +712,9 @@ impl Game {
         }
 
         let window = builder.build()?;
+        #[cfg(target_os = "android")]
+        let ffmpeg_recorder: Option<Child> = None;
+        #[cfg(not(target_os = "android"))]
         let ffmpeg_recorder = capture_recording.then(|| {
             Command::new("ffmpeg")
                 .arg("-y")
@@ -1356,6 +1371,7 @@ impl Game {
         renderer.push_atlases(atlases)?;
 
         let reloaded_online = crate::reloaded_online::ReloadedOnline::new(program_directory);
+        let roz_online = external::roz_net::RozRuntime::new(program_directory);
         let mut game = Self {
             compiler,
             text_files: HandleArray::new(),
@@ -1426,6 +1442,8 @@ impl Game {
             online_menu_ignore_trigger: false,
             online_menu_just_opened: false,
             online_menu_selection: 1,
+            online_list_open: false,
+            online_chat_open: false,
             interaction_menu_open: false,
             interaction_menu_selection: 0,
             interaction_menu_just_opened: false,
@@ -1434,8 +1452,10 @@ impl Game {
             interaction_request: None,
             interaction_response: None,
             interaction_pending_kind: None,
+            trade: None,
             battle_pending: false,
             battle_target: None,
+            battle_offer: None,
             battle_sync_active: false,
             battle_opponent: None,
             battle_remote_mask: 0,
@@ -1447,6 +1467,7 @@ impl Game {
             battle_local_checksum: 0,
             battle_desync: false,
             battle_room: None,
+            battle_snapshot: None,
             last_instance_id,
             last_tile_id,
             uninit_fields_are_zero: settings.zero_uninitialized_vars,
@@ -1499,6 +1520,7 @@ impl Game {
             info_surface: None,
             audio,
             reloaded_online,
+            roz_online,
             window,
             window_border,
             window_icons,
@@ -1990,6 +2012,7 @@ impl Game {
 
     pub fn load_gm_save(&mut self, path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Read;
+        self.finish_online_battle_guard("carga de partida");
         self.input.keyboard_clear_all();
         self.input.mouse_clear_all();
         let mut file = std::fs::File::open(path)
@@ -2224,8 +2247,13 @@ impl Game {
 
     /// The custom trainer id of the player instance (`(3).char2`), or -1 for the base roster.
     fn player_char2(&self) -> i32 {
+        self.player_char2_real() as i32
+    }
+
+    /// `char2` is a real: custom trainers use the fractional part as a variant.
+    fn player_char2_real(&self) -> f64 {
         let Some(field_id) = self.compiler.find_field_id(b"char2") else {
-            return -1
+            return -1.0
         };
         // `char2` is a field of the `Control` object (3); fall back to the player (14).
         for object in [3, 14] {
@@ -2235,10 +2263,10 @@ impl Game {
             let instance = self.room.instance_list.get(handle);
             let fields = instance.fields.borrow();
             if let Some(crate::gml::Value::Real(value)) = fields.get(&field_id).and_then(|field| field.get(0)) {
-                return value.into_inner() as i32
+                return value.into_inner()
             }
         }
-        -1
+        -1.0
     }
 
     /// A string in a GML global, if the game has declared it.
@@ -2416,6 +2444,69 @@ impl Game {
             return Ok(())
         }
 
+        if self.reloaded_online.is_active() {
+            if self.online_chat_open {
+                let (sx1, sy1, sx2, sy2) = self.online_chat_send_rect();
+                let (kx1, ky1, kx2, ky2) = self.online_chat_cancel_rect();
+                let clicked = if self.input.mouse_check_button_pressed(1) {
+                    Some((self.input.mouse_x(), self.input.mouse_y()))
+                } else { None };
+                let send_clicked = clicked.is_some_and(|(x, y)| x >= sx1 && x <= sx2 && y >= sy1 && y <= sy2);
+                let cancel_clicked = clicked.is_some_and(|(x, y)| x >= kx1 && x <= kx2 && y >= ky1 && y <= ky2);
+                if cancel_clicked || self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+                    self.close_online_chat();
+                } else if send_clicked || self.input.keyboard_check_pressed(input::Button::Return as u8) {
+                    let text = String::from_utf8_lossy(self.keyboard_string.as_ref()).trim().to_string();
+                    if !text.is_empty() {
+                        let _ = self.reloaded_online.send_chat(&text);
+                    }
+                    self.close_online_chat();
+                }
+                self.draw()?;
+                if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                    self.renderer.set_gb_inverted(self.gb_menu_palette());
+                    self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+                }
+                self.input.step();
+                return Ok(())
+            }
+            if self.online_list_open {
+                if self.input.keyboard_check_pressed(input::Button::G as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Escape as u8)
+                {
+                    self.online_list_open = false;
+                }
+                self.draw()?;
+                if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                    self.renderer.set_gb_inverted(self.gb_menu_palette());
+                    self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+                }
+                self.input.step();
+                return Ok(())
+            }
+            if self.input.keyboard_check_pressed(input::Button::G as u8) {
+                self.reloaded_online.request_world_list();
+                self.online_list_open = true;
+                self.draw()?;
+                if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                    self.renderer.set_gb_inverted(self.gb_menu_palette());
+                    self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+                }
+                self.input.step();
+                return Ok(())
+            }
+            if self.input.keyboard_check_pressed(input::Button::T as u8) {
+                self.open_online_chat();
+                self.draw()?;
+                if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
+                    self.renderer.set_gb_inverted(self.gb_menu_palette());
+                    self.renderer.present(self.window_inner_size.0, self.window_inner_size.1, self.scaling);
+                }
+                self.input.step();
+                return Ok(())
+            }
+        }
+
         self.interaction_trigger();
         if self.interaction_any_open() {
             self.interaction_input();
@@ -2591,7 +2682,6 @@ impl Game {
 
         // Resolve online player collisions before drawing so the corrected position is what
         // actually gets rendered (instead of moving forward for one frame and snapping back).
-        self.reloaded_online.fix_collisions(&self.room, &self.assets);
 
         // Draw everything, including running draw events
         if self.auto_draw {
@@ -2798,11 +2888,53 @@ impl Game {
         (w / 16, h / 10, w * 15 / 16, h * 9 / 10)
     }
 
+    fn online_chat_panel(&self) -> (i32, i32, i32, i32) {
+        let w = self.unscaled_width as i32;
+        let h = self.unscaled_height as i32;
+        (w / 6, h / 2, w * 5 / 6, h - 12)
+    }
+
     fn online_menu_row(&self, index: usize) -> (i32, i32, i32, i32) {
         let (x1, y1, x2, y2) = self.online_menu_panel();
         let row_h = ((y2 - y1) / 8).max(1);
         let top = y1 + row_h + index as i32 * row_h;
         (x1 + 8, top, x2 - 8, top + row_h)
+    }
+
+    fn online_chat_button_rect(&self) -> (i32, i32, i32, i32) {
+        let w = self.unscaled_width as i32;
+        (w - 176, 8, w - 92, 34)
+    }
+
+    fn online_list_button_rect(&self) -> (i32, i32, i32, i32) {
+        let w = self.unscaled_width as i32;
+        (w - 84, 8, w - 8, 34)
+    }
+
+    fn online_chat_send_rect(&self) -> (i32, i32, i32, i32) {
+        let (x1, _, x2, y2) = self.online_chat_panel();
+        let center = (x1 + x2) / 2;
+        (center - 82, y2 - 38, center + 82, y2 - 12)
+    }
+
+    fn online_chat_cancel_rect(&self) -> (i32, i32, i32, i32) {
+        let (x1, _, x2, y2) = self.online_chat_panel();
+        let center = (x1 + x2) / 2;
+        (center - 82, y2 - 72, center + 82, y2 - 46)
+    }
+
+    fn open_online_chat(&mut self) {
+        self.online_chat_open = true;
+        self.keyboard_string = "".into();
+        #[cfg(target_os = "android")]
+        crate::android_main::ime_set(true);
+    }
+
+    fn close_online_chat(&mut self) {
+        self.online_chat_open = false;
+        self.keyboard_string = "".into();
+        #[cfg(target_os = "android")]
+        crate::android_main::ime_set(false);
     }
 
     fn inicio_control_multijugador_selected(&self) -> bool {
@@ -2887,6 +3019,7 @@ impl Game {
         eprintln!("[online-menu] activate selection={selection} from_main={from_main} room={}", self.room.id);
         match selection {
             0 => {
+                self.finish_online_battle_guard("sesion detenida");
                 self.reloaded_online.stop();
                 if from_main {
                     // Let the game's normal Local flow continue, including its classic dialog.
@@ -2895,12 +3028,9 @@ impl Game {
                 }
             },
             1 => {
-                // Local server mode: connect to the configured reloaded-online-server and open
-                // the game's loader. Clear the selection input so LoaderControl does not see the
-                // same Enter/click and immediately back out to the main menu.
                 self.input.keyboard_clear_all();
                 self.input.mouse_release(1, false);
-                self.reloaded_online.start_own();
+                self.reloaded_online.start_zibelan();
                 self.scene_change = Some(SceneChange::Room(43));
             },
             _ => (),
@@ -3071,6 +3201,440 @@ impl Game {
         ]);
     }
 
+    fn global_value(&self, name: &[u8], index: u32) -> Option<gml::Value> {
+        let field_id = self.compiler.find_field_id(name)?;
+        self.globals.fields.get(&field_id)?.get(index)
+    }
+
+    fn global_real(&self, name: &[u8], index: u32) -> f64 {
+        match self.global_value(name, index) {
+            Some(gml::Value::Real(value)) => value.into_inner(),
+            Some(gml::Value::Str(value)) => std::str::from_utf8(value.as_ref())
+                .ok()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+                .unwrap_or(0.0),
+            None => 0.0,
+        }
+    }
+
+    fn global_text(&self, name: &[u8]) -> Option<Vec<u8>> {
+        match self.global_value(name, 0)? {
+            gml::Value::Str(value) => Some(value.as_ref().to_vec()),
+            gml::Value::Real(value) => Some(team_file::number_text(value.into_inner())),
+        }
+    }
+
+    fn set_global_real(&mut self, name: &[u8], index: u32, value: f64) {
+        let _ = self.variable_global_array_set(&[
+            gml::Value::Str(gml::String::from(name)),
+            gml::Value::Real(Real::from(f64::from(index))),
+            gml::Value::Real(Real::from(value)),
+        ]);
+    }
+
+    fn set_global_text(&mut self, name: &[u8], value: &[u8]) {
+        let _ = self.variable_global_set(&[
+            gml::Value::Str(gml::String::from(name)),
+            gml::Value::Str(gml::String::from(value)),
+        ]);
+    }
+
+    fn set_global_value(&mut self, name: &[u8], index: u32, value: gml::Value) {
+        let _ = self.variable_global_array_set(&[
+            gml::Value::Str(gml::String::from(name)),
+            gml::Value::Real(Real::from(f64::from(index))),
+            value,
+        ]);
+    }
+
+    fn instance_value(&self, object: i32, name: &[u8]) -> Option<gml::Value> {
+        let field_id = self.compiler.find_field_id(name)?;
+        let handle = self
+            .room
+            .instance_list
+            .iter_by_object(object as crate::types::ID)
+            .next(&self.room.instance_list)?;
+        self.room.instance_list.get(handle).fields.borrow().get(&field_id)?.get(0)
+    }
+
+    fn instance_text(&self, object: i32, name: &[u8]) -> Option<Vec<u8>> {
+        match self.instance_value(object, name)? {
+            gml::Value::Str(value) => Some(value.as_ref().to_vec()),
+            gml::Value::Real(value) => Some(team_file::number_text(value.into_inner())),
+        }
+    }
+
+    fn find_object_instance(&self, object: i32) -> Option<usize> {
+        self.room
+            .instance_list
+            .iter_by_object(object as crate::types::ID)
+            .next(&self.room.instance_list)
+    }
+
+    fn set_instance_value(&mut self, handle: usize, name: &[u8], value: gml::Value) {
+        let field = self.compiler.get_field_id(name);
+        let instance = self.room.instance_list.get(handle);
+        instance
+            .fields
+            .borrow_mut()
+            .entry(field)
+            .or_insert_with(|| Field::new(0, value.clone()))
+            .set(0, value);
+    }
+
+    fn set_instance_text(&mut self, handle: usize, name: &[u8], value: &[u8]) {
+        self.set_instance_value(handle, name, gml::Value::Str(gml::String::from(value)));
+    }
+
+    fn get_instance_real(&self, handle: usize, name: &[u8]) -> Option<f64> {
+        let field_id = self.compiler.find_field_id(name)?;
+        match self.room.instance_list.get(handle).fields.borrow().get(&field_id)?.get(0)? {
+            gml::Value::Real(value) => Some(value.into_inner()),
+            _ => None,
+        }
+    }
+
+    fn run_script_value(&mut self, handle: usize, name: &[u8], args: &[gml::Value]) -> gml::Result<gml::Value> {
+        let Some(script) = self.assets.scripts.iter().find_map(|script| {
+            script
+                .as_ref()
+                .filter(|script| script.name.as_ref() == name)
+                .map(|script| script.compiled.clone())
+        }) else {
+            return Ok(Default::default())
+        };
+        let mut context = Context::with_single_instance(handle);
+        let count = args.len().min(context.arguments.len());
+        context.arguments[..count].clone_from_slice(&args[..count]);
+        context.argument_count = count;
+        self.execute(&script, &mut context)?;
+        Ok(context.return_value.clone())
+    }
+
+    fn battle_team_export_with_header(&self) -> Option<BattleTeamExport> {
+        let prota_id = self
+            .global_text(b"prota_ID")
+            .and_then(|text| std::str::from_utf8(&text).ok().map(|text| text.trim().parse::<f64>().unwrap_or(0.0)))
+            .unwrap_or(0.0) as i32;
+        let prota_index = self.global_real(b"prota_index", 0) as i32;
+        let char2 = if prota_index == 10 { self.player_char2_real() } else { f64::from(prota_id) };
+        let name = team_text_bytes(&self
+            .global_text(b"apodoName")
+            .filter(|text| !text.is_empty())
+            .or_else(|| self.global_text(b"protaname"))
+            .unwrap_or_default());
+        let phrase = team_text_bytes(&self.instance_text(18, b"frasePropia").unwrap_or_default());
+
+        let mut mons: [team_file::TeamMon; 6] = std::array::from_fn(|_| team_file::TeamMon::empty());
+        for (index, mon) in mons.iter_mut().enumerate() {
+            let index = index as u32;
+            let mut info: [Vec<u8>; 16] = std::array::from_fn(|_| Vec::new());
+            for field in 0..16u32 {
+                let value = self
+                    .global_value(b"info", index * 32000 + field)
+                    .unwrap_or(gml::Value::Real(Real::from(0.0)));
+                let mut text = match &value {
+                    gml::Value::Str(text) => team_text_bytes(text.as_ref()),
+                    _ => team_value_text(&value),
+                };
+                if field == 10 || field == 11 {
+                    text = team_file::encode_number_text(&text);
+                }
+                info[field as usize] = text;
+            }
+
+            let mut moves = [0.0; 4];
+            for move_index in 1..=4u32 {
+                moves[(move_index - 1) as usize] = self.global_real(b"attack1", index * 32000 + move_index);
+            }
+
+            *mon = team_file::TeamMon {
+                species: self.global_real(b"pkmn1", index) as i32,
+                level: self.global_real(b"indexnivel", index) as i32,
+                sex: self.global_real(b"pkmnsex1", index) as i32,
+                exp: self.global_real(b"exp1", index),
+                iv: self.global_real(b"IV", index) as i32,
+                item: self.global_real(b"objpoke1", index) as i32,
+                selue: self.global_real(b"selue_pk1", index),
+                moves,
+                info,
+            };
+        }
+
+        let file = team_file::TeamFile {
+            name: name.clone(),
+            trainer_id: prota_id,
+            trainer_index: prota_index,
+            outfit: char2,
+            phrase: phrase.clone(),
+            mons,
+            version: team_file::CURRENT_VERSION,
+        };
+        let data = file.encode();
+        let sprite = if prota_index == 10 { char2 as i32 } else { prota_index + 1000 };
+        Some(BattleTeamExport {
+            data,
+            header: BattleTeamHeader {
+                name,
+                prota_id,
+                prota_index,
+                char2,
+                sprite,
+                frase: phrase,
+                version: team_file::CURRENT_VERSION,
+            },
+        })
+    }
+
+    fn battle_team_export(&self) -> Option<Vec<u8>> {
+        self.battle_team_export_with_header().map(|export| export.data)
+    }
+
+    fn battle_team_import(&mut self, data: &[u8], side: u8, handle: Option<usize>) -> Option<BattleTeamHeader> {
+        let team = match team_file::TeamFile::decode(data) {
+            Ok(team) => team,
+            Err(error) => {
+                eprintln!("[battle] equipo remoto rechazado: {error}");
+                return None
+            },
+        };
+
+        let version = team.version;
+        let name = team.name;
+        let prota_id = team.trainer_id;
+        let prota_index = team.trainer_index;
+        let mut char2 = -1.0;
+        if prota_index == 10 {
+            char2 = team.outfit;
+            if version < 20241217 && char2 > 210.0 {
+                char2 += 1.0;
+            }
+        }
+        let frase = team.phrase;
+
+        for index in 0..6u32 {
+            let mon = &team.mons[index as usize];
+            let info_values: Vec<gml::Value> = (0..16u32)
+                .map(|field| {
+                    let raw = &mon.info[field as usize];
+                    let string_field = match side {
+                        1 => matches!(field, 4 | 5 | 7 | 8 | 10 | 11),
+                        2 => matches!(field, 2 | 3 | 4 | 5 | 7 | 8 | 10 | 11),
+                        _ => true,
+                    };
+                    if string_field {
+                        let mut text = raw.clone();
+                        if field == 10 || field == 11 {
+                            text = team_file::decode_number_text(&text);
+                        }
+                        gml::Value::Str(gml::String::from(text))
+                    } else {
+                        gml::Value::Real(Real::from(team_file::line_number(raw)))
+                    }
+                })
+                .collect();
+            let info_six = match info_values.get(6) {
+                Some(gml::Value::Real(value)) => value.into_inner(),
+                _ => 0.0,
+            };
+
+            let fields = if side == 1 {
+                (
+                    b"pkmn1".as_slice(),
+                    b"nivel1".as_slice(),
+                    b"pkmnsex1".as_slice(),
+                    b"exp1".as_slice(),
+                    b"IV".as_slice(),
+                    b"objpoke1".as_slice(),
+                    b"selue_pk1".as_slice(),
+                    b"attack1".as_slice(),
+                    b"info".as_slice(),
+                )
+            } else {
+                (
+                    b"pkmn2".as_slice(),
+                    b"nivel2".as_slice(),
+                    b"pkmnsex2".as_slice(),
+                    b"exp2".as_slice(),
+                    b"IV2".as_slice(),
+                    b"objpoke2".as_slice(),
+                    b"selue_pk2".as_slice(),
+                    b"attack2".as_slice(),
+                    b"info2".as_slice(),
+                )
+            };
+            self.set_global_real(fields.0, index, f64::from(mon.species));
+            self.set_global_real(fields.1, index, f64::from(mon.level));
+            self.set_global_real(fields.2, index, f64::from(mon.sex));
+            self.set_global_real(fields.3, index, mon.exp);
+            self.set_global_real(fields.4, index, f64::from(mon.iv));
+            self.set_global_real(fields.5, index, f64::from(mon.item));
+            self.set_global_real(fields.6, index, mon.selue);
+            for (slot, move_index) in (1..=4u32).enumerate() {
+                self.set_global_real(fields.7, index * 32000 + move_index, mon.moves[slot]);
+            }
+            for (field, value) in info_values.into_iter().enumerate() {
+                self.set_global_value(fields.8, index * 32000 + field as u32, value);
+            }
+            if side == 1 {
+                self.set_global_real(b"indexpkmn", index, f64::from(mon.species));
+                self.set_global_real(b"indexnivel", index, f64::from(mon.level));
+            } else {
+                self.set_global_real(b"ISEP2", index, info_six);
+            }
+        }
+
+        if side == 1 {
+            self.set_global_text(b"protaname", &name);
+            self.set_global_text(b"apodoName", &name);
+            self.set_global_text(b"prota_ID", format!("{:05}", prota_id).as_bytes());
+            self.set_global_real(b"prota_index", 0, f64::from(prota_index));
+            if prota_index == 10 {
+                if let Some(handle) = self.find_object_instance(3) {
+                    self.set_instance_number(handle, b"char2", char2);
+                }
+            }
+            if let Some(handle) = self.find_object_instance(18) {
+                self.set_instance_text(handle, b"frasePropia", &frase);
+            }
+        } else if let Some(handle) = handle.or_else(|| self.find_object_instance(1172)) {
+            self.set_instance_text(handle, b"protaname2", &name);
+            self.set_instance_text(handle, b"id2", format!("{:05}", prota_id).as_bytes());
+            self.set_instance_number(handle, b"index2", f64::from(prota_index));
+            if prota_index == 10 {
+                self.set_instance_number(handle, b"sp_char2", char2);
+            }
+            self.set_instance_text(handle, b"frase2", &frase);
+        }
+
+        let sprite = if prota_index == 10 { char2 as i32 } else { prota_index + 1000 };
+        Some(BattleTeamHeader {
+            name,
+            prota_id,
+            prota_index,
+            char2,
+            sprite,
+            frase,
+            version,
+        })
+    }
+
+    fn team_spr_index(&mut self, handle: usize, header: &BattleTeamHeader) -> f64 {
+        if header.prota_index != 10 {
+            return f64::from(header.prota_index + 1000);
+        }
+        let has_mapping = self
+            .assets
+            .scripts
+            .iter()
+            .any(|script| script.as_ref().is_some_and(|script| script.name.as_ref() == b"ValorTrainerTrucado"));
+        if !has_mapping {
+            return header.char2;
+        }
+        self.run_script_value(
+            handle,
+            b"ValorTrainerTrucado",
+            &[gml::Value::Real(Real::from(header.char2))],
+        )
+        .ok()
+        .and_then(|value| match value {
+            gml::Value::Real(value) => Some(value.into_inner()),
+            _ => None,
+        })
+        .unwrap_or(header.char2)
+    }
+
+    fn sprite_from_index(&mut self, handle: usize, spr_index: f64, fallback: i32) -> i32 {
+        let has_trainer = self
+            .assets
+            .scripts
+            .iter()
+            .any(|script| script.as_ref().is_some_and(|script| script.name.as_ref() == b"SpriteTrainer"));
+        if !has_trainer {
+            return fallback;
+        }
+        self.set_instance_number(handle, b"sprINDEX", spr_index);
+        let _ = self.run_instance_script(handle, b"SpriteTrainer");
+        self.get_instance_real(handle, b"sprR")
+            .map(|value| value as i32)
+            .unwrap_or(fallback)
+    }
+
+    fn battle_is_host(&self, target: u64) -> bool {
+        let local_id = self.reloaded_online.local_id().unwrap_or(0);
+        match self.reloaded_online.battle_side() {
+            Some(1) => true,
+            Some(2) => false,
+            _ => local_id < target,
+        }
+    }
+
+    fn battle_team_meta(&self, target: u64) -> crate::reloaded_online::BattleTeamMeta {
+        let host = self.battle_is_host(target);
+        let seed = if host { self.reloaded_online.battle_seed(target) } else { 0 };
+        let fondo = if host {
+            let value = self.global_number(b"numfondobattle", 0).unwrap_or(0);
+            if value > 0 {
+                value
+            } else {
+                (seed.unsigned_abs() % 253) as i32 + 1
+            }
+        } else {
+            0
+        };
+        let modo = self.global_number(b"modeBattleBack", 0).unwrap_or(0);
+        let sala = if host { self.room.id } else { 0 };
+        let delay = self.global_number(b"NET_DELAY", 0).unwrap_or(2).clamp(2, 12);
+        crate::reloaded_online::BattleTeamMeta { seed, fondo, modo, sala, delay }
+    }
+
+    /// Before creating `MULTIPLAYER`, let the game's own `BattleBackground` choose the
+    /// background room and index that Zibelan sends as `sala`/`fondo`.
+    fn battle_team_meta_for_send(&self, target: u64) -> crate::reloaded_online::BattleTeamMeta {
+        let mut meta = self.battle_team_meta(target);
+        if !self.battle_is_host(target) {
+            return meta;
+        }
+        // `BattleBackground` is the authority, but running it from Rust has side effects
+        // (it may create instances). These are the rooms it returns for the common maps.
+        let modo = self.global_number(b"modeBattleBack", 0).unwrap_or(0);
+        let hierba = self.global_number(b"hierba", 0).unwrap_or(0);
+        meta.sala = if modo != 0 {
+            191
+        } else if hierba == 5 {
+            709
+        } else {
+            47
+        };
+        let fondo = self.global_number(b"numfondobattle", 0).unwrap_or(0);
+        if fondo > 0 {
+            meta.fondo = fondo;
+        }
+        meta
+    }
+
+    fn send_battle_team_to(&mut self, target: u64, name: &str) {
+        self.battle_offer = None;
+        if self.reloaded_online.is_zibelan() {
+            if let Some(data) = self.battle_team_export() {
+                let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+                eprintln!("[team] out bytes={} lines={}", data.len(), data.split(|byte| *byte == b'\n').count());
+                for (index, chunk) in hex.as_bytes().chunks(800).enumerate() {
+                    eprintln!("[team] out-hex {index} {}", std::str::from_utf8(chunk).unwrap_or(""));
+                }
+                let meta = self.battle_team_meta_for_send(target);
+                self.battle_offer = Some(meta);
+                self.battle_pending = self.reloaded_online.send_battle_team(target, &data, &meta);
+                self.battle_target = Some(target);
+                eprintln!("[battle] .TEAM enviado a {name}; esperando equipo remoto");
+            }
+        } else if let Some(data) = self.battle_team_snapshot() {
+            self.battle_pending = self.reloaded_online.send_battle_team_json(target, &data);
+            self.battle_target = Some(target);
+            eprintln!("[battle] equipo JSON enviado a {name}; esperando equipo remoto");
+        }
+    }
+
     fn battle_team_snapshot(&self) -> Option<String> {
         let mut team = Vec::new();
         let prota = self.global_number(b"prota_index", 0).unwrap_or(-1);
@@ -3113,6 +3677,15 @@ impl Game {
         ))
     }
 
+    fn header_from_json(appearance: (i32, i32, i32)) -> BattleTeamHeader {
+        BattleTeamHeader {
+            prota_index: appearance.0,
+            sprite: appearance.1,
+            char2: f64::from(appearance.2),
+            ..Default::default()
+        }
+    }
+
     fn apply_battle_team(&mut self, data: &str, side: u8) -> Option<(i32, i32, i32)> {
         let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
         let team = root.get("team")?.as_array()?;
@@ -3149,15 +3722,77 @@ impl Game {
         ))
     }
 
-    fn set_control_char2(&mut self, value: i32) {
+    fn set_control_char2(&mut self, value: f64) {
         if let Some(handle) = self
             .room
             .instance_list
             .iter_by_object(3)
             .next(&self.room.instance_list)
         {
-            self.set_instance_number(handle, b"char2", value as f64);
+            self.set_instance_number(handle, b"char2", value);
         }
+    }
+
+    fn begin_online_battle_guard(&mut self) {
+        if self.battle_snapshot.is_some() {
+            self.finish_online_battle_guard("guard anterior");
+        }
+
+        let slot = self.global_num("Slot", 0) as i32;
+        if slot > 0 {
+            let directory = std::path::PathBuf::from(self.program_directory.decode_utf8().into_owned());
+            match save_guard::backup_before_online(&directory, slot) {
+                Ok(Some(path)) => eprintln!("[online] copia pre-batalla: {}", path.display()),
+                Ok(None) => eprintln!("[online] no hay .savc para copiar en el slot {slot}"),
+                Err(error) => eprintln!("[online] no se pudo crear la copia pre-batalla: {error}"),
+            }
+        }
+
+        self.battle_snapshot = Some(online_snapshot::OnlineSnapshot::capture(self));
+        save_guard::set_online_save_guard(true);
+        self.reloaded_online.begin_battle();
+    }
+
+    fn finish_online_battle_guard(&mut self, reason: &str) {
+        save_guard::set_online_save_guard(false);
+        let Some(snapshot) = self.battle_snapshot.take() else {
+            self.clear_online_battle_state();
+            return
+        };
+
+        match snapshot.restore(self) {
+            Ok(()) => eprintln!("[online] batalla cerrada ({reason}); estado restaurado"),
+            Err(error) => eprintln!("[online] no se pudo restaurar el estado ({reason}): {error}"),
+        }
+
+        // The snapshot already contains the pre-battle room. Do not let a queued
+        // transition overwrite it with the battle/lobby room.
+        self.scene_change = None;
+        self.clear_online_battle_state();
+    }
+
+    fn clear_online_battle_state(&mut self) {
+        save_guard::set_online_save_guard(false);
+        let directory = std::path::PathBuf::from(self.program_directory.decode_utf8().into_owned());
+        if let Err(error) = save_guard::cleanup_online_saves(&directory) {
+            eprintln!("[online] no se pudieron limpiar los guardados online: {error}");
+        }
+        crate::touch_controls::clear_battle_role();
+        self.battle_pending = false;
+        self.battle_target = None;
+        self.battle_offer = None;
+        self.battle_sync_active = false;
+        self.battle_opponent = None;
+        self.battle_remote_mask = 0;
+        self.battle_remote_frame = 0;
+        self.battle_remote_checksum = 0;
+        self.battle_input_seq = 0;
+        self.battle_frame = 0;
+        self.battle_local_p1 = true;
+        self.battle_local_checksum = 0;
+        self.battle_desync = false;
+        self.battle_room = None;
+        self.reloaded_online.end_battle();
     }
 
     fn restore_local_battle_team(&mut self) {
@@ -3196,23 +3831,40 @@ impl Game {
         self.battle_local_p1 = true;
     }
 
-    fn start_battle_with_remote_team(&mut self, remote_data: &str, target: u64) -> gml::Result<()> {
+    fn start_battle_with_remote_team(
+        &mut self,
+        remote: &crate::reloaded_online::IncomingBattleTeam,
+        target: u64,
+    ) -> gml::Result<()> {
+        self.begin_online_battle_guard();
+        let result = self.start_battle_with_remote_team_inner(remote, target);
+        if result.is_err() || !self.battle_sync_active {
+            self.finish_online_battle_guard("inicio de batalla fallido");
+        }
+        result
+    }
+
+    fn start_battle_with_remote_team_inner(
+        &mut self,
+        remote: &crate::reloaded_online::IncomingBattleTeam,
+        target: u64,
+    ) -> gml::Result<()> {
         if !self.battle_local_p1 {
             self.restore_local_battle_team();
         }
         let local_id = self.reloaded_online.local_id().unwrap_or(0);
-        let host = local_id < target;
+        let host = self.battle_is_host(target);
         eprintln!("[battle] rol {} local_id={} target={}", if host { "P1" } else { "P2" }, local_id, target);
-        let Some(local_data) = self.battle_team_snapshot() else { return Ok(()) };
-        let Some(local_appearance) = Self::battle_appearance(&local_data) else { return Ok(()) };
-        let (p1_appearance, p2_appearance) = if host {
-            let Some(remote_appearance) = self.apply_battle_team(remote_data, 2) else { return Ok(()) };
-            (local_appearance, remote_appearance)
+        let zibelan = remote.zibelan;
+        let local_export = if zibelan { self.battle_team_export_with_header() } else { None };
+        let local_json = if zibelan { None } else { self.battle_team_snapshot() };
+        let local_header = if let Some(export) = &local_export {
+            Some(export.header.clone())
         } else {
-            let Some(remote_appearance) = self.apply_battle_team(remote_data, 1) else { return Ok(()) };
-            let Some(local_appearance) = self.apply_battle_team(&local_data, 2) else { return Ok(()) };
-            (remote_appearance, local_appearance)
+            local_json.as_deref().and_then(Self::battle_appearance).map(Self::header_from_json)
         };
+        let Some(local_header) = local_header else { return Ok(()) };
+        let local_sprite = self.local_player_sprite().unwrap_or(local_header.sprite);
         let Some(object_index) = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
@@ -3229,35 +3881,101 @@ impl Game {
         let Some(handle) = self.room.instance_list.get_by_instid(instance_id) else {
             return Ok(())
         };
-        let seed = (local_id.min(target) * 1_000_003 + local_id.max(target)) as i32;
+        let original_prota = self.global_real(b"prota_index", 0);
+        let original_char2 = self.player_char2_real();
+        let original_protaname = self.global_text(b"protaname");
+        let original_apodo = self.global_text(b"apodoName");
+        let original_prota_id = self.global_text(b"prota_ID");
+        let original_frase = self.instance_text(18, b"frasePropia");
+        let remote_header = if zibelan {
+            self.battle_team_import(&remote.data, if host { 2 } else { 1 }, Some(handle))
+        } else {
+            let text = String::from_utf8_lossy(&remote.data);
+            self.apply_battle_team(&text, if host { 2 } else { 1 }).map(Self::header_from_json)
+        };
+        let Some(remote_header) = remote_header else {
+            eprintln!("[battle] no se pudo importar el equipo remoto");
+            return Ok(())
+        };
+        let p2_local_header = if host {
+            remote_header.clone()
+        } else if zibelan {
+            let Some(export) = &local_export else { return Ok(()) };
+            let Some(header) = self.battle_team_import(&export.data, 2, Some(handle)) else { return Ok(()) };
+            header
+        } else {
+            let Some(json) = &local_json else { return Ok(()) };
+            let Some(appearance) = self.apply_battle_team(json, 2) else { return Ok(()) };
+            Self::header_from_json(appearance)
+        };
+        let (p1_header, p2_header) = if host {
+            (local_header, p2_local_header)
+        } else {
+            (remote_header, p2_local_header)
+        };
+        let p1_spr_index = if host { 0.0 } else { self.team_spr_index(handle, &p1_header) };
+        let p2_spr_index = self.team_spr_index(handle, &p2_header);
+        let p1_sprite = if host {
+            local_sprite
+        } else {
+            self.sprite_from_index(handle, p1_spr_index, p1_header.sprite)
+        };
+        let p2_sprite = if host {
+            self.sprite_from_index(handle, p2_spr_index, p2_header.sprite)
+        } else {
+            local_sprite
+        };
+        let local_meta = self
+            .battle_offer
+            .take()
+            .filter(|_| host)
+            .unwrap_or_else(|| self.battle_team_meta(target));
+        let seed = if host {
+            local_meta.seed
+        } else if remote.meta.seed != 0 {
+            remote.meta.seed
+        } else {
+            local_meta.seed
+        };
         self.rand.set_seed(seed.max(1));
-        let original_prota = self.global_num("prota_index", 0);
-        let original_char2 = self.player_char2();
-        self.set_instance_number(handle, b"p2_sprR", p2_appearance.1 as f64);
-        self.set_instance_number(handle, b"sprINDEX2", p2_appearance.1 as f64);
-        self.set_instance_number(handle, b"index2", p2_appearance.0 as f64);
-        self.set_instance_number(handle, b"sp_char2", p2_appearance.2 as f64);
-        self.set_instance_number(handle, b"BTTBACK_INDEX", f64::from((seed.unsigned_abs() % 253) + 1));
+        self.reloaded_online.set_battle_epoch(seed);
+        let fondo = if host {
+            local_meta.fondo
+        } else if remote.meta.fondo != 0 {
+            remote.meta.fondo
+        } else {
+            local_meta.fondo
+        };
+        let modo = if host { local_meta.modo } else { remote.meta.modo };
+        let sala = if host { local_meta.sala } else { remote.meta.sala };
+        self.set_instance_number(handle, b"p2_sprR", p2_sprite as f64);
+        self.set_instance_number(handle, b"sprINDEX2", p2_spr_index);
+        self.set_instance_number(handle, b"index2", f64::from(p2_header.prota_index));
+        self.set_instance_number(handle, b"sp_char2", p2_header.char2);
+        self.set_instance_number(handle, b"BTTBACK_INDEX", f64::from(fondo.max(1)));
+        if modo != 0 {
+            self.set_global_real(b"modeBattleBack", 0, f64::from(modo));
+        }
+        if sala != 0 {
+            self.set_global_real(b"NETW_BROOM", 0, f64::from(sala));
+        }
         let _ = self.variable_global_set(&[
             gml::Value::Str(gml::String::from("ENTR_SPR")),
-            gml::Value::Real(Real::from(p1_appearance.1 as f64)),
+            gml::Value::Real(Real::from(p1_sprite as f64)),
         ]);
         let _ = self.variable_global_set(&[
             gml::Value::Str(gml::String::from("TRAINER_SPR")),
-            gml::Value::Real(Real::from(p2_appearance.1 as f64)),
+            gml::Value::Real(Real::from(p2_sprite as f64)),
         ]);
         if !host {
-            let _ = self.variable_global_set(&[
-                gml::Value::Str(gml::String::from("prota_index")),
-                gml::Value::Real(Real::from(p1_appearance.0 as f64)),
-            ]);
-            self.set_control_char2(p1_appearance.2);
+            self.set_global_real(b"prota_index", 0, f64::from(p1_header.prota_index));
+            self.set_control_char2(p1_header.char2);
         }
         let mut count1: f64 = 0.0;
         let mut count2: f64 = 0.0;
         for index in 0..6u32 {
-            let species1 = self.global_num("pkmn1", index);
-            let species2 = self.global_num("pkmn2", index);
+            let species1 = self.global_real(b"pkmn1", index);
+            let species2 = self.global_real(b"pkmn2", index);
             self.set_instance_array_number(handle, b"PKMN1", index, species1);
             self.set_instance_array_number(handle, b"PKMN2", index, species2);
             if species1 > 0.0 {
@@ -3275,11 +3993,22 @@ impl Game {
         self.run_instance_script(handle, b"MultiplayerImportPlayerTwo")?;
         self.run_instance_script(handle, b"MultiplayerGoBattle")?;
         if !host {
-            let _ = self.variable_global_set(&[
-                gml::Value::Str(gml::String::from("prota_index")),
-                gml::Value::Real(Real::from(original_prota)),
-            ]);
+            self.set_global_real(b"prota_index", 0, original_prota);
             self.set_control_char2(original_char2);
+            if let Some(value) = original_protaname {
+                self.set_global_text(b"protaname", &value);
+            }
+            if let Some(value) = original_apodo {
+                self.set_global_text(b"apodoName", &value);
+            }
+            if let Some(value) = original_prota_id {
+                self.set_global_text(b"prota_ID", &value);
+            }
+            if let Some(value) = original_frase {
+                if let Some(handle) = self.find_object_instance(18) {
+                    self.set_instance_text(handle, b"frasePropia", &value);
+                }
+            }
         }
         self.battle_local_p1 = host;
         crate::touch_controls::set_battle_role(host);
@@ -3347,16 +4076,27 @@ impl Game {
     }
 
     fn battle_sync_tick(&mut self) -> bool {
+        if let Some(reason) = self.reloaded_online.take_battle_failure() {
+            if self.battle_snapshot.is_some() {
+                self.finish_online_battle_guard(&reason);
+            } else {
+                self.restore_local_battle_team();
+                self.clear_online_battle_state();
+            }
+            return true
+        }
         if !self.battle_sync_active {
             return true
         }
         if self.battle_room.is_none() {
             self.battle_room = Some(self.room.id);
         } else if self.battle_room != Some(self.room.id) {
-            self.restore_local_battle_team();
-            self.battle_sync_active = false;
-            self.battle_opponent = None;
-            self.battle_remote_mask = 0;
+            if self.battle_snapshot.is_some() {
+                self.finish_online_battle_guard("fin de batalla");
+            } else {
+                self.restore_local_battle_team();
+                self.clear_online_battle_state();
+            }
             return true
         }
         while let Some(input) = self.reloaded_online.take_battle_input() {
@@ -3367,6 +4107,7 @@ impl Game {
             self.battle_remote_checksum = input.checksum;
             self.battle_remote_mask = input.mask;
             if input.frame == self.battle_frame
+                && input.checksum != 0
                 && input.checksum != self.battle_local_checksum
                 && !self.battle_desync
             {
@@ -3454,11 +4195,264 @@ impl Game {
         (x1 + 8, top, x2 - 8, top + row_h)
     }
 
+    fn local_player_handle(&self) -> Option<usize> {
+        let object_index = self.assets.objects.iter().position(|object| {
+            object
+                .as_ref()
+                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .unwrap_or(false)
+        })?;
+        self.room
+            .instance_list
+            .iter_by_identity(object_index as crate::types::ID)
+            .next(&self.room.instance_list)
+    }
+
+    fn start_trade(&mut self, peer: u64, name: String) {
+        if self.battle_sync_active || self.battle_pending {
+            self.interaction_response = Some(("No puedes intercambiar durante un combate.".into(), false));
+            return
+        }
+        self.trade = Some(trade::TradeSession::new(peer, name));
+        self.interaction_menu_open = false;
+        self.interaction_request = None;
+        self.interaction_response = None;
+        self.interaction_menu_selection = 0;
+    }
+
+    fn cancel_trade(&mut self, message: &str) {
+        self.reloaded_online.send_peer_message(crate::reloaded_online::PeerMessageKind::No, &[]);
+        self.reloaded_online.end_session();
+        self.trade = None;
+        self.interaction_response = Some((message.to_string(), false));
+    }
+
+    fn save_trade(&mut self) {
+        let Some(handle) = self.local_player_handle() else { return };
+        if let Err(error) = self.run_script_value(
+            handle,
+            b"GuardarPartida",
+            &[gml::Value::Real(Real::from(1.0))],
+        ) {
+            eprintln!("[trade] no se pudo guardar la partida: {error}");
+        }
+    }
+
+    fn trade_tick(&mut self) {
+        let Some(mut session) = self.trade.take() else { return };
+        let mut finished = false;
+        while let Some(message) = self.reloaded_online.take_peer_message() {
+            match message.kind {
+                crate::reloaded_online::PeerMessageKind::Offer => {
+                    match trade::decode(&message.payload) {
+                        Ok(offer) => {
+                            session.remote = Some(offer);
+                            if session.phase == trade::TradePhase::WaitingOffer {
+                                session.phase = trade::TradePhase::Confirm;
+                                session.selection = 0;
+                                session.message = "Oferta recibida.".into();
+                            } else {
+                                session.message = "Oferta recibida; elige tu Pokemon.".into();
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("[trade] oferta invalida: {error}");
+                            self.reloaded_online.send_peer_message(
+                                crate::reloaded_online::PeerMessageKind::No,
+                                &[],
+                            );
+                            self.reloaded_online.end_session();
+                            self.interaction_response =
+                                Some(("La oferta del rival no es valida.".into(), false));
+                            finished = true;
+                            break
+                        },
+                    }
+                },
+                crate::reloaded_online::PeerMessageKind::Ok => {
+                    if session.phase == trade::TradePhase::WaitingOk {
+                        let Some(slot) = session.slot else {
+                            self.cancel_trade("El intercambio quedo incompleto.");
+                            finished = true;
+                            break
+                        };
+                        let Some(remote) = session.remote.clone() else {
+                            self.cancel_trade("El intercambio quedo incompleto.");
+                            finished = true;
+                            break
+                        };
+                        match trade::apply(self, slot, &remote) {
+                            Ok(()) => {
+                                self.save_trade();
+                                self.reloaded_online.end_session();
+                                self.interaction_response = Some((
+                                    format!("Intercambio hecho. Has recibido a {}.", remote.label),
+                                    true,
+                                ));
+                                eprintln!("[trade] intercambio aplicado slot={slot}");
+                                finished = true;
+                                break
+                            },
+                            Err(error) => {
+                                eprintln!("[trade] no se pudo aplicar: {error}");
+                                self.reloaded_online.send_peer_message(
+                                    crate::reloaded_online::PeerMessageKind::No,
+                                    &[],
+                                );
+                                self.reloaded_online.end_session();
+                                self.interaction_response =
+                                    Some(("No se pudo aplicar el intercambio.".into(), false));
+                                finished = true;
+                                break
+                            },
+                        }
+                    }
+                },
+                crate::reloaded_online::PeerMessageKind::No => {
+                    self.reloaded_online.end_session();
+                    self.interaction_response = Some(("El rival cancelo el intercambio.".into(), false));
+                    finished = true;
+                    break
+                },
+                crate::reloaded_online::PeerMessageKind::Gift => {
+                    self.cancel_trade("Los regalos todavia no estan disponibles.");
+                    finished = true;
+                    break
+                },
+            }
+        }
+        if !finished {
+            self.trade = Some(session);
+        }
+    }
+
+    fn trade_input(&mut self) {
+        let Some(mut session) = self.trade.take() else { return };
+        if self.battle_sync_active || self.battle_pending {
+            self.cancel_trade("El combate interrumpio el intercambio.");
+            return
+        }
+        let mut finished = false;
+        match session.phase {
+            trade::TradePhase::Pick => {
+                let slots = trade::occupied_slots(self);
+                if slots.is_empty() {
+                    self.cancel_trade("No tienes Pokemon para intercambiar.");
+                    return
+                }
+                let option_count = slots.len() + 1;
+                if self.input.keyboard_check_pressed(input::Button::UpArrow as u8) {
+                    session.selection = (session.selection + option_count - 1) % option_count;
+                }
+                if self.input.keyboard_check_pressed(input::Button::DownArrow as u8) {
+                    session.selection = (session.selection + 1) % option_count;
+                }
+                if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+                    self.cancel_trade("Has cancelado el intercambio.");
+                    return
+                }
+                if self.input.keyboard_check_pressed(input::Button::Return as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Space as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Z as u8)
+                {
+                    if session.selection >= slots.len() {
+                        self.cancel_trade("Has cancelado el intercambio.");
+                        return
+                    }
+                    let slot = slots[session.selection];
+                    match trade::capture(self, slot) {
+                        Ok(offer) => {
+                            let mut payload = offer.label.as_bytes().to_vec();
+                            payload.push(0x1e);
+                            match trade::encode(&offer) {
+                                Ok(packed) => payload.extend_from_slice(&packed),
+                                Err(error) => {
+                                    self.cancel_trade(&format!("No se pudo preparar la oferta: {error}"));
+                                    return
+                                },
+                            }
+                            if !self.reloaded_online.send_peer_message(
+                                crate::reloaded_online::PeerMessageKind::Offer,
+                                &payload,
+                            ) {
+                                self.cancel_trade("No se pudo enviar la oferta.");
+                                return
+                            }
+                            session.slot = Some(slot);
+                            session.local = Some(offer);
+                            if session.remote.is_some() {
+                                session.phase = trade::TradePhase::Confirm;
+                                session.selection = 0;
+                                session.message = "Oferta recibida.".into();
+                            } else {
+                                session.phase = trade::TradePhase::WaitingOffer;
+                                session.message = "Esperando la oferta del rival...".into();
+                            }
+                        },
+                        Err(error) => {
+                            self.cancel_trade(&format!("No se pudo preparar la oferta: {error}"));
+                            return
+                        },
+                    }
+                }
+            },
+            trade::TradePhase::WaitingOffer | trade::TradePhase::WaitingOk => {
+                if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+                    self.cancel_trade("Has cancelado el intercambio.");
+                    return
+                }
+            },
+            trade::TradePhase::Confirm => {
+                if self.input.keyboard_check_pressed(input::Button::UpArrow as u8)
+                    || self.input.keyboard_check_pressed(input::Button::LeftArrow as u8)
+                {
+                    session.selection = 0;
+                }
+                if self.input.keyboard_check_pressed(input::Button::DownArrow as u8)
+                    || self.input.keyboard_check_pressed(input::Button::RightArrow as u8)
+                {
+                    session.selection = 1;
+                }
+                if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+                    self.cancel_trade("Has cancelado el intercambio.");
+                    return
+                }
+                if self.input.keyboard_check_pressed(input::Button::Return as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Space as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Z as u8)
+                {
+                    if session.selection == 0 {
+                        if self.reloaded_online.send_peer_message(
+                            crate::reloaded_online::PeerMessageKind::Ok,
+                            &[],
+                        ) {
+                            session.phase = trade::TradePhase::WaitingOk;
+                            session.message = "Esperando la confirmacion del rival...".into();
+                        } else {
+                            self.cancel_trade("No se pudo confirmar el intercambio.");
+                            return
+                        }
+                    } else {
+                        self.cancel_trade("Has rechazado el intercambio.");
+                        return
+                    }
+                }
+            },
+        }
+        if !finished {
+            self.trade = Some(session);
+        }
+    }
+
     fn interaction_any_open(&self) -> bool {
-        self.interaction_menu_open || self.interaction_request.is_some() || self.interaction_response.is_some()
+        self.trade.is_some()
+            || self.interaction_menu_open
+            || self.interaction_request.is_some()
+            || self.interaction_response.is_some()
     }
 
     fn interaction_trigger(&mut self) {
+        self.trade_tick();
         if !self.reloaded_online.is_active() {
             return
         }
@@ -3473,12 +4467,12 @@ impl Game {
         }
         if let Some(response) = self.reloaded_online.take_response() {
             let kind = self.interaction_pending_kind.take();
+            if response.accept && kind.as_deref() == Some("T") {
+                self.start_trade(response.id, response.name);
+                return
+            }
             if response.accept && kind.as_deref() == Some("F") {
-                if let Some(data) = self.battle_team_snapshot() {
-                    self.battle_pending = self.reloaded_online.send_battle_team(response.id, &data);
-                    self.battle_target = Some(response.id);
-                    eprintln!("[battle] equipo enviado a {}; esperando equipo remoto", response.name);
-                }
+                self.send_battle_team_to(response.id, &response.name);
                 return
             }
             self.interaction_response = Some((
@@ -3491,12 +4485,13 @@ impl Game {
             ));
             return
         }
-        if let Some((id, data)) = self.reloaded_online.take_battle_team() {
+        if let Some(team) = self.reloaded_online.take_battle_team() {
+            let id = team.id;
             if self.battle_pending && self.battle_target == Some(id) {
                 self.battle_pending = false;
                 self.battle_target = None;
                 eprintln!("[battle] equipo remoto recibido; arrancando combate");
-                let _ = self.start_battle_with_remote_team(&data, id);
+                let _ = self.start_battle_with_remote_team(&team, id);
             }
             return
         }
@@ -3514,6 +4509,10 @@ impl Game {
     }
 
     fn interaction_input(&mut self) {
+        if self.trade.is_some() {
+            self.trade_input();
+            return
+        }
         if self.interaction_menu_just_opened {
             self.interaction_menu_just_opened = false;
             return
@@ -3557,15 +4556,18 @@ impl Game {
             if !activate {
                 return
             }
-            if let Some((id, _name, kind, _)) = self.interaction_request.take() {
+            if let Some((id, name, kind, _)) = self.interaction_request.take() {
                 let accept = selection == 0;
+                if accept && kind == "G" {
+                    self.reloaded_online.send_response(id, false);
+                    self.interaction_response = Some(("Regalar todavia no esta disponible.".into(), false));
+                    return
+                }
                 self.reloaded_online.send_response(id, accept);
-                if accept && kind == "F" {
-                    if let Some(data) = self.battle_team_snapshot() {
-                        self.battle_pending = self.reloaded_online.send_battle_team(id, &data);
-                        self.battle_target = Some(id);
-                        eprintln!("[battle] equipo enviado; esperando equipo remoto");
-                    }
+                if accept && kind == "T" {
+                    self.start_trade(id, name);
+                } else if accept && kind == "F" {
+                    self.send_battle_team_to(id, &name);
                 }
             }
             return
@@ -3623,7 +4625,14 @@ impl Game {
             1 => "T",
             _ => "G",
         };
+        if kind == "G" {
+            self.interaction_menu_open = false;
+            self.interaction_target = None;
+            self.interaction_response = Some(("Regalar todavia no esta disponible.".into(), false));
+            return
+        }
         if let Some(target) = self.interaction_target {
+            eprintln!("[online] solicitud target={target} kind={kind}");
             self.interaction_pending_kind = Some(kind.to_string());
             let sent = self.reloaded_online.send_request(target, kind);
             if !sent {
@@ -3705,6 +4714,7 @@ impl Game {
                             eprintln!("[video] la ventana pasa a {}x{}", width, height);
                             self.window_inner_size = (width as _, height as _)
                         },
+                        Event::Focus(focused) => self.roz_online.set_focused(focused),
                         Event::CloseRequest => self.close_requested = true,
                         _ => (),
                     }
@@ -3720,6 +4730,12 @@ impl Game {
         if let Some(external) = self.externals.get_external(id) {
             if args.len() != external.signature.type_args.len() {
                 return Ok(Default::default()); // unfortunately required
+            }
+            // Dispatch native ROZ calls before converting to dll::Value. The external
+            // borrow ends here (RozFn is Copy), so the runtime can be borrowed mutably.
+            if let external::Call::Roz(function) = &external.call {
+                let function = *function;
+                return Ok(self.roz_online.call(function, args));
             }
             let convert_args = || {
                 args.iter()
@@ -3745,6 +4761,7 @@ impl Game {
                     let args = convert_args();
                     Ok(self.externals.call_ipc(id as _, &args).into())
                 },
+                external::Call::Roz(_) => unreachable!("ROZ calls are dispatched above"),
             }
         } else {
             Ok(Default::default()) // unfortunately required
@@ -4342,6 +5359,10 @@ impl Game {
         };
     }
 
+    #[cfg(target_os = "android")]
+    fn stop_recording_capture(&mut self, _recorder: Child) {}
+
+    #[cfg(not(target_os = "android"))]
     fn stop_recording_capture(&mut self, recorder: Child) {
         recorder.wait_with_output().expect("video recorder should close");
         self.audio.stop_audio_capture();
@@ -4427,15 +5448,34 @@ impl Game {
         (w_x + x * w_w / fw, w_y + y * w_h / fh)
     }
 
+    fn menu_mouse_x(&self, x: i32) -> i32 {
+        let options = self
+            .assets
+            .rooms
+            .get_asset(self.room.id)
+            .map(|room| {
+                let name = room.name.to_string().to_ascii_lowercase();
+                name.contains("opcion") || name.contains("option")
+            })
+            .unwrap_or(false);
+        if (self.room.id == 30 || options) && (80..=240).contains(&x) {
+            x.min(178)
+        } else {
+            x
+        }
+    }
+
     pub fn get_mouse_in_room(&self) -> (i32, i32) {
         let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
-        self.translate_screen_to_room(x, y)
+        let (x, y) = self.translate_screen_to_room(x, y);
+        (self.menu_mouse_x(x), y)
     }
 
     // Gets the previous mouse position in room coordinates
     pub fn get_mouse_previous_in_room(&self) -> (i32, i32) {
         let (x, y) = (self.input.mouse_x_previous(), self.input.mouse_y_previous());
-        self.translate_screen_to_room(x, y)
+        let (x, y) = self.translate_screen_to_room(x, y);
+        (self.menu_mouse_x(x), y)
     }
 
     // Translates screen coordinates to room coordinates
@@ -5025,6 +6065,37 @@ impl Game {
                 }
             },
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct BattleTeamHeader {
+    name: Vec<u8>,
+    prota_id: i32,
+    prota_index: i32,
+    char2: f64,
+    sprite: i32,
+    frase: Vec<u8>,
+    version: i32,
+}
+
+struct BattleTeamExport {
+    data: Vec<u8>,
+    header: BattleTeamHeader,
+}
+
+/// GameMaker 8 `.TEAM` files are ANSI (Windows-1252), while Kotlin/Compose strings are
+/// UTF-8. Convert only valid UTF-8 text; already-ANSI bytes are left untouched.
+fn team_text_bytes(bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else { return bytes.to_vec() };
+    let (encoded, _, _) = encoding_rs::WINDOWS_1252.encode(text);
+    encoded.into_owned()
+}
+
+fn team_value_text(value: &gml::Value) -> Vec<u8> {
+    match value {
+        gml::Value::Real(value) => team_file::number_text(value.into_inner()),
+        gml::Value::Str(value) => value.as_ref().to_vec(),
     }
 }
 

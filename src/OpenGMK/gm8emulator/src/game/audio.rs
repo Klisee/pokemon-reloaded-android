@@ -8,13 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::Write,
-    process::{self, Child, Stdio},
+    process::Child,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc,
     },
 };
+#[cfg(not(target_os = "android"))]
+use std::process::{self, Stdio};
 use udon::{
     cycle::Cycle,
     rechanneler::Rechanneler,

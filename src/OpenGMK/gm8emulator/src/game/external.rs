@@ -1,5 +1,6 @@
 pub mod dll;
 mod dummy;
+pub mod roz_net;
 pub mod win32;
 mod wow64;
 
@@ -24,6 +25,9 @@ pub enum Call {
     Emulated(Function),
     Native(NativeExternal),
     Ipc(ipc::IpcExternal),
+    /// Native Zibelan/ROZ `net_*` function. Only a small copyable identifier is kept
+    /// here; the sockets live in `Game::roz_online` and are never serialised.
+    Roz(roz_net::RozFn),
 }
 
 pub struct External {
@@ -55,6 +59,9 @@ impl ExternalManager {
     }
 
     fn make_call(&mut self, signature: &dll::ExternalSignature) -> Result<Call, String> {
+        if let Some(function) = roz_net::lookup(signature)? {
+            return Ok(Call::Roz(function))
+        }
         if let Some(dummy) = self.should_dummy(&signature) {
             return Ok(Call::Dummy(dummy))
         }

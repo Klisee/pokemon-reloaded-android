@@ -98,6 +98,17 @@ pub fn to_path(path: &str) -> std::borrow::Cow<str> {
 
 impl TextHandle {
     pub fn open(path: &str, mode: AccessMode) -> io::Result<Self> {
+        let redirected;
+        let path = if matches!(mode, AccessMode::Write) {
+            if let Some(path) = crate::game::save_guard::redirect_online_write(path) {
+                redirected = path;
+                redirected.as_str()
+            } else {
+                path
+            }
+        } else {
+            path
+        };
         #[rustfmt::skip]
         let (read, write, append) = match mode {
             AccessMode::Read    => (true,  false, false),
@@ -201,6 +212,17 @@ impl TextHandle {
 
 impl BinaryHandle {
     pub fn open(path: &str, mode: AccessMode) -> io::Result<Self> {
+        let redirected;
+        let path = if matches!(mode, AccessMode::Write) {
+            if let Some(path) = crate::game::save_guard::redirect_online_write(path) {
+                redirected = path;
+                redirected.as_str()
+            } else {
+                path
+            }
+        } else {
+            path
+        };
         let file = Self::_open(path, mode)?;
         match mode {
             AccessMode::Read => Ok(Self::Read(BufReader::new(file))),

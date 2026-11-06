@@ -67,7 +67,7 @@ fn main() {
         }
     }
 
-    if cfg!(unix) {
+    if target.contains("linux") {
         let alsa = pkg_config::probe_library("alsa").unwrap();
         let libpulse = pkg_config::probe_library("libpulse").unwrap();
         let jack = pkg_config::probe_library("jack").unwrap();

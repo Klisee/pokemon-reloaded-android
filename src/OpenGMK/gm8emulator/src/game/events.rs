@@ -85,6 +85,7 @@ impl Game {
 
     /// Runs room end followed by game end events for all instances. Should be called only when the game ends.
     pub fn run_game_end_events(&mut self) -> gml::Result<()> {
+        self.finish_online_battle_guard("cierre del juego");
         // Reset this so the events will run
         self.scene_change = None;
 

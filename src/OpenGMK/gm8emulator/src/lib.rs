@@ -6,7 +6,7 @@
 
 mod action;
 mod asset;
-mod game;
+pub(crate) mod game;
 mod gml;
 mod handleman;
 mod imgui_key_utils;

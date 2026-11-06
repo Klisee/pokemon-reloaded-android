@@ -51,6 +51,12 @@ impl IpcManager {
 }
 
 impl ChildProcess {
+    #[cfg(target_os = "android")]
+    pub fn new() -> Result<Self, String> {
+        Err("wow64 no disponible en Android".into())
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn new() -> Result<Self, String> {
         let mut process_path = env::current_exe().expect("failed to query path to current executable");
         process_path.set_file_name(match env::var_os(PROCESS_ENV_OVERRIDE) {
@@ -121,6 +127,7 @@ impl ChildProcess {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl Drop for ChildProcess {
     fn drop(&mut self) {
         if let Err(_) = self.send::<()>(dll::Wow64Message::Stop) {

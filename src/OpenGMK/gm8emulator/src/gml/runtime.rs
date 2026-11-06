@@ -350,6 +350,18 @@ impl UnaryOperator {
 }
 
 impl Game {
+    /// Engine-level script result override. This keeps compatibility patches out of the game's
+    /// GML: the original script is never edited, the runtime just answers in its place.
+    pub(crate) fn script_result_override(&self, script_id: i32) -> Option<Value> {
+        let script = self.assets.scripts.get_asset(script_id)?;
+        if script.name.as_ref() == b"ValidateCV" {
+            eprintln!("[compat] ValidateCV -> 1");
+            Some(Value::Real(Real::from(1.0)))
+        } else {
+            None
+        }
+    }
+
     pub fn execute(&mut self, instructions: &[Instruction], context: &mut Context) -> gml::Result<ReturnType> {
         for instruction in instructions.iter() {
             match self.exec_instruction(instruction, context)? {
@@ -642,6 +654,9 @@ impl Game {
                 function.0(&arg_values[..args.len()])
             },
             Node::Script { args, script_id } => {
+                if let Some(value) = self.script_result_override(*script_id as i32) {
+                    return Ok(value);
+                }
                 if self.gb_script_skipped(*script_id as i32) {
                     return Ok(Default::default());
                 }

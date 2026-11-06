@@ -7,6 +7,7 @@ use crate::{
     types::Colour,
 };
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum Halign {
@@ -112,6 +113,13 @@ impl<'a> LineIterator<'a> {
 
         Some((line, line_width))
     }
+}
+
+fn online_now_ms() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as f64)
+        .unwrap_or(0.0)
 }
 
 impl Game {
@@ -265,6 +273,12 @@ impl Game {
         if self.mods_menu_open {
             self.draw_mods_menu();
         }
+        if self.online_list_open {
+            self.draw_online_list();
+        }
+        if self.online_chat_open {
+            self.draw_online_chat();
+        }
         if self.online_menu_open {
             self.draw_online_menu();
         }
@@ -276,6 +290,9 @@ impl Game {
         }
         if self.interaction_response.is_some() {
             self.draw_interaction_response();
+        }
+        if self.trade.is_some() {
+            self.draw_trade();
         }
 
         // Apply room caption. The extra interpolation frames are not new game frames, so they must
@@ -417,6 +434,55 @@ impl Game {
     fn draw_interaction_menu(&mut self) {
         let title = format!("Jugador: {}", self.interaction_target_name);
         self.draw_interaction_panel(&title, "", &["Combatir", "Intercambiar", "Regalar", "Cancelar"], Some(self.interaction_menu_selection), 0);
+    }
+
+    fn draw_trade(&mut self) {
+        let Some(session) = self.trade.as_ref() else { return };
+        let title = format!("Intercambio con {}", session.name);
+        let (body, options, selected, option_start) = match session.phase {
+            crate::game::trade::TradePhase::Pick => {
+                let slots = crate::game::trade::occupied_slots(self);
+                let mut options = Vec::new();
+                for slot in slots {
+                    options.push(
+                        crate::game::trade::capture(self, slot)
+                            .map(|offer| offer.label)
+                            .unwrap_or_else(|_| format!("Pokemon en slot {slot}")),
+                    );
+                }
+                options.push("Cancelar".into());
+                (
+                    format!("Elige un Pokemon para ofrecer a {}.", session.name),
+                    options,
+                    Some(session.selection),
+                    1,
+                )
+            },
+            crate::game::trade::TradePhase::WaitingOffer => (
+                session.message.clone(),
+                vec!["Cancelar".into()],
+                Some(0),
+                2,
+            ),
+            crate::game::trade::TradePhase::Confirm => {
+                let mine = session.local.as_ref().map(|offer| offer.label.clone()).unwrap_or_default();
+                let theirs = session.remote.as_ref().map(|offer| offer.label.clone()).unwrap_or_default();
+                (
+                    format!("Tu das a {mine} y {} te da a {theirs}.#Confirmas?", session.name),
+                    vec!["Si".into(), "No".into()],
+                    Some(session.selection.min(1)),
+                    2,
+                )
+            },
+            crate::game::trade::TradePhase::WaitingOk => (
+                session.message.clone(),
+                vec!["Cancelar".into()],
+                Some(0),
+                2,
+            ),
+        };
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        self.draw_interaction_panel(&title, &body, &refs, selected, option_start);
     }
 
     fn draw_interaction_request(&mut self) {
@@ -623,6 +689,108 @@ impl Game {
         self.draw_valign = old_valign;
     }
 
+    fn draw_online_list(&mut self) {
+        let (x1, y1, x2, y2) = self.online_menu_panel();
+        let old_font = self.draw_font_id;
+        let old_colour = self.draw_colour;
+        let old_alpha = self.draw_alpha;
+        let old_halign = self.draw_halign;
+        let old_valign = self.draw_valign;
+        let old_depth = self.renderer.get_depth();
+        let old_depth_test = self.renderer.get_depth_test();
+        let old_write_depth = self.renderer.get_write_depth();
+        let old_alpha_blending = self.renderer.get_alpha_blending();
+        let old_blend_mode = self.renderer.get_blend_mode();
+        self.draw_font_id = if self.assets.fonts.get_asset(17).is_some() { 17 } else if self.assets.fonts.get_asset(0).is_some() { 0 } else { -1 };
+        self.draw_halign = Halign::Middle;
+        self.draw_valign = Valign::Top;
+        self.draw_alpha = Real::from(1.0);
+        self.renderer.set_draw_offset(0.0, 0.0);
+        self.renderer.set_depth(-32000.0);
+        self.renderer.set_depth_test(false);
+        self.renderer.set_write_depth(false);
+        self.renderer.set_alpha_blending(true);
+        self.renderer.set_blend_mode(BlendType::SrcAlpha, BlendType::InvSrcAlpha);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0, 0, 0.9, false);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0xffffff, 0xffffff, 0.45, true);
+        let center = f64::from(x1 + x2) * 0.5;
+        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+        self.draw_string(Real::from(center), Real::from(f64::from(y1) + 5.0), gml::String::from("Jugadores online"), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        let entries = self.reloaded_online.world_list().to_vec();
+        if entries.is_empty() {
+            self.draw_colour = Colour::new(0.75, 0.75, 0.75);
+            self.draw_string(Real::from(center), Real::from(f64::from(y1) + 34.0), gml::String::from("Cargando o sin jugadores..."), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        } else {
+            for (index, line) in entries.iter().take(10).enumerate() {
+                self.draw_colour = Colour::new(0.9, 0.9, 0.9);
+                self.draw_string(Real::from(f64::from(x1) + 12.0), Real::from(f64::from(y1) + 30.0 + index as f64 * 16.0), gml::String::from(line.as_str()), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+            }
+        }
+        self.draw_colour = Colour::new(0.7, 0.7, 0.7);
+        self.draw_string(Real::from(center), Real::from(f64::from(y2) - 16.0), gml::String::from("G / Esc para cerrar"), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        self.renderer.set_depth(old_depth);
+        self.renderer.set_depth_test(old_depth_test);
+        self.renderer.set_write_depth(old_write_depth);
+        self.renderer.set_alpha_blending(old_alpha_blending);
+        self.renderer.set_blend_mode(old_blend_mode.0, old_blend_mode.1);
+        self.draw_font_id = old_font;
+        self.draw_colour = old_colour;
+        self.draw_alpha = old_alpha;
+        self.draw_halign = old_halign;
+        self.draw_valign = old_valign;
+    }
+
+    fn draw_online_chat(&mut self) {
+        let (x1, y1, x2, y2) = self.online_chat_panel();
+        let old_font = self.draw_font_id;
+        let old_colour = self.draw_colour;
+        let old_alpha = self.draw_alpha;
+        let old_halign = self.draw_halign;
+        let old_valign = self.draw_valign;
+        let old_depth = self.renderer.get_depth();
+        let old_depth_test = self.renderer.get_depth_test();
+        let old_write_depth = self.renderer.get_write_depth();
+        let old_alpha_blending = self.renderer.get_alpha_blending();
+        let old_blend_mode = self.renderer.get_blend_mode();
+        self.draw_font_id = if self.assets.fonts.get_asset(17).is_some() { 17 } else if self.assets.fonts.get_asset(0).is_some() { 0 } else { -1 };
+        self.draw_halign = Halign::Middle;
+        self.draw_valign = Valign::Top;
+        self.draw_alpha = Real::from(1.0);
+        self.renderer.set_draw_offset(0.0, 0.0);
+        self.renderer.set_depth(-32000.0);
+        self.renderer.set_depth_test(false);
+        self.renderer.set_write_depth(false);
+        self.renderer.set_alpha_blending(true);
+        self.renderer.set_blend_mode(BlendType::SrcAlpha, BlendType::InvSrcAlpha);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0, 0, 0.9, false);
+        self.renderer.draw_roundrect(x1 as f64, y1 as f64, x2 as f64, y2 as f64, 0xffffff, 0xffffff, 0.45, true);
+        let center = f64::from(x1 + x2) * 0.5;
+        self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+        self.draw_string(Real::from(center), Real::from(f64::from(y1) + 8.0), gml::String::from("Chat online"), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        let text = String::from_utf8_lossy(self.keyboard_string.as_ref()).to_string();
+        self.draw_colour = Colour::new(0.95, 0.95, 0.95);
+        self.draw_string(Real::from(center), Real::from(f64::from(y1) + 40.0), gml::String::from(text.as_str()), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        for (label, rect) in [("Enviar", self.online_chat_send_rect()), ("Cancelar", self.online_chat_cancel_rect())] {
+            let (bx1, by1, bx2, by2) = rect;
+            self.renderer.draw_roundrect(bx1 as f64, by1 as f64, bx2 as f64, by2 as f64, 0, 0, 0.55, false);
+            self.renderer.draw_roundrect(bx1 as f64, by1 as f64, bx2 as f64, by2 as f64, 0xffffff, 0xffffff, 0.45, true);
+            self.draw_colour = Colour::new(1.0, 1.0, 1.0);
+            self.draw_string(Real::from(f64::from((bx1 + bx2) / 2)), Real::from(f64::from((by1 + by2) / 2)), gml::String::from(label), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        }
+        self.draw_colour = Colour::new(0.7, 0.7, 0.7);
+        self.draw_string(Real::from(center), Real::from(f64::from(y2) - 88.0), gml::String::from("Escribí y tocá Enviar"), None, None, Real::from(1.0), Real::from(1.0), Real::from(0.0), None, Real::from(1.0));
+        self.renderer.set_depth(old_depth);
+        self.renderer.set_depth_test(old_depth_test);
+        self.renderer.set_write_depth(old_write_depth);
+        self.renderer.set_alpha_blending(old_alpha_blending);
+        self.renderer.set_blend_mode(old_blend_mode.0, old_blend_mode.1);
+        self.draw_font_id = old_font;
+        self.draw_colour = old_colour;
+        self.draw_alpha = old_alpha;
+        self.draw_halign = old_halign;
+        self.draw_valign = old_valign;
+    }
+
     fn draw_online_menu(&mut self) {
         let (x1, y1, x2, y2) = self.online_menu_panel();
         let old_font = self.draw_font_id;
@@ -669,7 +837,7 @@ impl Game {
             Real::from(1.0),
         );
 
-        let options = ["Local", "Mundo online (servidor local)", "Cancelar"];
+        let options = ["Local", "Mundo online (Zibelan)", "Cancelar"];
         for (index, label) in options.iter().enumerate() {
             let (rx1, ry1, rx2, ry2) = self.online_menu_row(index);
             let selected = index == self.online_menu_selection;
@@ -816,12 +984,6 @@ impl Game {
         let instance = self.room.instance_list.get(idx);
         let sprite_index = instance.sprite_index.get();
         if sprite_index < 0 {
-            eprintln!(
-                "[sprite] instancia {} objeto {} sin sprite en sala {}",
-                instance.id.get(),
-                instance.object_index.get(),
-                self.room.id
-            );
             return Ok(())
         }
         if let Some(sprite) = self.assets.sprites.get_asset(sprite_index) {
@@ -841,13 +1003,6 @@ impl Game {
             }
             Ok(())
         } else {
-            eprintln!(
-                "[sprite] instancia {} objeto {} sprite inexistente {} en sala {}",
-                instance.id.get(),
-                instance.object_index.get(),
-                sprite_index,
-                self.room.id
-            );
             Ok(())
         }
     }
@@ -1065,8 +1220,9 @@ impl Game {
             return
         }
         let local_name = self.reloaded_online.local_name().to_string();
-        let remote_labels = self.reloaded_online.remote_labels(self.room.id, &self.assets);
-        if remote_labels.is_empty() {
+        let local_say = self.reloaded_online.local_say().map(str::to_string);
+        let remote_overlays = self.reloaded_online.remote_overlays(self.room.id, &self.assets);
+        if remote_overlays.is_empty() {
             return
         }
         let local_label = self
@@ -1096,7 +1252,7 @@ impl Game {
                     - f64::from(sprite.origin_y) * instance.image_yscale.get().into_inner();
                 Some((instance.x.get().into_inner(), top))
             });
-        if local_name.is_empty() && remote_labels.is_empty() {
+        if local_name.is_empty() && remote_overlays.is_empty() {
             return
         }
         let old_font = self.draw_font_id;
@@ -1104,6 +1260,11 @@ impl Game {
         let old_alpha = self.draw_alpha;
         let old_halign = self.draw_halign;
         let old_valign = self.draw_valign;
+        let old_depth = self.renderer.get_depth();
+        let old_depth_test = self.renderer.get_depth_test();
+        let old_write_depth = self.renderer.get_write_depth();
+        let old_alpha_blending = self.renderer.get_alpha_blending();
+        let old_blend_mode = self.renderer.get_blend_mode();
         self.draw_font_id = if self.assets.fonts.get_asset(17).is_some() {
             17
         } else if self.assets.fonts.get_asset(0).is_some() {
@@ -1115,15 +1276,39 @@ impl Game {
         self.draw_alpha = Real::from(1.0);
         self.draw_halign = Halign::Middle;
         self.draw_valign = Valign::Bottom;
+        self.renderer.set_draw_offset(0.0, 0.0);
         self.renderer.set_depth(-13001.0);
+        self.renderer.set_depth_test(false);
+        self.renderer.set_write_depth(false);
+        self.renderer.set_alpha_blending(true);
+        self.renderer.set_blend_mode(BlendType::SrcAlpha, BlendType::InvSrcAlpha);
         if !local_name.is_empty() {
             if let Some((x, top)) = local_label {
                 self.draw_online_label(x, top - 2.0, &local_name, 0x00ffff);
+                if let Some(text) = &local_say {
+                    self.draw_online_bubble(x, top - 16.0, text);
+                }
             }
         }
-        for (name, x, top) in remote_labels {
-            self.draw_online_label(x, top - 2.0, &name, 0xffffff);
+        for overlay in remote_overlays {
+            self.draw_online_label(overlay.x, overlay.top - 2.0, &overlay.name, 0xffffff);
+            let mut top = overlay.top;
+            if overlay.battle {
+                self.draw_online_battle_marker(overlay.x, top - 22.0);
+                top -= 20.0;
+            }
+            if let Some(kind) = overlay.exclaim {
+                self.draw_online_exclaim(overlay.x, overlay.y - 20.0, kind);
+            }
+            if let Some(text) = &overlay.say {
+                self.draw_online_bubble(overlay.x, top - 14.0, text);
+            }
         }
+        self.renderer.set_depth(old_depth);
+        self.renderer.set_depth_test(old_depth_test);
+        self.renderer.set_write_depth(old_write_depth);
+        self.renderer.set_alpha_blending(old_alpha_blending);
+        self.renderer.set_blend_mode(old_blend_mode.0, old_blend_mode.1);
         self.draw_font_id = old_font;
         self.draw_colour = old_colour;
         self.draw_alpha = old_alpha;
@@ -1159,6 +1344,89 @@ impl Game {
             None,
             Real::from(1.0),
         );
+    }
+
+    fn draw_online_battle_marker(&mut self, x: f64, y: f64) {
+        let angle = (online_now_ms() * 0.4) % 360.0;
+        if let Some(sprite) = self.online_sprite_by_name(b"spr_ball") {
+            if let Some(atlas) = sprite.get_atlas_ref(0) {
+                self.renderer.draw_sprite(atlas, x, y, 1.5, 1.5, angle, 0xffffff, 1.0);
+                return
+            }
+        }
+        self.renderer.draw_ellipse(x, y, 6.0, 6.0, 0xcc2222, 0xcc2222, 1.0, false);
+        self.renderer.draw_rectangle(x - 6.0, y - 1.0, x + 6.0, y + 1.0, 0xffffff, 1.0);
+        self.renderer.draw_ellipse(x, y, 6.0, 6.0, 0x000000, 0x000000, 1.0, true);
+    }
+
+    fn draw_online_exclaim(&mut self, x: f64, y: f64, kind: i32) {
+        let object_index = self
+            .assets
+            .objects
+            .iter()
+            .enumerate()
+            .find(|(_, object)| {
+                object
+                    .as_ref()
+                    .map(|object| object.name.as_ref() == b"obj_EXC")
+                    .unwrap_or(false)
+            })
+            .map(|(index, _)| index);
+        if let Some(object) = object_index.and_then(|index| self.assets.objects.get_asset(index as crate::types::ID)) {
+            if let Some(sprite) = self.assets.sprites.get_asset(object.sprite_index) {
+                if let Some(atlas) = sprite.get_atlas_ref(kind) {
+                    self.renderer.draw_sprite(atlas, x, y, 1.0, 1.0, 0.0, 0xffffff, 1.0);
+                    return
+                }
+            }
+        }
+        self.draw_online_bubble(x, y + 8.0, "!");
+    }
+
+    fn draw_online_bubble(&mut self, x: f64, y: f64, text: &str) {
+        let escaped = text.replace('#', "\\#");
+        let text: gml::String = escaped.as_str().into();
+        let (text_width, text_height) = self.get_string_size(text.clone(), None, Some(150));
+        let width = f64::from(text_width.min(150)) + 10.0;
+        let height = f64::from(text_height) + 6.0;
+        let x1 = (x - width * 0.5).round();
+        let y1 = (y - 6.0 - height).round();
+        let old_depth = self.renderer.get_depth();
+        self.renderer.set_depth(-13001.0);
+        self.renderer.draw_rectangle(x1, y1, x1 + width, y1 + height, 0xffffff, 0.9);
+        self.renderer.draw_triangle(x - 4.0, y1 + height, x + 4.0, y1 + height, x, y1 + height + 6.0, 0xffffff, 0xffffff, 0xffffff, 0.9, false);
+        self.renderer.draw_rectangle_outline(x1, y1, x1 + width, y1 + height, 0x000000, 1.0);
+        let old_colour = self.draw_colour;
+        let old_halign = self.draw_halign;
+        let old_valign = self.draw_valign;
+        self.draw_colour = Colour::new(0.0, 0.0, 0.0);
+        self.draw_halign = Halign::Middle;
+        self.draw_valign = Valign::Top;
+        self.draw_string(
+            Real::from(x),
+            Real::from(y1 + 3.0),
+            text,
+            None,
+            Some(150),
+            Real::from(1.0),
+            Real::from(1.0),
+            Real::from(0.0),
+            None,
+            Real::from(1.0),
+        );
+        self.draw_colour = old_colour;
+        self.draw_halign = old_halign;
+        self.draw_valign = old_valign;
+        self.renderer.set_depth(old_depth);
+    }
+
+    fn online_sprite_by_name(&self, name: &[u8]) -> Option<&asset::Sprite> {
+        self.assets
+            .sprites
+            .iter()
+            .flatten()
+            .find(|sprite| sprite.name.as_ref() == name)
+            .map(|sprite| sprite.as_ref())
     }
 
     /// Splits the string into line-width pairs.

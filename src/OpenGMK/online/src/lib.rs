@@ -18,6 +18,7 @@ use std::{
 };
 
 pub mod bridge;
+pub mod roz;
 
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_LINE: usize = 64 * 1024;

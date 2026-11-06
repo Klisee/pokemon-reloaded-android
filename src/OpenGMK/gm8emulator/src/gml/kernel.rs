@@ -26,10 +26,9 @@ use crate::{
 };
 use image::RgbaImage;
 use ramen::window::Cursor;
-use std::{
-    io::{Read, Write},
-    process::Command,
-};
+use std::io::{Read, Write};
+#[cfg(not(target_os = "android"))]
+use std::process::Command;
 
 macro_rules! _arg_into {
     (any, $v: expr) => {{ Ok($v.clone()) }};
@@ -3282,6 +3281,9 @@ impl Game {
 
     pub fn action_execute_script(&mut self, context: &mut Context, args: &[Value]) -> gml::Result<Value> {
         let (script_id, arg1, arg2, arg3, arg4, arg5) = expect_args!(args, [int, any, any, any, any, any])?;
+        if let Some(value) = self.script_result_override(script_id) {
+            return Ok(value);
+        }
         if self.gb_script_skipped(script_id) {
             return Ok(Default::default());
         }
@@ -5869,15 +5871,14 @@ impl Game {
     pub fn game_save(&mut self, args: &[Value]) -> gml::Result<Value> {
         let fname = expect_args!(args, [string])?;
         let save = GMSave::from_game(self);
-        let mut file = std::fs::File::create(file::to_path(&fname).as_ref())
-            .map(std::io::BufWriter::new)
-            .map_err(|e| gml::Error::FunctionError("game_save".into(), format!("{}", e)))?;
+        let mut buffer = Vec::new();
         // write magic number (0x21c in GM8)
-        file.write(&[0x1d, 0x02, 0x00, 0x00])
+        buffer.extend_from_slice(&[0x1d, 0x02, 0x00, 0x00]);
+        bincode::serialize_into(&mut buffer, &save)
             .map_err(|e| gml::Error::FunctionError("game_save".into(), format!("{}", e)))?;
-        bincode::serialize_into(&mut file, &save)
-            .map_err(|e| gml::Error::FunctionError("game_save".into(), format!("{}", e)))?;
-        file.flush().map_err(|e| gml::Error::FunctionError("game_save".into(), e.to_string()))?;
+        let path = file::to_path(&fname);
+        crate::game::save_guard::atomic_write(std::path::Path::new(path.as_ref()), &buffer)
+            .map_err(|e| gml::Error::FunctionError("game_save".into(), e.to_string()))?;
         Ok(Default::default())
     }
 
@@ -6529,6 +6530,15 @@ impl Game {
         }
     }
 
+    #[cfg(target_os = "android")]
+    pub fn execute_program(&mut self, _args: &[Value]) -> gml::Result<Value> {
+        Err(gml::Error::FunctionError(
+            "execute_program".into(),
+            "no permitido en Android".into(),
+        ))
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn execute_program(&mut self, args: &[Value]) -> gml::Result<Value> {
         let (prog, prog_args, wait) = expect_args!(args, [string, string, bool])?;
         // Rust doesn't let you execute a program with just a string, so unescape it manually
@@ -9661,6 +9671,9 @@ impl Game {
     pub fn script_execute(&mut self, context: &mut Context, args: &[Value]) -> gml::Result<Value> {
         if let Some(script_id) = args.get(0) {
             let script_id = script_id.round();
+            if let Some(value) = self.script_result_override(script_id) {
+                return Ok(value);
+            }
             if self.gb_script_skipped(script_id) {
                 return Ok(Default::default());
             }
