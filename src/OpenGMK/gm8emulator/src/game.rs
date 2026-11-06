@@ -4227,15 +4227,17 @@ impl Game {
         self.interaction_response = Some((message.to_string(), false));
     }
 
-    fn save_trade(&mut self) {
-        let Some(handle) = self.local_player_handle() else { return };
-        if let Err(error) = self.run_script_value(
+    fn save_trade(&mut self) -> Result<(), String> {
+        let Some(handle) = self.local_player_handle() else {
+            return Err("no se encontro al jugador local".into())
+        };
+        self.run_script_value(
             handle,
             b"GuardarPartida",
             &[gml::Value::Real(Real::from(1.0))],
-        ) {
-            eprintln!("[trade] no se pudo guardar la partida: {error}");
-        }
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 
     fn trade_tick(&mut self) {
@@ -4281,19 +4283,35 @@ impl Game {
                             finished = true;
                             break
                         };
+                        let snapshot = online_snapshot::OnlineSnapshot::capture(self);
                         match trade::apply(self, slot, &remote) {
-                            Ok(()) => {
-                                self.save_trade();
-                                self.reloaded_online.end_session();
-                                self.interaction_response = Some((
-                                    format!("Intercambio hecho. Has recibido a {}.", remote.label),
-                                    true,
-                                ));
-                                eprintln!("[trade] intercambio aplicado slot={slot}");
-                                finished = true;
-                                break
+                            Ok(()) => match self.save_trade() {
+                                Ok(()) => {
+                                    self.reloaded_online.end_session();
+                                    self.interaction_response = Some((
+                                        format!("Intercambio hecho. Has recibido a {}.", remote.label),
+                                        true,
+                                    ));
+                                    eprintln!("[trade] intercambio aplicado slot={slot}");
+                                    finished = true;
+                                    break
+                                },
+                                Err(error) => {
+                                    let _ = snapshot.restore(self);
+                                    eprintln!("[trade] no se pudo guardar: {error}");
+                                    self.reloaded_online.send_peer_message(
+                                        crate::reloaded_online::PeerMessageKind::No,
+                                        &[],
+                                    );
+                                    self.reloaded_online.end_session();
+                                    self.interaction_response =
+                                        Some(("No se pudo guardar el intercambio.".into(), false));
+                                    finished = true;
+                                    break
+                                },
                             },
                             Err(error) => {
+                                let _ = snapshot.restore(self);
                                 eprintln!("[trade] no se pudo aplicar: {error}");
                                 self.reloaded_online.send_peer_message(
                                     crate::reloaded_online::PeerMessageKind::No,
