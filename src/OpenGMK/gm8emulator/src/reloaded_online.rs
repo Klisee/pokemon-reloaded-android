@@ -469,7 +469,7 @@ impl ReloadedOnline {
 
     fn connect_zibelan(&mut self, mode: OnlineMode) {
         self.stop();
-        let server = "127.0.0.1:5000".to_string();
+        let server = self.server.clone();
         let name = self.local_name.clone();
         let room = self.room_name.clone();
         let log_server = server.clone();
