@@ -33,6 +33,23 @@ fn integral(value: &TradeValue) -> Option<i64> {
     }
 }
 
+fn base_species(raw: i64) -> i64 {
+    let mut species = raw;
+    if species >= 150_000 {
+        species -= 150_000;
+    }
+    if species > 100_000 {
+        species %= 100_000;
+    }
+    // Shiny/alternate encodings add 1000 to the base species. Only strip it when
+    // the result is one of the story-gated species; real event forms (>=2000)
+    // must remain untouched.
+    if STORY_SPECIES.contains(&(species - 1000)) {
+        species -= 1000;
+    }
+    species
+}
+
 /// Conservative trade gate: no story-locked species, no Master Ball item, no
 /// Pokémon caught with a Master Ball, and levels only in the legal 1..=100 range.
 /// This does not modify story flags or the save; it only rejects the offer.
@@ -40,20 +57,26 @@ pub fn validate_offer(offer: &TradeOffer) -> Result<(), String> {
     if offer.values.len() != VALUE_COUNT {
         return Err("el intercambio no tiene 49 campos".into())
     }
-    let species = integral(&offer.values[0]).ok_or("especie de intercambio invalida")?;
-    let species = if species > 100_000 { species % 100_000 } else { species };
+    let raw_species = integral(&offer.values[0]).ok_or("especie de intercambio invalida")?;
+    let species = base_species(raw_species);
+    if species <= 0 {
+        return Err("especie de intercambio invalida".into())
+    }
     if STORY_SPECIES.contains(&species) {
-        return Err("Pokemon bloqueado: su evento de historia no esta cumplido".into())
+        return Err("Pokemon no intercambiable: contenido bloqueado por seguridad de la partida".into())
     }
     let level = integral(&offer.values[1]).ok_or("nivel de intercambio invalido")?;
-    if !(1..=100).contains(&level) {
+    let index_level = integral(&offer.values[2]).ok_or("nivel interno de intercambio invalido")?;
+    if !(1..=100).contains(&level) || !(1..=100).contains(&index_level) {
         return Err("nivel de intercambio fuera de rango".into())
     }
-    if integral(&offer.values[5]) == Some(4) {
-        return Err("Master Ball bloqueada: no se puede verificar su origen".into())
+    let item = integral(&offer.values[5]).ok_or("objeto equipado invalido")?;
+    if item == 4 {
+        return Err("Master Ball no intercambiable: retirala del Pokemon".into())
     }
-    if integral(&offer.values[32]) == Some(3) {
-        return Err("Pokemon capturado con Master Ball: bloqueado".into())
+    let ball = integral(&offer.values[32]).ok_or("ball de captura invalida")?;
+    if ball == 3 {
+        return Err("Pokemon capturado con Master Ball: no intercambiable".into())
     }
     Ok(())
 }
@@ -424,6 +447,7 @@ mod tests {
         let mut values = vec![TradeValue::Real(0.0); VALUE_COUNT];
         values[0] = TradeValue::Real(species);
         values[1] = TradeValue::Real(level);
+        values[2] = TradeValue::Real(level);
         values[5] = TradeValue::Real(item);
         values[32] = TradeValue::Real(ball);
         TradeOffer { label: "test".into(), values }
@@ -433,6 +457,24 @@ mod tests {
     fn blocks_story_locked_species() {
         assert!(validate_offer(&offer_with(517.0, 50.0, 0.0, 0.0)).is_err());
         assert!(validate_offer(&offer_with(150.0, 50.0, 0.0, 0.0)).is_err());
+    }
+
+    #[test]
+    fn blocks_shiny_and_offset_story_species() {
+        assert!(validate_offer(&offer_with(1150.0, 50.0, 0.0, 0.0)).is_err());
+        assert!(validate_offer(&offer_with(3046.0, 50.0, 0.0, 0.0)).is_err());
+        assert!(validate_offer(&offer_with(101150.0, 50.0, 0.0, 0.0)).is_err());
+        assert!(validate_offer(&offer_with(150150.0, 50.0, 0.0, 0.0)).is_err());
+    }
+
+    #[test]
+    fn blocks_text_item_and_bad_index_level() {
+        let mut offer = offer_with(448.0, 50.0, 0.0, 0.0);
+        offer.values[5] = TradeValue::Text(b"4".to_vec());
+        assert!(validate_offer(&offer).is_err());
+        let mut offer = offer_with(448.0, 50.0, 0.0, 0.0);
+        offer.values[2] = TradeValue::Real(999.0);
+        assert!(validate_offer(&offer).is_err());
     }
 
     #[test]
