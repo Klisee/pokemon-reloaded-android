@@ -718,6 +718,7 @@ impl ReloadedOnline {
         message.extend_from_slice(prefix);
         message.push(0x1f);
         message.extend_from_slice(payload);
+        eprintln!("[trade] peer enviado kind={kind:?} bytes={}", message.len());
         let result = match &self.connection {
             Some(Connection::Ready(Backend::Zibelan(client))) => client.send_message_bytes(&message),
             _ => return false,
@@ -1447,6 +1448,7 @@ impl ReloadedOnline {
                 _ => None,
             };
             if let Some(kind) = kind {
+                eprintln!("[trade] peer recibido kind={kind:?} bytes={}", bytes.len() - separator - 1);
                 if self.peer_messages.len() >= 64 {
                     self.peer_messages.pop_front();
                 }

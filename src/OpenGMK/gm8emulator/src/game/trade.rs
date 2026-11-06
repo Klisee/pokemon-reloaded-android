@@ -11,6 +11,53 @@ use super::Game;
 pub const FIELD_COUNT: usize = 28;
 pub const VALUE_COUNT: usize = 49;
 
+/// Species that the game validates against story progress on load (`DispSa`).
+/// Trading them is blocked by default: the save format has no story-flag payload,
+/// and applying one before its gate makes F3R reject the save as corrupted.
+const STORY_SPECIES: &[i64] = &[
+    144, 145, 146, 150, 151, 243, 244, 245, 249, 250, 251, 377, 378, 379, 382, 383, 384,
+    385, 386, 483, 484, 485, 486, 487, 488, 490, 491, 492, 493, 516, 517, 560, 543, 544,
+    545, 732, 726, 727, 728, 546, 733, 837, 835, 992, 480, 481, 482, 729, 730, 731, 380,
+    381, 499, 500, 489, 743, 744, 834, 836, 976, 977, 978, 979, 980, 981, 982, 983, 984,
+    985, 986, 987, 988, 989, 990, 991, 994, 2046, 2047, 2048, 2049, 2050, 2060, 2061,
+    2248, 2232, 2233, 2234, 2267, 2244, 2242, 2243, 2158, 2159, 2160, 2238, 2282, 2250,
+    2251,
+];
+
+fn integral(value: &TradeValue) -> Option<i64> {
+    match value {
+        TradeValue::Real(value) if value.is_finite() && value.fract() == 0.0 => {
+            Some(*value as i64)
+        },
+        _ => None,
+    }
+}
+
+/// Conservative trade gate: no story-locked species, no Master Ball item, no
+/// Pokémon caught with a Master Ball, and levels only in the legal 1..=100 range.
+/// This does not modify story flags or the save; it only rejects the offer.
+pub fn validate_offer(offer: &TradeOffer) -> Result<(), String> {
+    if offer.values.len() != VALUE_COUNT {
+        return Err("el intercambio no tiene 49 campos".into())
+    }
+    let species = integral(&offer.values[0]).ok_or("especie de intercambio invalida")?;
+    let species = if species > 100_000 { species % 100_000 } else { species };
+    if STORY_SPECIES.contains(&species) {
+        return Err("Pokemon bloqueado: su evento de historia no esta cumplido".into())
+    }
+    let level = integral(&offer.values[1]).ok_or("nivel de intercambio invalido")?;
+    if !(1..=100).contains(&level) {
+        return Err("nivel de intercambio fuera de rango".into())
+    }
+    if integral(&offer.values[5]) == Some(4) {
+        return Err("Master Ball bloqueada: no se puede verificar su origen".into())
+    }
+    if integral(&offer.values[32]) == Some(3) {
+        return Err("Pokemon capturado con Master Ball: bloqueado".into())
+    }
+    Ok(())
+}
+
 pub const FIELDS: [&[u8]; FIELD_COUNT] = [
     b"pkmn1",
     b"nivel1",
@@ -371,6 +418,33 @@ mod tests {
         let encoded = encode(&offer).expect("encode");
         assert_eq!(encoded.iter().filter(|byte| **byte == 0x1d).count(), VALUE_COUNT);
         assert!(encoded.ends_with(&[0x1d]));
+    }
+
+    fn offer_with(species: f64, level: f64, item: f64, ball: f64) -> TradeOffer {
+        let mut values = vec![TradeValue::Real(0.0); VALUE_COUNT];
+        values[0] = TradeValue::Real(species);
+        values[1] = TradeValue::Real(level);
+        values[5] = TradeValue::Real(item);
+        values[32] = TradeValue::Real(ball);
+        TradeOffer { label: "test".into(), values }
+    }
+
+    #[test]
+    fn blocks_story_locked_species() {
+        assert!(validate_offer(&offer_with(517.0, 50.0, 0.0, 0.0)).is_err());
+        assert!(validate_offer(&offer_with(150.0, 50.0, 0.0, 0.0)).is_err());
+    }
+
+    #[test]
+    fn blocks_master_ball_held_or_used() {
+        assert!(validate_offer(&offer_with(448.0, 50.0, 4.0, 0.0)).is_err());
+        assert!(validate_offer(&offer_with(448.0, 50.0, 0.0, 3.0)).is_err());
+    }
+
+    #[test]
+    fn allows_common_legal_level() {
+        assert!(validate_offer(&offer_with(448.0, 100.0, 0.0, 0.0)).is_ok());
+        assert!(validate_offer(&offer_with(448.0, 101.0, 0.0, 0.0)).is_err());
     }
 
     #[test]

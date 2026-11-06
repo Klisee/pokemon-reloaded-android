@@ -4213,6 +4213,7 @@ impl Game {
             self.interaction_response = Some(("No puedes intercambiar durante un combate.".into(), false));
             return
         }
+        eprintln!("[trade] inicio peer={peer} name={name}");
         self.trade = Some(trade::TradeSession::new(peer, name));
         self.interaction_menu_open = false;
         self.interaction_request = None;
@@ -4221,6 +4222,7 @@ impl Game {
     }
 
     fn cancel_trade(&mut self, message: &str) {
+        eprintln!("[trade] cancel: {message}");
         self.reloaded_online.send_peer_message(crate::reloaded_online::PeerMessageKind::No, &[]);
         self.reloaded_online.end_session();
         self.trade = None;
@@ -4241,6 +4243,12 @@ impl Game {
     }
 
     fn trade_tick(&mut self) {
+        if self.trade.is_none() {
+            return
+        }
+        // The interaction branch returns before the normal frame tick. Poll the socket here so
+        // OFFER/OK/NO are processed while the trade panel is open.
+        self.reloaded_online.tick(&self.room, &self.assets);
         let Some(mut session) = self.trade.take() else { return };
         let mut finished = false;
         while let Some(message) = self.reloaded_online.take_peer_message() {
@@ -4248,6 +4256,18 @@ impl Game {
                 crate::reloaded_online::PeerMessageKind::Offer => {
                     match trade::decode(&message.payload) {
                         Ok(offer) => {
+                            eprintln!("[trade] oferta remota label={} fields={}", offer.label, offer.values.len());
+                            if let Err(error) = trade::validate_offer(&offer) {
+                                eprintln!("[trade] oferta remota bloqueada: {error}");
+                                self.reloaded_online.send_peer_message(
+                                    crate::reloaded_online::PeerMessageKind::No,
+                                    &[],
+                                );
+                                self.reloaded_online.end_session();
+                                self.interaction_response = Some((error, false));
+                                finished = true;
+                                break
+                            }
                             session.remote = Some(offer);
                             if session.phase == trade::TradePhase::WaitingOffer {
                                 session.phase = trade::TradePhase::Confirm;
@@ -4284,31 +4304,42 @@ impl Game {
                             break
                         };
                         let snapshot = online_snapshot::OnlineSnapshot::capture(self);
+                        if let Some(handle) = self.local_player_handle() {
+                            let _ = self.run_instance_script(handle, b"GetSecurityPK");
+                            let _ = self.run_instance_script(handle, b"GetSecurityPK2");
+                        }
                         match trade::apply(self, slot, &remote) {
-                            Ok(()) => match self.save_trade() {
-                                Ok(()) => {
-                                    self.reloaded_online.end_session();
-                                    self.interaction_response = Some((
-                                        format!("Intercambio hecho. Has recibido a {}.", remote.label),
-                                        true,
-                                    ));
-                                    eprintln!("[trade] intercambio aplicado slot={slot}");
-                                    finished = true;
-                                    break
-                                },
-                                Err(error) => {
-                                    let _ = snapshot.restore(self);
-                                    eprintln!("[trade] no se pudo guardar: {error}");
-                                    self.reloaded_online.send_peer_message(
-                                        crate::reloaded_online::PeerMessageKind::No,
-                                        &[],
-                                    );
-                                    self.reloaded_online.end_session();
-                                    self.interaction_response =
-                                        Some(("No se pudo guardar el intercambio.".into(), false));
-                                    finished = true;
-                                    break
-                                },
+                            Ok(()) => {
+                                if let Some(handle) = self.local_player_handle() {
+                                    let _ = self.run_instance_script(handle, b"SecurityPK");
+                                    let _ = self.run_instance_script(handle, b"SecurityPK2");
+                                    let _ = self.run_instance_script(handle, b"NetTeamSprites");
+                                }
+                                match self.save_trade() {
+                                    Ok(()) => {
+                                        self.reloaded_online.end_session();
+                                        self.interaction_response = Some((
+                                            format!("Intercambio hecho. Has recibido a {}.", remote.label),
+                                            true,
+                                        ));
+                                        eprintln!("[trade] intercambio aplicado slot={slot}");
+                                        finished = true;
+                                        break
+                                    },
+                                    Err(error) => {
+                                        let _ = snapshot.restore(self);
+                                        eprintln!("[trade] no se pudo guardar: {error}");
+                                        self.reloaded_online.send_peer_message(
+                                            crate::reloaded_online::PeerMessageKind::No,
+                                            &[],
+                                        );
+                                        self.reloaded_online.end_session();
+                                        self.interaction_response =
+                                            Some(("No se pudo guardar el intercambio.".into(), false));
+                                        finished = true;
+                                        break
+                                    },
+                                }
                             },
                             Err(error) => {
                                 let _ = snapshot.restore(self);
@@ -4327,6 +4358,7 @@ impl Game {
                     }
                 },
                 crate::reloaded_online::PeerMessageKind::No => {
+                    eprintln!("[trade] NO recibido");
                     self.reloaded_online.end_session();
                     self.interaction_response = Some(("El rival cancelo el intercambio.".into(), false));
                     finished = true;
@@ -4350,7 +4382,8 @@ impl Game {
             self.cancel_trade("El combate interrumpio el intercambio.");
             return
         }
-        let mut finished = false;
+        let mouse = self.input.mouse_check_button_pressed(1);
+        let (mouse_x, mouse_y) = (self.input.mouse_x(), self.input.mouse_y());
         match session.phase {
             trade::TradePhase::Pick => {
                 let slots = trade::occupied_slots(self);
@@ -4365,14 +4398,24 @@ impl Game {
                 if self.input.keyboard_check_pressed(input::Button::DownArrow as u8) {
                     session.selection = (session.selection + 1) % option_count;
                 }
+                let mut activate = self.input.keyboard_check_pressed(input::Button::Return as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Space as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Z as u8);
+                if mouse {
+                    for index in 0..option_count {
+                        let (x1, y1, x2, y2) = self.interaction_row(1 + index);
+                        if mouse_x >= x1 && mouse_x <= x2 && mouse_y >= y1 && mouse_y <= y2 {
+                            session.selection = index;
+                            activate = true;
+                            break
+                        }
+                    }
+                }
                 if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
                     self.cancel_trade("Has cancelado el intercambio.");
                     return
                 }
-                if self.input.keyboard_check_pressed(input::Button::Return as u8)
-                    || self.input.keyboard_check_pressed(input::Button::Space as u8)
-                    || self.input.keyboard_check_pressed(input::Button::Z as u8)
-                {
+                if activate {
                     if session.selection >= slots.len() {
                         self.cancel_trade("Has cancelado el intercambio.");
                         return
@@ -4380,10 +4423,17 @@ impl Game {
                     let slot = slots[session.selection];
                     match trade::capture(self, slot) {
                         Ok(offer) => {
+                            if let Err(error) = trade::validate_offer(&offer) {
+                                self.cancel_trade(&error);
+                                return
+                            }
                             let mut payload = offer.label.as_bytes().to_vec();
                             payload.push(0x1e);
                             match trade::encode(&offer) {
-                                Ok(packed) => payload.extend_from_slice(&packed),
+                                Ok(packed) => {
+                                    payload.extend_from_slice(&packed);
+                                    eprintln!("[trade] oferta local slot={slot} label={} bytes={}", offer.label, packed.len());
+                                },
                                 Err(error) => {
                                     self.cancel_trade(&format!("No se pudo preparar la oferta: {error}"));
                                     return
@@ -4415,7 +4465,14 @@ impl Game {
                 }
             },
             trade::TradePhase::WaitingOffer | trade::TradePhase::WaitingOk => {
-                if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
+                let mut cancel = self.input.keyboard_check_pressed(input::Button::Escape as u8);
+                if mouse {
+                    let (x1, y1, x2, y2) = self.interaction_row(2);
+                    if mouse_x >= x1 && mouse_x <= x2 && mouse_y >= y1 && mouse_y <= y2 {
+                        cancel = true;
+                    }
+                }
+                if cancel {
                     self.cancel_trade("Has cancelado el intercambio.");
                     return
                 }
@@ -4431,19 +4488,30 @@ impl Game {
                 {
                     session.selection = 1;
                 }
+                let mut activate = self.input.keyboard_check_pressed(input::Button::Return as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Space as u8)
+                    || self.input.keyboard_check_pressed(input::Button::Z as u8);
+                if mouse {
+                    for (index, row) in [(0usize, 2usize), (1, 3)] {
+                        let (x1, y1, x2, y2) = self.interaction_row(row);
+                        if mouse_x >= x1 && mouse_x <= x2 && mouse_y >= y1 && mouse_y <= y2 {
+                            session.selection = index;
+                            activate = true;
+                            break
+                        }
+                    }
+                }
                 if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
                     self.cancel_trade("Has cancelado el intercambio.");
                     return
                 }
-                if self.input.keyboard_check_pressed(input::Button::Return as u8)
-                    || self.input.keyboard_check_pressed(input::Button::Space as u8)
-                    || self.input.keyboard_check_pressed(input::Button::Z as u8)
-                {
+                if activate {
                     if session.selection == 0 {
                         if self.reloaded_online.send_peer_message(
                             crate::reloaded_online::PeerMessageKind::Ok,
                             &[],
                         ) {
+                            eprintln!("[trade] OK enviado; esperando OK del rival");
                             session.phase = trade::TradePhase::WaitingOk;
                             session.message = "Esperando la confirmacion del rival...".into();
                         } else {
@@ -4457,9 +4525,7 @@ impl Game {
                 }
             },
         }
-        if !finished {
-            self.trade = Some(session);
-        }
+        self.trade = Some(session);
     }
 
     fn interaction_any_open(&self) -> bool {
