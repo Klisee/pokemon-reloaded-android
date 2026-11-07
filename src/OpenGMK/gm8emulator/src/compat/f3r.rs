@@ -10,7 +10,7 @@
 
 /// Manifest revision. Increment when native ids, names, or the supported build
 /// family change.
-pub const MANIFEST_VERSION: u32 = 2;
+pub const MANIFEST_VERSION: u32 = 3;
 
 /// Native build family this manifest was written for.
 pub const NATIVE_BUILD_FAMILY: &str = "Pokemon Reloaded The Last Beta 1.9.2.2";
@@ -103,7 +103,13 @@ const fn object_aliased(
     }
 }
 
-const fn script(id: Option<i32>, name: &'static str, key: &'static str, role: &'static str) -> Entry {
+const fn script_status(
+    id: Option<i32>,
+    name: &'static str,
+    key: &'static str,
+    role: &'static str,
+    status: Status,
+) -> Entry {
     Entry {
         kind: Kind::Script,
         native_id: id,
@@ -111,8 +117,12 @@ const fn script(id: Option<i32>, name: &'static str, key: &'static str, role: &'
         content_key: key,
         aliases: &[],
         role: Some(role),
-        status: Status::Supported,
+        status,
     }
+}
+
+const fn script(id: Option<i32>, name: &'static str, key: &'static str, role: &'static str) -> Entry {
+    script_status(id, name, key, role, Status::Supported)
 }
 
 const fn global(name: &'static str, key: &'static str, role: &'static str) -> Entry {
@@ -179,8 +189,8 @@ pub mod room {
     pub const BATTLE: i32 = 191;
     pub const PUZZLE: i32 = 202;
     pub const MULTIPLAYER_MENU: i32 = 461;
-    pub const CREDITS: i32 = 465;
-    pub const OPTIONS: i32 = 466;
+    pub const OPTIONS: i32 = 465;
+    pub const CREDITS: i32 = 466;
     pub const LAB_FOLLOWUP: i32 = 527;
     pub const LAB_INTRO: i32 = 528;
     pub const BATTLE_LAVA: i32 = 709;
@@ -228,6 +238,7 @@ pub mod object {
     pub const PLAYER: i32 = 14;
     pub const VARIABLES: i32 = 18;
     pub const EXCLAMATION: i32 = 95;
+    pub const INICIO_CONTROL: i32 = 98;
     pub const MULTIPLAYER: i32 = 1172;
     /// Legacy alias for the multiplayer controller object.
     pub const PLAYER_TWO: i32 = MULTIPLAYER;
@@ -470,13 +481,43 @@ pub mod player {
 }
 
 pub mod format {
-    //! Sizes and strides of the native party/trade data layout.
+    //! Sizes, strides and field positions of the native party/trade layout.
 
     pub const PARTY_SIZE: usize = 6;
     pub const MOVE_COUNT: usize = 4;
     pub const INFO_FIELDS: usize = 17;
     pub const TEAM_INFO_LINES: usize = 16;
     pub const PARTY_ARRAY_STRIDE: u32 = 32_000;
+
+    pub const PARTY_SCALAR_COUNT: usize = 28;
+    pub const FIELD_COUNT: usize = 49;
+
+    pub const SPECIES_FIELD: usize = 0;
+    pub const LEVEL_FIELD: usize = 1;
+    pub const INDEX_SPECIES_FIELD: usize = 7;
+    pub const SELUE_SCALAR_FIELD: usize = 9;
+    pub const OT_INFO_FIELD: usize = 4;
+    pub const NICKNAME_INFO_FIELD: usize = 5;
+    pub const SELUE_INFO_FIELD: usize = 14;
+}
+
+pub mod trade {
+    //! Wire format shared by the host adapter and the trade codec.
+
+    pub const FIELD_TERMINATOR: u8 = 0x1d;
+    pub const LABEL_SEPARATOR: u8 = 0x1e;
+    pub const ENVELOPE_SEPARATOR: u8 = 0x1f;
+    pub const ENVELOPE_PREFIX: &[u8] = b"OFFER";
+
+    pub const MAX_MESSAGE_LEN: usize = 65_536;
+    pub const HARD_MESSAGE_LIMIT: usize = 1_048_576;
+    pub const MAX_LABEL_LEN: usize = 256;
+    pub const MAX_TEXT_LEN: usize = 256;
+    pub const MAX_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
+
+    pub const MASTER_BALL_ITEM_ID: u64 = 4;
+    pub const MASTER_BALL_MARKER: u64 = 3;
+    pub const MASTER_BALL_STORY_CAP: u64 = 2;
 }
 
 pub mod team {
@@ -505,6 +546,14 @@ pub mod world {
     pub const SHINY_OVERWORLD_SPRITE_DIR: &str = "pkmn_shiny";
     pub const SHINY_EGG_SPRITE_DIR: &str = "huevo_shiny";
     pub const SPRITE_EXT: &str = "gif";
+
+    /// Shiny bands used by the Android party picker. The clean-room world model
+    /// covers a wider id space; the picker only ever shows these roster bands.
+    pub const SHINY_SPRITE_BANDS: [(i32, i32); 2] = [(1000, 2000), (3000, 4000)];
+
+    pub fn is_shiny_sprite(value: i32) -> bool {
+        SHINY_SPRITE_BANDS.iter().any(|&(first, last)| (first..=last).contains(&value))
+    }
 }
 
 pub mod save {
@@ -523,6 +572,13 @@ pub mod save {
     pub const EXT_NFO: &str = "nfo";
     pub const EXT_DATA: &str = "data";
     pub const EXTENSIONS: [&str; 3] = [EXT_SAVC, EXT_NFO, EXT_DATA];
+
+    pub const EXT_SAVB: &str = "savb";
+    pub const EXT_SAV: &str = "sav";
+    pub const LEGACY_EXTENSIONS: [&str; 2] = [EXT_SAVB, EXT_SAV];
+
+    pub const BACKUP_INFIX: &str = "_bk";
+    pub const TEMP_INFIX: &str = "_temp";
 
     pub const ONLINE_EXT: &str = "online";
     pub const ONLINE_SUFFIX: &str = ".online";
@@ -543,12 +599,28 @@ pub mod save {
         format!("{}.{}", slot_stem(slot), extension)
     }
 
+    pub fn backup_file_name(slot: i32, extension: &str) -> String {
+        format!("{}{}.{}", slot_stem(slot), BACKUP_INFIX, extension)
+    }
+
+    pub fn restore_temp_file_name(slot: i32, extension: &str) -> String {
+        format!("{}{}.{}", slot_stem(slot), TEMP_INFIX, extension)
+    }
+
     pub fn is_save_extension(extension: &str) -> bool {
         EXTENSIONS.contains(&extension)
     }
 
+    pub fn is_legacy_save_extension(extension: &str) -> bool {
+        LEGACY_EXTENSIONS.contains(&extension)
+    }
+
     pub fn is_save_path(normalized: &str) -> bool {
         EXTENSIONS.iter().any(|extension| normalized.ends_with(&format!(".{extension}")))
+    }
+
+    pub fn is_legacy_save_path(normalized: &str) -> bool {
+        LEGACY_EXTENSIONS.iter().any(|extension| normalized.ends_with(&format!(".{extension}")))
     }
 
     pub fn is_online_path(normalized: &str) -> bool {
@@ -593,7 +665,7 @@ pub const ENTRIES: &[Entry] = &[
         "multiplayer-controller",
         &["object.player-two"],
     ),
-    object(None, "InicioControl", "object.inicio-control", "title-controller"),
+    object(Some(object::INICIO_CONTROL), "InicioControl", "object.inicio-control", "title-controller"),
     script(Some(script::ADJUSTMENTS_ROOM), "AdjustmentsRoom", "script.room-adjustment", "room-adjustment"),
     script(Some(script::CARGANDO_EQUIPO), "CargandoEquipo", "script.team-load", "team-load"),
     script(Some(script::EXECUTE_FILE), "execute_file", "script.execute-file", "file"),
@@ -633,7 +705,7 @@ pub const ENTRIES: &[Entry] = &[
     script(None, "GetSecurityPK2", "script.security-pk2.get", "trade"),
     script(None, "SecurityPK", "script.security-pk.apply", "trade"),
     script(None, "SecurityPK2", "script.security-pk2.apply", "trade"),
-    script(None, "NetTeamSprites", "script.net-team-sprites", "trade"),
+    script_status(None, "NetTeamSprites", "script.net-team-sprites", "trade", Status::Unsupported),
     global("actual1", "global.actual1", "battle"),
     global("actual2", "global.actual2", "battle"),
     global("apodoName", "global.apodo-name", "player"),
@@ -730,8 +802,14 @@ pub const ENTRIES: &[Entry] = &[
     save_path("data/partidas/reloaded<N>.savc", "save.slot.savc", "save-slot"),
     save_path("data/partidas/reloaded<N>.nfo", "save.slot.nfo", "save-summary"),
     save_path("data/partidas/reloaded<N>.data", "save.slot.data", "save-sidecar"),
+    save_path("data/partidas/reloaded<N>.savb", "save.slot.savb", "legacy-save"),
+    save_path("data/partidas/reloaded<N>.sav", "save.slot.sav", "legacy-save"),
+    save_path("data/partidas/reloaded<N>_bk.<ext>", "save.slot.backup", "save-backup"),
+    save_path("data/partidas/reloaded<N>_temp.<ext>", "save.slot.restore-temp", "save-restore-temp"),
     save_path("data/partidas/reloaded<N>.savc.online", "save.online-overlay", "save-overlay"),
     save_path("data/equipos/<name>.TEAM", "save.team-file", "team"),
+    save_path("data/char_custom/<character>.bmp", "world.custom-character", "custom-character"),
+    save_path("LogBattle.txt", "save.log-battle", "battle-log"),
     save_path("data/pkmnbattle/P<id>_<slot>.gmspr", "world.battle-sprite", "battle-sprite"),
     save_path("data/pkmnbattle/P<id>_<slot>_ALT.gmspr", "world.battle-sprite-alt", "battle-sprite"),
     save_path("data/pkmn/<id>.gif", "world.overworld-sprite", "overworld-sprite"),
@@ -851,15 +929,131 @@ pub fn entry(content_key: &str) -> Option<&'static Entry> {
         .find(|entry| entry.content_key == content_key || entry.aliases.contains(&content_key))
 }
 
-/// Finds a manifest entry by native namespace, id, or name.
+/// Finds a manifest entry by native namespace, id, and name. When an id is
+/// supplied the native name must match too, so a stale id in core code cannot
+/// silently resolve to a different asset.
 pub fn native(kind: Kind, id: Option<i32>, name: &str) -> Option<&'static Entry> {
     ENTRIES.iter().find(|entry| {
         entry.kind == kind
+            && entry.native_name == name
             && match id {
                 Some(id) => entry.native_id == Some(id),
-                None => entry.native_name == name,
+                None => true,
             }
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManifestCounts {
+    pub rooms: usize,
+    pub objects: usize,
+    pub scripts: usize,
+    pub globals: usize,
+    pub fields: usize,
+    pub sprites: usize,
+    pub save_paths: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManifestError {
+    BuildMismatch,
+    DeclaredCount,
+    EmptyField,
+    PlaceholderName,
+    MissingRole,
+    DuplicateKey,
+    DuplicateAlias,
+    AliasCollision,
+    DuplicateNativeId,
+    DuplicateNativeName,
+}
+
+/// Counts the manifest entries of each namespace.
+pub fn entry_counts() -> ManifestCounts {
+    let mut counts =
+        ManifestCounts { rooms: 0, objects: 0, scripts: 0, globals: 0, fields: 0, sprites: 0, save_paths: 0 };
+    for entry in ENTRIES {
+        match entry.kind {
+            Kind::Room => counts.rooms += 1,
+            Kind::Object => counts.objects += 1,
+            Kind::Script => counts.scripts += 1,
+            Kind::Global => counts.globals += 1,
+            Kind::Field => counts.fields += 1,
+            Kind::Sprite => counts.sprites += 1,
+            Kind::SavePath => counts.save_paths += 1,
+        }
+    }
+    counts
+}
+
+/// Checks the manifest against the declared build family and its own integrity:
+/// no namespace exceeds the declared native build, every namespace is
+/// represented, keys/aliases/native identifiers are unique, and every entry has
+/// an exact name, key and role.
+pub fn validate() -> Result<ManifestCounts, ManifestError> {
+    use std::collections::HashSet;
+
+    if BUILD.manifest != MANIFEST_VERSION || BUILD.family.is_empty() || BUILD.stamp.is_empty() {
+        return Err(ManifestError::BuildMismatch)
+    }
+
+    let counts = entry_counts();
+    if counts.rooms == 0
+        || counts.objects == 0
+        || counts.scripts == 0
+        || counts.globals == 0
+        || counts.fields == 0
+        || counts.sprites == 0
+        || counts.save_paths == 0
+        || counts.rooms as u32 > BUILD.rooms
+        || counts.objects as u32 > BUILD.objects
+        || counts.scripts as u32 > BUILD.scripts
+        || counts.globals as u32 > BUILD.globals
+        || counts.save_paths as u32 > BUILD.save_slots
+    {
+        return Err(ManifestError::DeclaredCount)
+    }
+
+    let mut keys = HashSet::new();
+    let mut aliases = HashSet::new();
+    let mut native_ids = HashSet::new();
+    let mut native_names = HashSet::new();
+    for entry in ENTRIES {
+        if entry.native_name.is_empty() || entry.content_key.is_empty() || entry.role.is_none() {
+            return Err(ManifestError::EmptyField)
+        }
+        if entry.native_name.starts_with("unknown#") {
+            return Err(ManifestError::PlaceholderName)
+        }
+        if !keys.insert(entry.content_key) {
+            return Err(ManifestError::DuplicateKey)
+        }
+        for alias in entry.aliases {
+            if alias.is_empty() {
+                return Err(ManifestError::EmptyField)
+            }
+            if !aliases.insert(*alias) {
+                return Err(ManifestError::DuplicateAlias)
+            }
+        }
+        if let Some(id) = entry.native_id {
+            if !native_ids.insert((entry.kind, id)) {
+                return Err(ManifestError::DuplicateNativeId)
+            }
+        }
+        if !native_names.insert((entry.kind, entry.native_name)) {
+            return Err(ManifestError::DuplicateNativeName)
+        }
+    }
+    for entry in ENTRIES {
+        for alias in entry.aliases {
+            if keys.contains(alias) {
+                return Err(ManifestError::AliasCollision)
+            }
+        }
+    }
+
+    Ok(counts)
 }
 
 #[cfg(test)]
@@ -871,7 +1065,96 @@ mod tests {
     fn manifest_digest_is_stable() {
         assert_eq!(stable_digest(), MANIFEST_DIGEST);
         assert_eq!(digest(), MANIFEST_DIGEST);
-        assert_eq!(MANIFEST_DIGEST, 0xba30_8794_d007_a056);
+        assert_eq!(MANIFEST_DIGEST, 0x9791_9649_3608_a887);
+    }
+
+    #[test]
+    fn manifest_validates_against_declared_build() {
+        let counts = validate().expect("manifest must validate");
+        assert_eq!(
+            counts,
+            ManifestCounts {
+                rooms: 19,
+                objects: 10,
+                scripts: 40,
+                globals: 69,
+                fields: 20,
+                sprites: 2,
+                save_paths: 19,
+            }
+        );
+        assert_eq!(counts.rooms as u32, 19);
+        assert!(counts.rooms as u32 <= BUILD.rooms);
+        assert!(counts.objects as u32 <= BUILD.objects);
+        assert!(counts.scripts as u32 <= BUILD.scripts);
+        assert!(counts.globals as u32 <= BUILD.globals);
+        assert!(counts.save_paths as u32 <= BUILD.save_slots);
+    }
+
+    #[test]
+    fn manifest_declares_corrected_title_and_menu_ids() {
+        assert_eq!(
+            native(Kind::Object, Some(98), "InicioControl").map(|entry| entry.content_key),
+            Some("object.inicio-control")
+        );
+        assert_eq!(
+            native(Kind::Room, Some(465), "OptionsROOM").map(|entry| entry.content_key),
+            Some("room.options")
+        );
+        assert_eq!(
+            native(Kind::Room, Some(466), "CreditosInicioScreen").map(|entry| entry.content_key),
+            Some("room.credits")
+        );
+        assert!(native(Kind::Room, Some(465), "CreditosInicioScreen").is_none());
+        assert!(native(Kind::Room, Some(466), "OptionsROOM").is_none());
+    }
+
+    #[test]
+    fn manifest_marks_net_team_sprites_unsupported() {
+        let entry = native(Kind::Script, None, "NetTeamSprites").expect("NetTeamSprites entry");
+        assert_eq!(entry.status, Status::Unsupported);
+        assert_eq!(entry.content_key, "script.net-team-sprites");
+    }
+
+    #[test]
+    fn manifest_declares_legacy_save_paths() {
+        for key in [
+            "save.slot.savb",
+            "save.slot.sav",
+            "save.slot.backup",
+            "save.slot.restore-temp",
+            "world.custom-character",
+            "save.log-battle",
+        ] {
+            assert!(entry(key).is_some(), "missing legacy path {key}");
+        }
+        assert_eq!(save::backup_file_name(7, save::EXT_SAVC), "reloaded7_bk.savc");
+        assert_eq!(save::restore_temp_file_name(7, save::EXT_NFO), "reloaded7_temp.nfo");
+        assert!(save::is_legacy_save_extension(save::EXT_SAVB));
+        assert!(save::is_legacy_save_extension(save::EXT_SAV));
+        assert!(!save::is_legacy_save_extension(save::EXT_SAVC));
+        assert!(save::is_legacy_save_path("data/partidas/reloaded1.sav"));
+        assert!(!save::is_legacy_save_path("data/partidas/reloaded1.savc"));
+    }
+
+    #[test]
+    fn native_requires_matching_id_and_name() {
+        assert!(native(Kind::Object, Some(1172), "MULTIPLAYER").is_some());
+        assert!(native(Kind::Object, Some(1172), "obj_Prota").is_none());
+        assert!(native(Kind::Object, Some(14), "obj_Prota").is_some());
+        assert!(native(Kind::Object, Some(99), "obj_Prota").is_none());
+        assert!(native(Kind::Object, None, "obj_Prota").is_some());
+        assert!(native(Kind::Object, None, "missing").is_none());
+    }
+
+    #[test]
+    fn manifest_alias_resolution_is_unambiguous() {
+        assert_eq!(
+            entry("object.player-two").map(|entry| entry.content_key),
+            Some("object.multiplayer")
+        );
+        assert_eq!(entry("object.multiplayer").map(|entry| entry.content_key), Some("object.multiplayer"));
+        assert!(validate().is_ok());
     }
 
     #[test]
@@ -910,6 +1193,8 @@ mod tests {
     fn save_slot_layout_is_manifest_owned() {
         assert_eq!(save::slot_stem(9), format!("{}{}", save::SLOT_PREFIX, 9));
         assert_eq!(save::slot_file_name(9, save::EXT_SAVC), "reloaded9.savc");
+        assert_eq!(save::backup_file_name(9, save::EXT_SAVC), "reloaded9_bk.savc");
+        assert_eq!(save::restore_temp_file_name(9, save::EXT_SAVC), "reloaded9_temp.savc");
         assert!(save::is_save_path("data/partidas/reloaded9.savc"));
         assert!(!save::is_save_path("data/partidas/reloaded9.txt"));
     }
@@ -958,9 +1243,21 @@ mod tests {
             assert!(entry(key).is_some(), "missing path entry {key}");
         }
         assert_eq!(
-            native(Kind::Sprite, Some(player::DEFAULT_SPRITE), "").map(|entry| entry.content_key),
+            native(Kind::Sprite, Some(player::DEFAULT_SPRITE), "Mark2_D").map(|entry| entry.content_key),
             Some("sprite.player-default")
         );
+    }
+
+    #[test]
+    fn shiny_picker_bands_match_native_behavior() {
+        assert!(!world::is_shiny_sprite(999));
+        assert!(world::is_shiny_sprite(1000));
+        assert!(world::is_shiny_sprite(2000));
+        assert!(!world::is_shiny_sprite(2001));
+        assert!(!world::is_shiny_sprite(2999));
+        assert!(world::is_shiny_sprite(3000));
+        assert!(world::is_shiny_sprite(4000));
+        assert!(!world::is_shiny_sprite(4001));
     }
 
     #[test]

@@ -7220,7 +7220,7 @@ impl Game {
     pub fn get_open_filename(&mut self, args: &[Value]) -> gml::Result<Value> {
         let _ = expect_args!(args, [string, string])?;
         // No native file picker in this port. For the local VS, auto-pick the .TEAM files the game
-        // saved in data/equipos: the first call gets the first team, the second gets the next.
+        // saved in the manifest team directory: the first call gets the first team, the second gets the next.
         let filter = match args.first() {
             Some(Value::Str(text)) => text.to_string().to_ascii_lowercase(),
             _ => String::new(),

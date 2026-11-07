@@ -3529,7 +3529,7 @@ impl Game {
             if let Some(handle) = self.find_object_instance(f3r::object::VARIABLES) {
                 self.set_instance_text(handle, f3r::field::FRASE_PROPIA, &frase);
             }
-        } else if let Some(handle) = handle.or_else(|| self.find_object_instance(f3r::object::PLAYER_TWO)) {
+        } else if let Some(handle) = handle.or_else(|| self.find_object_instance(f3r::object::MULTIPLAYER)) {
             self.set_instance_text(handle, f3r::field::PROTANAME2, &name);
             self.set_instance_text(handle, f3r::field::ID2, format!("{:05}", prota_id).as_bytes());
             self.set_instance_number(handle, f3r::field::INDEX2, f64::from(prota_index));

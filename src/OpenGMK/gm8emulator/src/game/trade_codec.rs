@@ -1,19 +1,21 @@
-pub const FIELD_COUNT: usize = 49;
-pub const PARTY_SCALAR_COUNT: usize = 28;
-pub const MOVE_COUNT: usize = 4;
-pub const INFO_COUNT: usize = 17;
-pub const FIELD_TERMINATOR: u8 = 0x1d;
-pub const LABEL_SEPARATOR: u8 = 0x1e;
-pub const ENVELOPE_SEPARATOR: u8 = 0x1f;
-pub const ENVELOPE_PREFIX: &[u8] = b"OFFER";
-pub const MAX_MESSAGE_LEN: usize = 65_536;
-pub const HARD_MESSAGE_LIMIT: usize = 1_048_576;
-pub const MAX_LABEL_LEN: usize = 256;
-pub const MAX_TEXT_LEN: usize = 256;
-pub const MAX_SAFE_INTEGER: u64 = (1u64 << 53) - 1;
-pub const MASTER_BALL_ITEM_ID: u64 = 4;
-pub const MASTER_BALL_MARKER: u64 = 3;
-pub const MASTER_BALL_STORY_CAP: u64 = 2;
+use crate::compat::f3r;
+
+pub const FIELD_COUNT: usize = f3r::format::FIELD_COUNT;
+pub const PARTY_SCALAR_COUNT: usize = f3r::format::PARTY_SCALAR_COUNT;
+pub const MOVE_COUNT: usize = f3r::format::MOVE_COUNT;
+pub const INFO_COUNT: usize = f3r::format::INFO_FIELDS;
+pub const FIELD_TERMINATOR: u8 = f3r::trade::FIELD_TERMINATOR;
+pub const LABEL_SEPARATOR: u8 = f3r::trade::LABEL_SEPARATOR;
+pub const ENVELOPE_SEPARATOR: u8 = f3r::trade::ENVELOPE_SEPARATOR;
+pub const ENVELOPE_PREFIX: &[u8] = f3r::trade::ENVELOPE_PREFIX;
+pub const MAX_MESSAGE_LEN: usize = f3r::trade::MAX_MESSAGE_LEN;
+pub const HARD_MESSAGE_LIMIT: usize = f3r::trade::HARD_MESSAGE_LIMIT;
+pub const MAX_LABEL_LEN: usize = f3r::trade::MAX_LABEL_LEN;
+pub const MAX_TEXT_LEN: usize = f3r::trade::MAX_TEXT_LEN;
+pub const MAX_SAFE_INTEGER: u64 = f3r::trade::MAX_SAFE_INTEGER;
+pub const MASTER_BALL_ITEM_ID: u64 = f3r::trade::MASTER_BALL_ITEM_ID;
+pub const MASTER_BALL_MARKER: u64 = f3r::trade::MASTER_BALL_MARKER;
+pub const MASTER_BALL_STORY_CAP: u64 = f3r::trade::MASTER_BALL_STORY_CAP;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {

@@ -1366,7 +1366,7 @@ unsafe fn upload_party(gl: &gl::Gl, texture: GLuint, species: [i32; crate::touch
         if value == 0 {
             continue
         }
-        let shiny = (1000..=2000).contains(&value) || (3000..=4000).contains(&value);
+        let shiny = f3r::world::is_shiny_sprite(value);
         let folder = if shiny {
             f3r::world::SHINY_OVERWORLD_SPRITE_DIR
         } else {

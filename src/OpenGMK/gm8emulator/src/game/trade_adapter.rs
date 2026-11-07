@@ -46,38 +46,38 @@ impl TradeHost for Game {
     }
 }
 
-pub const FIELD_COUNT: usize = 28;
-pub const VALUE_COUNT: usize = 49;
+pub const FIELD_COUNT: usize = f3r::format::PARTY_SCALAR_COUNT;
+pub const VALUE_COUNT: usize = f3r::format::FIELD_COUNT;
 
 pub const FIELDS: [&[u8]; FIELD_COUNT] = [
-    b"pkmn1",
-    b"nivel1",
-    b"indexnivel",
-    b"exp1",
-    b"IV",
-    b"objpoke1",
-    b"pkmnsex1",
-    b"indexpkmn",
-    b"extraInfo",
-    b"selue_pk1",
-    b"PP_1",
-    b"PS_1",
-    b"STD1",
-    b"MAX_PP_1",
-    b"MAX_PS_1",
-    b"XTRA_PS_1",
-    b"atk1",
-    b"def1",
-    b"vel1",
-    b"atk_sp1",
-    b"def_sp1",
-    b"prec1",
-    b"num_attack1",
-    b"tipoA1",
-    b"tipoB1",
-    b"tipoC1",
-    b"volador1",
-    b"fantasma1",
+    f3r::global::PKMN1,
+    f3r::global::NIVEL1,
+    f3r::global::INDEXNIVEL,
+    f3r::global::EXP1,
+    f3r::global::IV,
+    f3r::global::OBJPOKE1,
+    f3r::global::PKMNSEX1,
+    f3r::global::INDEXPKMN,
+    f3r::global::EXTRA_INFO,
+    f3r::global::SELUE_PK1,
+    f3r::global::PP_1,
+    f3r::global::PS_1,
+    f3r::global::STD1,
+    f3r::global::MAX_PP_1,
+    f3r::global::MAX_PS_1,
+    f3r::global::XTRA_PS_1,
+    f3r::global::ATK1,
+    f3r::global::DEF1,
+    f3r::global::VEL1,
+    f3r::global::ATK_SP1,
+    f3r::global::DEF_SP1,
+    f3r::global::PREC1,
+    f3r::global::NUM_ATTACK1,
+    f3r::global::TIPO_A1,
+    f3r::global::TIPO_B1,
+    f3r::global::TIPO_C1,
+    f3r::global::VOLADOR1,
+    f3r::global::FANTASMA1,
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -240,52 +240,55 @@ fn capture_with<H: TradeHost + ?Sized>(game: &H, slot: u8) -> Result<TradeOffer,
     let mut values = Vec::with_capacity(VALUE_COUNT);
     for (index, name) in FIELDS.iter().enumerate() {
         let mut value = value_from_option(game.trade_global_value(name, u32::from(slot)), false);
-        if index == 0 || index == 7 {
+        if index == f3r::format::SPECIES_FIELD || index == f3r::format::INDEX_SPECIES_FIELD {
             if let TradeValue::Real(ref mut value) = value {
                 *value = codec::canonical_species(*value)
                     .map_err(|error| error.code().to_string())? as f64;
             }
         }
-        if index == 9 {
+        if index == f3r::format::SELUE_SCALAR_FIELD {
             if let TradeValue::Real(ref mut value) = value {
                 *value = selue_transport(*value, mask)?;
             }
         }
         values.push(value);
     }
-    for move_index in 1..=4u32 {
+    for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
         values.push(value_from_option(
             game.trade_global_value(f3r::global::ATTACK1, u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + move_index),
             false,
         ));
     }
-    for info_index in 0..=16u32 {
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
         let mut value = value_from_option(
             game.trade_global_value(f3r::global::INFO, u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + info_index),
-            info_index == 4 || info_index == 5,
+            info_index == f3r::format::OT_INFO_FIELD as u32
+                || info_index == f3r::format::NICKNAME_INFO_FIELD as u32,
         );
-        if info_index == 4 {
+        if info_index == f3r::format::OT_INFO_FIELD as u32 {
             let name = say_my_name(game);
             match &value {
                 TradeValue::Text(text) if !text.is_empty() => {},
                 _ => value = TradeValue::Text(name),
             }
         }
-        if info_index == 5 && !matches!(value, TradeValue::Text(_)) {
+        if info_index == f3r::format::NICKNAME_INFO_FIELD as u32 && !matches!(value, TradeValue::Text(_)) {
             value = TradeValue::Text(Vec::new());
         }
-        if info_index == 14 {
+        if info_index == f3r::format::SELUE_INFO_FIELD as u32 {
             if let TradeValue::Real(ref mut value) = value {
                 *value = selue_transport(*value, mask)?;
             }
         }
         values.push(value);
     }
-    let nickname = match &values[28 + 4 + 5] {
+    let nickname = match &values
+        [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::NICKNAME_INFO_FIELD]
+    {
         TradeValue::Text(value) if !value.is_empty() => String::from_utf8_lossy(value).into_owned(),
         _ => String::new(),
     };
-    let level = real(&values[1]);
+    let level = real(&values[f3r::format::LEVEL_FIELD]);
     let label = if nickname.is_empty() {
         format!("Pokemon Nv. {level:.0}")
     } else {
@@ -316,20 +319,23 @@ fn apply_with<H: TradeHost + ?Sized>(
     codec::validate_safety(&codec_offer, None).map_err(|error| error.code().to_string())?;
     let mask = mask(game)?;
 
-    let species = codec::canonical_species(number(&offer.values[0])?)
+    let species = codec::canonical_species(number(&offer.values[f3r::format::SPECIES_FIELD])?)
         .map_err(|error| error.code().to_string())?;
-    let index_species = codec::canonical_species(number(&offer.values[7])?)
+    let index_species = codec::canonical_species(number(&offer.values[f3r::format::INDEX_SPECIES_FIELD])?)
         .map_err(|error| error.code().to_string())?;
     if species != index_species {
         return Err("E_SPECIES_MISMATCH".into())
     }
 
-    let mut scalars: Vec<TradeValue> = offer.values[..28].to_vec();
-    scalars[0] = TradeValue::Real(species as f64);
-    scalars[7] = TradeValue::Real(index_species as f64);
-    scalars[9] = TradeValue::Real(selue_transport(number(&scalars[9])?, mask)?);
+    let mut scalars: Vec<TradeValue> = offer.values[..f3r::format::PARTY_SCALAR_COUNT].to_vec();
+    scalars[f3r::format::SPECIES_FIELD] = TradeValue::Real(species as f64);
+    scalars[f3r::format::INDEX_SPECIES_FIELD] = TradeValue::Real(index_species as f64);
+    scalars[f3r::format::SELUE_SCALAR_FIELD] =
+        TradeValue::Real(selue_transport(number(&scalars[f3r::format::SELUE_SCALAR_FIELD])?, mask)?);
 
-    let mut infos: Vec<TradeValue> = offer.values[32..49].to_vec();
+    let mut infos: Vec<TradeValue> = offer.values
+        [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT..f3r::format::FIELD_COUNT]
+        .to_vec();
     let mut names = vec![
         say_my_name(game),
         game.trade_global_text(f3r::global::PROTANAME).unwrap_or_default(),
@@ -337,13 +343,13 @@ fn apply_with<H: TradeHost + ?Sized>(
     ];
     names.sort();
     names.dedup();
-    for info_index in 0..=16u32 {
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
         let index = info_index as usize;
         let mut value = infos[index].clone();
-        if info_index == 14 {
+        if info_index == f3r::format::SELUE_INFO_FIELD as u32 {
             value = TradeValue::Real(selue_transport(number(&value)?, mask)?);
         }
-        if info_index == 4 {
+        if info_index == f3r::format::OT_INFO_FIELD as u32 {
             value = match value {
                 TradeValue::Text(text)
                     if !text.is_empty() && !names.iter().any(|name| name == &text) =>
@@ -359,15 +365,15 @@ fn apply_with<H: TradeHost + ?Sized>(
     for (index, name) in FIELDS.iter().enumerate() {
         set_value(game, name, u32::from(slot), scalars[index].clone());
     }
-    for move_index in 1..=4u32 {
+    for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
         set_value(
             game,
             f3r::global::ATTACK1,
             u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + move_index,
-            offer.values[28 + move_index as usize - 1].clone(),
+            offer.values[f3r::format::PARTY_SCALAR_COUNT + move_index as usize - 1].clone(),
         );
     }
-    for info_index in 0..=16u32 {
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
         set_value(
             game,
             f3r::global::INFO,
@@ -483,7 +489,9 @@ mod tests {
         offer.values[21] = n(0.0);
         offer.values[22] = n(4.0);
         offer.values[33] = n(50.0);
-        offer.values[46] = n(123_456.0);
+        offer.values
+            [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::SELUE_INFO_FIELD] =
+            n(123_456.0);
         offer
     }
 
@@ -591,7 +599,7 @@ mod tests {
         let offer = golden_offer();
         let payload = encode_message(&offer).unwrap();
         assert!(payload.starts_with(GOLDEN_LABEL.as_bytes()));
-        assert!(!payload.starts_with(b"OFFER"));
+        assert!(!payload.starts_with(f3r::trade::ENVELOPE_PREFIX));
         assert_eq!(payload[GOLDEN_LABEL.len()], codec::LABEL_SEPARATOR);
         assert_eq!(
             &payload[GOLDEN_LABEL.len() + 1..],
@@ -731,27 +739,27 @@ mod tests {
 
     fn capture_host() -> FakeHost {
         let mut host = FakeHost::with_mask(9_321.0);
-        host.put_num(b"pkmn1", 0, 100_448.0);
-        host.put_num(b"nivel1", 0, 50.0);
-        host.put_num(b"indexnivel", 0, 50.0);
-        host.put_num(b"indexpkmn", 0, 100_448.0);
-        host.put_num(b"selue_pk1", 0, 1_000_000.0);
-        host.put_num(b"PP_1", 0, 10.0);
-        host.put_num(b"PS_1", 0, 150.0);
-        host.put_num(b"MAX_PP_1", 0, 10.0);
-        host.put_num(b"MAX_PS_1", 0, 150.0);
-        host.put_num(b"num_attack1", 0, 4.0);
-        for move_index in 1..=4 {
+        host.put_num(f3r::global::PKMN1, 0, 100_448.0);
+        host.put_num(f3r::global::NIVEL1, 0, 50.0);
+        host.put_num(f3r::global::INDEXNIVEL, 0, 50.0);
+        host.put_num(f3r::global::INDEXPKMN, 0, 100_448.0);
+        host.put_num(f3r::global::SELUE_PK1, 0, 1_000_000.0);
+        host.put_num(f3r::global::PP_1, 0, 10.0);
+        host.put_num(f3r::global::PS_1, 0, 150.0);
+        host.put_num(f3r::global::MAX_PP_1, 0, 10.0);
+        host.put_num(f3r::global::MAX_PS_1, 0, 150.0);
+        host.put_num(f3r::global::NUM_ATTACK1, 0, 4.0);
+        for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
             host.put_num(f3r::global::ATTACK1, move_index, move_index as f64);
         }
         host.put_text(f3r::global::APODO_NAME, b"Ash");
         host.put_text(f3r::global::PROTANAME, b"Gary");
-        for info_index in 0..=16u32 {
-            if info_index == 4 {
+        for info_index in 0..f3r::format::INFO_FIELDS as u32 {
+            if info_index == f3r::format::OT_INFO_FIELD as u32 {
                 host.put(f3r::global::INFO, info_index, GmlValue::Str(gml::String::from(b"".as_slice())));
-            } else if info_index == 5 {
+            } else if info_index == f3r::format::NICKNAME_INFO_FIELD as u32 {
                 host.put(f3r::global::INFO, info_index, GmlValue::Str(gml::String::from(b"000123".as_slice())));
-            } else if info_index == 14 {
+            } else if info_index == f3r::format::SELUE_INFO_FIELD as u32 {
                 host.put_num(f3r::global::INFO, info_index, 1_000_000.0);
             } else {
                 host.put_num(f3r::global::INFO, info_index, info_index as f64);
@@ -765,22 +773,37 @@ mod tests {
         let host = capture_host();
         let offer = capture_with(&host, 0).unwrap();
         assert_eq!(offer.values.len(), VALUE_COUNT);
-        assert_eq!(offer.values[0], n(448.0));
-        assert_eq!(offer.values[7], n(448.0));
-        assert_eq!(offer.values[9], n(9_327_000_000.0));
-        assert_eq!(offer.values[32 + 14], n(9_327_000_000.0));
-        assert_eq!(offer.values[32 + 4], t(b"Ash"));
-        assert_eq!(offer.values[32 + 5], t(b"000123"));
+        assert_eq!(offer.values[f3r::format::SPECIES_FIELD], n(448.0));
+        assert_eq!(offer.values[f3r::format::INDEX_SPECIES_FIELD], n(448.0));
+        assert_eq!(offer.values[f3r::format::SELUE_SCALAR_FIELD], n(9_327_000_000.0));
+        assert_eq!(
+            offer.values
+                [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::SELUE_INFO_FIELD],
+            n(9_327_000_000.0)
+        );
+        assert_eq!(
+            offer.values
+                [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::OT_INFO_FIELD],
+            t(b"Ash")
+        );
+        assert_eq!(
+            offer.values
+                [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::NICKNAME_INFO_FIELD],
+            t(b"000123")
+        );
         assert_eq!(offer.label, "000123 Nv. 50");
-        assert_eq!(offer.values[28..32], [n(1.0), n(2.0), n(3.0), n(4.0)]);
+        assert_eq!(
+            offer.values[f3r::format::PARTY_SCALAR_COUNT..f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT],
+            [n(1.0), n(2.0), n(3.0), n(4.0)]
+        );
     }
 
     fn apply_host() -> FakeHost {
         let mut host = FakeHost::with_mask(9_321.0);
         host.put_text(f3r::global::APODO_NAME, b"Ash");
         host.put_text(f3r::global::PROTANAME, b"Gary");
-        host.put_num(b"pkmn1", 0, 1.0);
-        host.put_num(b"actual1", 0, 6.0);
+        host.put_num(f3r::global::PKMN1, 0, 1.0);
+        host.put_num(f3r::global::ACTUAL1, 0, 6.0);
         host
     }
 
@@ -788,29 +811,46 @@ mod tests {
     fn apply_canonicalizes_reverses_selue_and_clears_local_ot() {
         let mut host = apply_host();
         let mut offer = safety_ready_offer();
-        offer.values[0] = n(100_448.0);
-        offer.values[7] = n(100_448.0);
-        offer.values[9] = n(9_327_000_000.0);
-        offer.values[46] = n(9_327_000_000.0);
-        offer.values[32 + 4] = t(b"Ash");
-        offer.values[32 + 5] = t(b"Nick");
-        offer.values[32 + 14] = n(9_327_000_000.0);
+        offer.values[f3r::format::SPECIES_FIELD] = n(100_448.0);
+        offer.values[f3r::format::INDEX_SPECIES_FIELD] = n(100_448.0);
+        offer.values[f3r::format::SELUE_SCALAR_FIELD] = n(9_327_000_000.0);
+        offer.values
+            [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::OT_INFO_FIELD] =
+            t(b"Ash");
+        offer.values
+            [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::NICKNAME_INFO_FIELD] =
+            t(b"Nick");
+        offer.values
+            [f3r::format::PARTY_SCALAR_COUNT + f3r::format::MOVE_COUNT + f3r::format::SELUE_INFO_FIELD] =
+            n(9_327_000_000.0);
 
         apply_with(&mut host, 3, &offer).unwrap();
 
-        assert_eq!(host.trade_global_num(b"pkmn1", 3), 448.0);
-        assert_eq!(host.trade_global_num(b"indexpkmn", 3), 448.0);
-        assert_eq!(host.trade_global_num(b"selue_pk1", 3), 1_000_000.0);
-        assert_eq!(host.trade_global_num(f3r::global::INFO, 3 * f3r::format::PARTY_ARRAY_STRIDE + 14), 1_000_000.0);
+        assert_eq!(host.trade_global_num(f3r::global::PKMN1, 3), 448.0);
+        assert_eq!(host.trade_global_num(f3r::global::INDEXPKMN, 3), 448.0);
+        assert_eq!(host.trade_global_num(f3r::global::SELUE_PK1, 3), 1_000_000.0);
         assert_eq!(
-            host.trade_global_value(f3r::global::INFO, 3 * f3r::format::PARTY_ARRAY_STRIDE + 4),
+            host.trade_global_num(
+                f3r::global::INFO,
+                3 * f3r::format::PARTY_ARRAY_STRIDE + f3r::format::SELUE_INFO_FIELD as u32
+            ),
+            1_000_000.0
+        );
+        assert_eq!(
+            host.trade_global_value(
+                f3r::global::INFO,
+                3 * f3r::format::PARTY_ARRAY_STRIDE + f3r::format::OT_INFO_FIELD as u32
+            ),
             Some(GmlValue::Str(gml::String::from(b"".as_slice())))
         );
         assert_eq!(
-            host.trade_global_value(f3r::global::INFO, 3 * f3r::format::PARTY_ARRAY_STRIDE + 5),
+            host.trade_global_value(
+                f3r::global::INFO,
+                3 * f3r::format::PARTY_ARRAY_STRIDE + f3r::format::NICKNAME_INFO_FIELD as u32
+            ),
             Some(GmlValue::Str(gml::String::from(b"Nick".as_slice())))
         );
-        assert_eq!(host.trade_global_num(b"actual1", 0), 0.0);
+        assert_eq!(host.trade_global_num(f3r::global::ACTUAL1, 0), 0.0);
     }
 
     #[test]
@@ -822,10 +862,10 @@ mod tests {
             .iter()
             .map(|name| (name.to_vec(), 2))
             .collect();
-        for move_index in 1..=4 {
+        for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
             expected.push((f3r::global::ATTACK1.to_vec(), 2 * f3r::format::PARTY_ARRAY_STRIDE + move_index));
         }
-        for info_index in 0..=16 {
+        for info_index in 0..f3r::format::INFO_FIELDS as u32 {
             expected.push((f3r::global::INFO.to_vec(), 2 * f3r::format::PARTY_ARRAY_STRIDE + info_index));
         }
         expected.push((f3r::global::ACTUAL1.to_vec(), 0));
@@ -884,16 +924,28 @@ mod tests {
         let mut target = apply_host();
         apply_with(&mut target, 1, &decoded).unwrap();
 
-        assert_eq!(target.trade_global_num(b"pkmn1", 1), 448.0);
-        assert_eq!(target.trade_global_num(b"nivel1", 1), 50.0);
-        assert_eq!(target.trade_global_num(b"selue_pk1", 1), 1_000_000.0);
-        assert_eq!(target.trade_global_num(f3r::global::INFO, f3r::format::PARTY_ARRAY_STRIDE + 14), 1_000_000.0);
+        assert_eq!(target.trade_global_num(f3r::global::PKMN1, 1), 448.0);
+        assert_eq!(target.trade_global_num(f3r::global::NIVEL1, 1), 50.0);
+        assert_eq!(target.trade_global_num(f3r::global::SELUE_PK1, 1), 1_000_000.0);
         assert_eq!(
-            target.trade_global_value(f3r::global::ATTACK1, f3r::format::PARTY_ARRAY_STRIDE + 4),
+            target.trade_global_num(
+                f3r::global::INFO,
+                f3r::format::PARTY_ARRAY_STRIDE + f3r::format::SELUE_INFO_FIELD as u32
+            ),
+            1_000_000.0
+        );
+        assert_eq!(
+            target.trade_global_value(
+                f3r::global::ATTACK1,
+                f3r::format::PARTY_ARRAY_STRIDE + f3r::format::MOVE_COUNT as u32
+            ),
             Some(GmlValue::Real(Real::from(4.0)))
         );
         assert_eq!(
-            target.trade_global_value(f3r::global::INFO, f3r::format::PARTY_ARRAY_STRIDE + 5),
+            target.trade_global_value(
+                f3r::global::INFO,
+                f3r::format::PARTY_ARRAY_STRIDE + f3r::format::NICKNAME_INFO_FIELD as u32
+            ),
             Some(GmlValue::Str(gml::String::from(b"000123".as_slice())))
         );
     }
@@ -923,20 +975,20 @@ mod tests {
         );
 
         assert_eq!(outcome, crate::game::trade::TradeCommit::Committed);
-        assert_eq!(target.trade_global_num(b"pkmn1", 1), 448.0);
+        assert_eq!(target.trade_global_num(f3r::global::PKMN1, 1), 448.0);
         let saved = saved.expect("save runs after apply");
         assert_eq!(
-            saved.get(&(b"pkmn1".to_vec(), 1)),
+            saved.get(&(f3r::global::PKMN1.to_vec(), 1)),
             Some(&GmlValue::Real(Real::from(448.0)))
         );
         assert_eq!(
-            saved.get(&(b"indexpkmn".to_vec(), 1)),
+            saved.get(&(f3r::global::INDEXPKMN.to_vec(), 1)),
             Some(&GmlValue::Real(Real::from(448.0)))
         );
         assert_eq!(
             saved.get(&(
                 f3r::global::INFO.to_vec(),
-                f3r::format::PARTY_ARRAY_STRIDE + 5
+                f3r::format::PARTY_ARRAY_STRIDE + f3r::format::NICKNAME_INFO_FIELD as u32
             )),
             Some(&GmlValue::Str(gml::String::from(b"000123".as_slice())))
         );
