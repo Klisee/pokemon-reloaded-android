@@ -1624,7 +1624,13 @@ impl ReloadedOnline {
 
     fn apply_wp_message(&mut self, message: &world::WpMessage) {
         self.world.set_local_id(self.local_id);
-        if !self.world.apply_wp(message) {
+        let (applied, evicted) = self.world.apply_wp_with_eviction(message);
+        if let Some(id) = evicted {
+            self.remotes.remove(&id);
+            self.pending_say.remove(&id);
+            self.pending_exclaim.remove(&id);
+        }
+        if !applied {
             return
         }
         let Some(remote) = self.world.get(message.id).cloned() else { return };
@@ -1722,8 +1728,16 @@ impl ReloadedOnline {
         parts: Vec<RemotePart>,
         battle: bool,
     ) {
-        if Some(id) == self.local_id {
+        if Some(id) == self.local_id || !world::valid_position(x, y) {
             return
+        }
+        let name = cap_remote_name(&name);
+        if !self.remotes.contains_key(&id) && self.remotes.len() >= world::MAX_REMOTES {
+            if let Some(oldest) = self.remotes.keys().copied().find(|other| Some(*other) != self.local_id) {
+                self.remotes.remove(&oldest);
+                self.pending_say.remove(&oldest);
+                self.pending_exclaim.remove(&oldest);
+            }
         }
         let pending_say = self.pending_say.remove(&id);
         let pending_exclaim = self.pending_exclaim.remove(&id);
@@ -1790,6 +1804,17 @@ impl ReloadedOnline {
             }
         }
     }
+}
+
+fn cap_remote_name(name: &str) -> String {
+    if name.len() <= world::MAX_REMOTE_NAME_BYTES {
+        return name.to_string();
+    }
+    let mut end = world::MAX_REMOTE_NAME_BYTES;
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_string()
 }
 
 fn overlaps(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {

@@ -244,12 +244,18 @@ fn parse_wp(rest: &str) -> Option<ServerMessage> {
     let room = fields.next()?.parse::<i32>().ok()?;
     let x = fields.next()?.parse::<f64>().ok()?;
     let y = fields.next()?.parse::<f64>().ok()?;
+    if !crate::world::valid_position(x, y) {
+        return None;
+    }
     let parts = fields.next()?;
-    let name = fields.next().unwrap_or("").to_string();
+    let name = cap_name(fields.next().unwrap_or(""));
     let (sprite, frame, xs, ys, dx, dy) = parse_parts(parts);
     let visible = x > -500.0;
     let x = x + dx;
     let y = y + dy;
+    if !crate::world::valid_position(x, y) {
+        return None;
+    }
     Some(ServerMessage::State {
         id,
         name,
@@ -274,6 +280,21 @@ fn parse_wp(rest: &str) -> Option<ServerMessage> {
     })
 }
 
+fn cap_name(name: &str) -> String {
+    if name.len() <= crate::world::MAX_REMOTE_NAME_BYTES {
+        return name.to_string();
+    }
+    let mut end = crate::world::MAX_REMOTE_NAME_BYTES;
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_string()
+}
+
+fn finite_component(value: f64) -> Option<f64> {
+    crate::world::valid_coordinate(value).then_some(value)
+}
+
 fn parse_parts(parts: &str) -> (i32, i32, f64, f64, f64, f64) {
     for part in parts.split(';') {
         let mut fields = part.split(',');
@@ -282,10 +303,10 @@ fn parse_parts(parts: &str) -> (i32, i32, f64, f64, f64, f64) {
         }
         let Some(sprite) = fields.next().and_then(|value| value.parse::<i32>().ok()) else { continue };
         let Some(frame) = fields.next().and_then(|value| value.parse::<i32>().ok()) else { continue };
-        let Some(dx) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
-        let Some(dy) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
-        let Some(xs) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
-        let Some(ys) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
+        let Some(dx) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        let Some(dy) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        let Some(xs) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        let Some(ys) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
         return (sprite, frame, xs, ys, dx, dy)
     }
     (-1, 0, 1.0, 1.0, 0.0, 0.0)

@@ -1471,6 +1471,37 @@ mod tests {
     }
 
     #[test]
+    fn world_position_limits_names_and_rejects_bad_positions() {
+        let long_name = "N".repeat(world::MAX_REMOTE_NAME_BYTES * 2);
+        let addr = spawn_mock(move |mut stream| {
+            stream
+                .write_all(
+                    format!(
+                        "WP 1 2 3 4 S,1,0,0,0,1,1 {long_name}\n\
+                         WP 2 2 1000000.5 4 S,1,0,0,0,1,1 bad\n\
+                         WP 3 2 3 4 S,1,0,0,0,1,1 bad\tname\nWAIT\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            stream.flush().expect("flush");
+        });
+
+        let client = connect(addr);
+        match next_event(&client) {
+            RozEvent::WorldPosition(position) => {
+                assert_eq!(position.id, 1);
+                assert_eq!(position.name_bytes.len(), world::MAX_REMOTE_NAME_BYTES);
+                assert_eq!(position.name.len(), world::MAX_REMOTE_NAME_BYTES);
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
+        assert!(matches!(next_event(&client), RozEvent::Malformed { .. }));
+        assert!(matches!(next_event(&client), RozEvent::Malformed { .. }));
+        assert_eq!(next_event(&client), RozEvent::Wait);
+    }
+
+    #[test]
     fn parses_world_requests_answers_and_cancels() {
         let addr = spawn_mock(|mut stream| {
             stream
