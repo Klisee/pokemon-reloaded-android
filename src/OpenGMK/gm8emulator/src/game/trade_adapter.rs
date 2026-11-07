@@ -376,7 +376,7 @@ fn apply_with<H: TradeHost + ?Sized>(
         );
     }
     let count = (0..f3r::format::PARTY_SIZE as u8)
-        .filter(|slot| game.trade_global_num(f3r::global::PKMN1, *slot) > 0.0)
+        .filter(|slot| game.trade_global_num(f3r::global::PKMN1, u32::from(*slot)) > 0.0)
         .count() as f64;
     if game.trade_global_num(f3r::global::ACTUAL1, 0) >= count {
         game.trade_set_global_num(f3r::global::ACTUAL1, 0, 0.0);
