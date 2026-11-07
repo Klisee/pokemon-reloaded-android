@@ -467,16 +467,25 @@ pub fn canonical_species(value: f64) -> Result<u64, ValidateError> {
         return Err(ValidateError::Species);
     }
 
-    let canonical = if rounded > 100_000.0 {
-        let remainder = rounded % 100_000.0;
-        if remainder < 1.0 || remainder >= 100_000.0 {
-            return Err(ValidateError::Species);
+    let mut canonical = rounded;
+    if rounded >= 150_000.0 {
+        let candidate = rounded - 150_000.0;
+        if candidate >= 1.0 && is_story_gated_species(candidate as u64) {
+            canonical = candidate;
         }
-        remainder as u64
-    } else {
-        rounded as u64
-    };
-
+    }
+    if canonical > 100_000.0 {
+        canonical %= 100_000.0;
+    }
+    if canonical < 1.0 {
+        return Err(ValidateError::Species);
+    }
+    let mut canonical = canonical as u64;
+    // Alternate/shiny encodings add 1000 to the base species. Strip only when
+    // the result is a story-gated species; real event forms (>=2000) stay intact.
+    if canonical > 1000 && is_story_gated_species(canonical - 1000) {
+        canonical -= 1000;
+    }
     if !(1..=999_999).contains(&canonical) {
         return Err(ValidateError::Species);
     }
@@ -1359,6 +1368,10 @@ mod tests {
         assert_eq!(canonical_species(100_001.0), Ok(1));
         assert_eq!(canonical_species(100_448.0), Ok(448));
         assert_eq!(canonical_species(200_150.0), Ok(150));
+        assert_eq!(canonical_species(1150.0), Ok(150));
+        assert_eq!(canonical_species(3046.0), Ok(2046));
+        assert_eq!(canonical_species(101150.0), Ok(150));
+        assert_eq!(canonical_species(150150.0), Ok(150));
         assert_eq!(canonical_species(0.0), Err(ValidateError::Species));
         assert_eq!(canonical_species(-1.0), Err(ValidateError::Species));
         assert_eq!(canonical_species(448.5), Err(ValidateError::Species));
