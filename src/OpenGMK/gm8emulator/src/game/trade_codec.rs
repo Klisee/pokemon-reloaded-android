@@ -617,12 +617,12 @@ pub fn validate_safety(
     let pp = int_field(&fields[10], 0, 9_999)?;
     let hp = int_field(&fields[11], 0, 9_999_999)?;
     int_field(&fields[12], 0, 10)?;
-    let max_pp = int_field(&fields[13], 1, 9_999)?;
+    let _max_pp = int_field(&fields[13], 1, 9_999)?;
     let max_hp = int_field(&fields[14], 1, 9_999_999)?;
     int_field(&fields[15], 0, 9_999_999)?;
-    if pp > max_pp {
-        return Err(SafetyError::Pp);
-    }
+    // Current PP can legitimately exceed the stored base maximum after
+    // PP Ups (and some saves carry a stale MAX_PP_1). Keep both bounded but
+    // do not reject the offer for this.
     if hp > max_hp {
         return Err(SafetyError::Hp);
     }
@@ -1479,7 +1479,7 @@ mod tests {
 
         let mut offer = safety_ready_offer();
         offer.fields[10] = n(11.0);
-        assert_eq!(validate_safety(&offer, None), Err(SafetyError::Pp));
+        assert!(validate_safety(&offer, None).is_ok());
 
         let mut offer = safety_ready_offer();
         offer.fields[11] = n(151.0);
