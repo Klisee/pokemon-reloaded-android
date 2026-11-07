@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use reloaded_cleanroom::save::{
@@ -25,7 +26,9 @@ pub(crate) const DATA: &str = "data";
 
 const LIVE_PARTS: [&str; 3] = [SAVC, NFO, DATA];
 const BACKUP_DIR: &str = ".reloaded-save";
+const STAGING_DIR: &str = "staging";
 const MAX_HOST_FILE_BYTES: u64 = MAX_PART_BYTES;
+static NEXT_STAGING: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HostSavePath {
@@ -61,7 +64,7 @@ fn name_is(parent: &Path, expected: &str) -> bool {
 pub(crate) fn parse_save_path(path: &Path) -> Option<HostSavePath> {
     let file_name = path.file_name()?.to_str()?;
     let (stem, extension) = file_name.rsplit_once('.')?;
-    let part = part_name(extension)?;
+    let part = part_name(&extension.to_ascii_lowercase())?;
     let slot_text = stem.strip_prefix("reloaded")?;
     if slot_text.is_empty() || !slot_text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -79,6 +82,51 @@ pub(crate) fn parse_save_path(path: &Path) -> Option<HostSavePath> {
     Some(HostSavePath { program_dir, slot: SaveSlot(slot), part })
 }
 
+fn clean_staging(root: &Path) {
+    let staging = root.join(BACKUP_DIR).join(STAGING_DIR);
+    let Ok(entries) = fs::read_dir(&staging) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let _ = fs::remove_file(path);
+            },
+            Ok(meta) if meta.is_dir() => {
+                let _ = fs::remove_dir_all(path);
+            },
+            Ok(_) => {
+                let _ = fs::remove_file(path);
+            },
+            Err(_) => {},
+        }
+    }
+}
+
+fn revisions_path(root: &Path) -> PathBuf {
+    root.join(BACKUP_DIR).join("revisions")
+}
+
+fn read_revisions(path: &Path) -> BTreeMap<u16, Revision> {
+    let mut revisions = BTreeMap::new();
+    let Ok(text) = fs::read_to_string(path) else { return revisions };
+    for line in text.lines() {
+        let Some((slot, revision)) = line.split_once(' ') else { continue };
+        let (Ok(slot), Ok(revision)) = (slot.parse::<u16>(), revision.parse::<Revision>()) else { continue };
+        revisions.insert(slot, revision);
+    }
+    revisions
+}
+
+fn persist_revision(path: &Path, slot: u16, revision: Revision) {
+    let mut revisions = read_revisions(path);
+    revisions.insert(slot, revision);
+    let mut text = String::new();
+    for (slot, revision) in revisions {
+        text.push_str(&format!("{slot} {revision}\n"));
+    }
+    let _ = super::save_guard::write_file_atomic(path, text.as_bytes());
+}
+
 pub(crate) struct HostSaveBackend {
     root: PathBuf,
     world: WorldId,
@@ -91,6 +139,7 @@ impl HostSaveBackend {
     fn open(root: &Path) -> Result<Self, SaveError> {
         fs::create_dir_all(root)?;
         let root = fs::canonicalize(root)?;
+        clean_staging(&root);
         let inner = FileBackend::open(root.join(BACKUP_DIR))?;
         let world = world_id(&root);
         Ok(HostSaveBackend { root, world, inner, revisions: Mutex::new(BTreeMap::new()), commit_lock: Mutex::new(()) })
@@ -104,13 +153,28 @@ impl HostSaveBackend {
         &self.root
     }
 
+    pub(crate) fn staging_dir(&self) -> PathBuf {
+        self.root.join(BACKUP_DIR).join(STAGING_DIR)
+    }
+
     pub(crate) fn live_path(&self, slot: SaveSlot, part: &str) -> Option<PathBuf> {
         let extension = part_extension(part)?;
         Some(self.root.join(format!("reloaded{}.{}", slot.0, extension)))
     }
 
     fn revision(&self, slot: SaveSlot) -> Revision {
-        self.revisions.lock().unwrap_or_else(|poison| poison.into_inner()).get(&slot.0).copied().unwrap_or(0)
+        let persisted = read_revisions(&revisions_path(&self.root)).get(&slot.0).copied();
+        let memory = self
+            .revisions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&slot.0)
+            .copied();
+        match (persisted, memory) {
+            (Some(persisted), Some(memory)) => persisted.max(memory),
+            (Some(revision), None) | (None, Some(revision)) => revision,
+            (None, None) => 0,
+        }
     }
 
     fn next_revision(&self, slot: SaveSlot) -> Result<Revision, SaveError> {
@@ -225,24 +289,54 @@ impl SaveBackend for HostSaveBackend {
         }
 
         let old_parts = previous_image.as_ref().map(|image| image.parts.clone()).unwrap_or_default();
-        let mut written = Vec::new();
-        for (name, body) in &image.parts {
-            if let Err(error) = self.write_part(slot, name, body) {
-                for name in written {
-                    match old_parts.get(name) {
-                        Some(old) => {
-                            let _ = self.write_part(slot, name, old);
-                        },
-                        None => {
-                            let _ = self.remove_part(slot, name);
-                        },
-                    }
-                }
-                return Err(error);
+        let mut ordered = Vec::with_capacity(image.parts.len());
+        for part in LIVE_PARTS {
+            if let Some(body) = image.parts.get(part) {
+                ordered.push((part, body.clone()));
             }
-            written.push(name.as_str());
+        }
+        if ordered.len() != image.parts.len() {
+            return Err(SaveError::rejected("unknown save part"));
         }
 
+        let mut touched: Vec<&str> = Vec::new();
+        let mut failure = None;
+        for (name, body) in &ordered {
+            if let Err(error) = self.write_part(slot, name, body) {
+                failure = Some(error);
+                break
+            }
+            touched.push(name);
+        }
+        if failure.is_none() {
+            for part in [NFO, DATA, SAVC] {
+                if !image.parts.contains_key(part) && old_parts.contains_key(part) {
+                    if let Err(error) = self.remove_part(slot, part) {
+                        failure = Some(error);
+                        break
+                    }
+                    touched.push(part);
+                }
+            }
+        }
+        if let Some(error) = failure {
+            for name in LIVE_PARTS {
+                if !touched.contains(&name) {
+                    continue
+                }
+                match old_parts.get(name) {
+                    Some(old) => {
+                        let _ = self.write_part(slot, name, old);
+                    },
+                    None => {
+                        let _ = self.remove_part(slot, name);
+                    },
+                }
+            }
+            return Err(error)
+        }
+
+        persist_revision(&revisions_path(&self.root), slot.0, image.revision);
         self.revisions.lock().unwrap_or_else(|poison| poison.into_inner()).insert(slot.0, image.revision);
         Ok(SaveCommit { slot, previous, current: image.revision, digest })
     }
@@ -351,8 +445,27 @@ impl HostSaveService {
         self.backend.world()
     }
 
-    pub(crate) fn load(&self, slot: SaveSlot) -> Result<Option<SaveImage>, SaveError> {
+    pub(crate) fn staging_dir(&self) -> PathBuf {
+        self.backend.staging_dir()
+    }
+
+    fn load_unlocked(&self, slot: SaveSlot) -> Result<Option<SaveImage>, SaveError> {
         self.hooks.load(self.world(), slot)
+    }
+
+    pub(crate) fn load(&self, slot: SaveSlot) -> Result<Option<SaveImage>, SaveError> {
+        let _guard = self.save_lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        self.load_unlocked(slot)
+    }
+
+    pub(crate) fn load_part(&self, slot: SaveSlot, part: &str) -> Result<Option<Arc<[u8]>>, SaveError> {
+        let _guard = self.save_lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        Ok(self.load_unlocked(slot)?.and_then(|image| image.parts.get(part).cloned()))
+    }
+
+    pub(crate) fn capture(&self, slot: SaveSlot) -> Result<SnapshotRecord, SaveError> {
+        let _guard = self.save_lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        self.hooks.capture(self.world(), slot, SnapshotCause::Manual)
     }
 
     pub(crate) fn save_part(
@@ -367,7 +480,7 @@ impl HostSaveService {
         }
         let _guard = self.save_lock.lock().unwrap_or_else(|poison| poison.into_inner());
         let world = self.world();
-        let mut image = match self.hooks.load(world, slot)? {
+        let mut image = match self.load_unlocked(slot)? {
             Some(image) => image,
             None => SaveImage::empty(HOST_FORMAT, CURRENT_IMAGE_SCHEMA, 0),
         };
@@ -439,6 +552,122 @@ pub(crate) fn service_for(program_dir: &Path) -> Result<Arc<HostSaveService>, Sa
     Ok(service)
 }
 
+fn save_error_io(error: SaveError) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, error.to_string())
+}
+
+/// A staging file for a GML text/binary write to a canonical save part. The
+/// canonical file is only replaced when the handle flushes, through the same
+/// atomic commit and snapshot path as `game_save`.
+#[derive(Debug)]
+pub(crate) struct StagedSave {
+    canonical: PathBuf,
+    staging: PathBuf,
+    dirty: bool,
+}
+
+impl StagedSave {
+    fn new(
+        service: &HostSaveService,
+        canonical: &Path,
+        copy_existing: bool,
+        force_dirty: bool,
+    ) -> io::Result<Self> {
+        let dir = service.staging_dir();
+        fs::create_dir_all(&dir)?;
+        let staging = loop {
+            let counter = NEXT_STAGING.fetch_add(1, Ordering::Relaxed);
+            let candidate = dir.join(format!(".tmp-part-{}-{counter}", std::process::id()));
+            match fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+                Ok(file) => {
+                    drop(file);
+                    break candidate
+                },
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+
+        let mut dirty = force_dirty;
+        if copy_existing {
+            match fs::symlink_metadata(canonical) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let _ = fs::remove_file(&staging);
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "save part is a symlink"))
+                },
+                Ok(meta) if !meta.is_file() => {
+                    let _ = fs::remove_file(&staging);
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "save part is not a file"))
+                },
+                Ok(_) => {
+                    fs::copy(canonical, &staging)?;
+                },
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    dirty = true;
+                },
+                Err(error) => {
+                    let _ = fs::remove_file(&staging);
+                    return Err(error)
+                },
+            }
+        } else {
+            dirty = true;
+        }
+        Ok(StagedSave { canonical: canonical.to_path_buf(), staging, dirty })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.staging
+    }
+
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub(crate) fn commit(&mut self) -> io::Result<()> {
+        if !self.dirty {
+            return Ok(())
+        }
+        let bytes = fs::read(&self.staging)?;
+        match save_part_atomic(&self.canonical, &bytes) {
+            Some(result) => result?,
+            None => return Err(io::Error::new(io::ErrorKind::Other, "save part is no longer recognized")),
+        }
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+impl Drop for StagedSave {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.staging);
+    }
+}
+
+/// Starts a staged write for a canonical save part, or `None` when the path is
+/// not a save part or the save service is unavailable (the caller then writes
+/// directly, preserving the legacy behavior).
+pub(crate) fn begin_staged_write(
+    canonical: &Path,
+    copy_existing: bool,
+    force_dirty: bool,
+) -> Option<io::Result<StagedSave>> {
+    let parsed = parse_save_path(canonical)?;
+    let service = service_for(&parsed.program_dir).ok()?;
+    Some(StagedSave::new(&service, canonical, copy_existing, force_dirty))
+}
+
+/// Reads a canonical save part through the hooks so a load never observes a
+/// half-committed slot. Returns `None` when the path is not that save part.
+pub(crate) fn load_part_atomic(path: &Path, part: &str) -> Option<io::Result<Option<Arc<[u8]>>>> {
+    let parsed = parse_save_path(path)?;
+    if parsed.part != part {
+        return None
+    }
+    let service = service_for(&parsed.program_dir).ok()?;
+    Some(service.load_part(parsed.slot, part).map_err(save_error_io))
+}
+
 /// Routes a canonical host save write through the clean-room save hooks.
 /// Returns `None` when the path is not a host save part.
 pub(crate) fn save_part_atomic(path: &Path, bytes: &[u8]) -> Option<io::Result<()>> {
@@ -448,16 +677,59 @@ pub(crate) fn save_part_atomic(path: &Path, bytes: &[u8]) -> Option<io::Result<(
     }
     let result = service_for(&parsed.program_dir)
         .and_then(|service| service.save_part(parsed.slot, parsed.part, bytes, SaveTrigger::Manual).map(|_| ()));
-    Some(result.map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string())))
+    Some(result.map_err(save_error_io))
+}
+
+fn checked_slot(slot: i32) -> Result<SaveSlot, SaveError> {
+    if (1..=u16::MAX as i32).contains(&slot) {
+        Ok(SaveSlot(slot as u16))
+    } else {
+        Err(SaveError::rejected("invalid save slot"))
+    }
+}
+
+/// Captures the live slot before a mutating operation (trade save, explicit
+/// rollback checkpoints) without changing the selected save file.
+pub(crate) fn capture_slot(program_dir: &Path, slot: i32) -> Result<Option<SnapshotRecord>, SaveError> {
+    let slot = checked_slot(slot)?;
+    let service = service_for(program_dir)?;
+    if service.load(slot)?.is_none() {
+        return Ok(None)
+    }
+    match service.capture(slot) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) if matches!(error.kind(), save::ErrorKind::Unavailable | save::ErrorKind::Rejected) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Restores a slot after a failed mutation. Returns `None` when no save was
+/// committed since the snapshot (nothing to roll back).
+pub(crate) fn rollback_slot(
+    program_dir: &Path,
+    slot: i32,
+    source: SnapshotId,
+    reason: &str,
+) -> Result<Option<save::RollbackReceipt>, SaveError> {
+    let slot = checked_slot(slot)?;
+    let service = service_for(program_dir)?;
+    let record = service.snapshot_info(source)?;
+    if record.snapshot.slot != slot {
+        return Err(SaveError::rejected("snapshot belongs to another slot"))
+    }
+    let current = service.load(slot)?;
+    let expected = current.as_ref().map(|image| image.revision).unwrap_or(0);
+    if expected == record.snapshot.revision {
+        return Ok(None)
+    }
+    service.rollback(slot, source, expected, reason).map(Some)
 }
 
 /// Captures the selected slot before an online session without mutating it.
 pub(crate) fn begin_online_session(program_dir: &Path, slot: i32) -> Result<Option<SnapshotRecord>, SaveError> {
-    if !(1..=u16::MAX as i32).contains(&slot) {
-        return Err(SaveError::rejected("invalid save slot"));
-    }
+    let slot = checked_slot(slot)?;
     let service = service_for(program_dir)?;
-    service.begin_session(SaveSlot(slot as u16))
+    service.begin_session(slot)
 }
 
 #[cfg(test)]
@@ -620,6 +892,84 @@ mod tests {
         let receipt = service.rollback(slot, baseline.id, 1, "empty baseline").unwrap();
         assert_eq!(receipt.previous, 1);
         assert!(!live(&dir, 6, "savc").exists());
+    }
+
+    #[test]
+    fn staged_text_write_commits_through_the_hooks() {
+        let dir = TempDir::new();
+        let service = service(&dir);
+        let path = live(&dir, 9, "nfo");
+        let mut handle =
+            crate::gml::file::TextHandle::open(path.to_str().unwrap(), crate::gml::file::AccessMode::Write)
+                .unwrap();
+        handle.write_string(b"summary").unwrap();
+        handle.write_newline().unwrap();
+        handle.flush().unwrap();
+        drop(handle);
+
+        assert_eq!(fs::read(&path).unwrap(), b"summary\r\n");
+        let image = service.load(SaveSlot(9)).unwrap().expect("committed image");
+        assert_eq!(&image.parts[NFO][..], b"summary\r\n");
+        assert!(!service.snapshots(SaveSlot(9)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn staged_text_append_keeps_the_existing_prefix_until_flush() {
+        let dir = TempDir::new();
+        let path = live(&dir, 10, "nfo");
+        fs::write(&path, b"old").unwrap();
+        let mut handle =
+            crate::gml::file::TextHandle::open(path.to_str().unwrap(), crate::gml::file::AccessMode::Special)
+                .unwrap();
+        handle.write_string(b"-new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        handle.flush().unwrap();
+        drop(handle);
+
+        assert_eq!(fs::read(&path).unwrap(), b"old-new");
+    }
+
+    #[test]
+    fn staged_binary_read_write_preserves_untouched_bytes() {
+        let dir = TempDir::new();
+        let path = live(&dir, 11, "data");
+        fs::write(&path, b"abc").unwrap();
+        let mut handle =
+            crate::gml::file::BinaryHandle::open(path.to_str().unwrap(), crate::gml::file::AccessMode::Special)
+                .unwrap();
+        handle.seek(1).unwrap();
+        handle.write_byte(b'Z').unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"abc");
+        handle.flush().unwrap();
+        drop(handle);
+
+        assert_eq!(fs::read(&path).unwrap(), b"aZc");
+    }
+
+    #[test]
+    fn atomic_load_reads_the_committed_part() {
+        let dir = TempDir::new();
+        let service = service(&dir);
+        service.save_part(SaveSlot(12), SAVC, b"payload", SaveTrigger::Manual).unwrap();
+        let path = live(&dir, 12, "savc");
+        let loaded = load_part_atomic(&path, SAVC).unwrap().unwrap().unwrap();
+        assert_eq!(&loaded[..], b"payload");
+        assert!(load_part_atomic(&path, NFO).is_none());
+    }
+
+    #[test]
+    fn captured_slot_rolls_back_after_a_failed_sequence() {
+        let dir = TempDir::new();
+        let service = service(&dir);
+        let slot = SaveSlot(13);
+        service.save_part(slot, SAVC, b"one", SaveTrigger::Manual).unwrap();
+        let record = capture_slot(dir.path(), 13).unwrap().expect("checkpoint");
+        service.save_part(slot, SAVC, b"two", SaveTrigger::Manual).unwrap();
+
+        let receipt =
+            rollback_slot(dir.path(), 13, record.snapshot.id, "failed save").unwrap().expect("rollback");
+        assert_eq!(receipt.previous, record.snapshot.revision + 1);
+        assert_eq!(fs::read(live(&dir, 13, "savc")).unwrap(), b"one");
     }
 
     #[test]
