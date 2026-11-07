@@ -262,7 +262,7 @@ impl Drop for OnlineClient {
 }
 
 fn cap_name(name: &str) -> String {
-    String::from_utf8_lossy(&world::sanitize_name_bytes(name.as_bytes())).into_owned()
+    world::sanitize_name_display(name.as_bytes())
 }
 
 fn read_loop(stream: TcpStream, tx: Sender<Event>) {

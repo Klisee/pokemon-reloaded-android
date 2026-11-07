@@ -1811,7 +1811,7 @@ impl ReloadedOnline {
 }
 
 fn cap_remote_name(name: &str) -> String {
-    String::from_utf8_lossy(&world::sanitize_name_bytes(name.as_bytes())).into_owned()
+    world::sanitize_name_display(name.as_bytes())
 }
 
 fn overlaps(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
@@ -2486,6 +2486,36 @@ mod tests {
         online.handle_json_event(Event::Disconnected("fin".into()));
         assert!(online.remotes.is_empty());
         assert!(online.world.is_empty());
+    }
+
+    #[test]
+    fn json_state_eviction_matches_world_room_policy_and_clears_pending() {
+        let mut online = ReloadedOnline::default();
+        online.world = world::WorldState::with_capacity(None, 3);
+        online.handle_json_event(json_state(1, "A", 3, 1.0, 1.0));
+        online.handle_json_event(json_state(2, "B", 2, 2.0, 2.0));
+        online.handle_json_event(json_state(3, "C", 3, 3.0, 3.0));
+        online.pending_say.insert(1, ("hola".into(), Instant::now()));
+
+        online.handle_json_event(json_state(4, "D", 2, 4.0, 4.0));
+
+        assert_eq!(online.world.get(1), None);
+        assert!(!online.remotes.contains_key(&1));
+        assert!(!online.pending_say.contains_key(&1));
+        assert!(online.world.get(2).is_some());
+        assert!(online.world.get(3).is_some());
+        assert!(online.world.get(4).is_some());
+        assert_eq!(online.world.len(), online.remotes.len());
+        let mut world_ids: Vec<u64> = online.world.remotes().map(|remote| remote.id).collect();
+        let mut host_ids: Vec<u64> = online.remotes.keys().copied().collect();
+        world_ids.sort_unstable();
+        host_ids.sort_unstable();
+        assert_eq!(world_ids, host_ids);
+
+        online.handle_json_event(json_state(2, "B2", 2, 5.0, 5.0));
+        assert_eq!(online.world.len(), 3);
+        assert_eq!(online.remotes.len(), 3);
+        assert_eq!(online.remotes.get(&2).expect("remote").name, "B2");
     }
 
     #[test]

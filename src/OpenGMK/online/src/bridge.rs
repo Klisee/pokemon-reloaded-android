@@ -281,7 +281,7 @@ fn parse_wp(rest: &str) -> Option<ServerMessage> {
 }
 
 fn cap_name(name: &str) -> String {
-    String::from_utf8_lossy(&crate::world::sanitize_name_bytes(name.as_bytes())).into_owned()
+    crate::world::sanitize_name_display(name.as_bytes())
 }
 
 fn finite_component(value: f64) -> Option<f64> {

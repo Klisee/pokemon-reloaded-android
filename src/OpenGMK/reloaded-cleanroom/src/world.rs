@@ -322,6 +322,24 @@ pub fn sanitize_name_bytes(bytes: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// Produces a bounded, valid UTF-8 display name from untrusted name bytes.
+///
+/// The stored prefix is sanitized with [`sanitize_name_bytes`]; invalid UTF-8
+/// is replaced lossily and the resulting string is cut on a character boundary
+/// so it never exceeds [`MAX_REMOTE_NAME_BYTES`] bytes.
+pub fn sanitize_name_display(bytes: &[u8]) -> String {
+    let sanitized = sanitize_name_bytes(bytes);
+    let text = String::from_utf8_lossy(&sanitized);
+    if text.len() <= MAX_REMOTE_NAME_BYTES {
+        return text.into_owned();
+    }
+    let mut end = MAX_REMOTE_NAME_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
 fn valid_parts_token(token: &[u8]) -> bool {
     !token.is_empty() && token.iter().all(|&byte| (0x21..=0x7e).contains(&byte))
 }
@@ -772,7 +790,7 @@ impl WorldState {
         }
         let victim = victim
             .or(same_room)
-            .or_else(|| self.remotes.keys().next().copied())?;
+            .or_else(|| self.remotes.keys().copied().min())?;
         self.remotes.remove(&victim);
         self.order.retain(|&other| other != victim);
         Some(victim)
@@ -1688,6 +1706,58 @@ mod tests {
     }
 
     #[test]
+    fn limit_name_bytes_never_splits_a_codepoint() {
+        let name = format!("A{}", "é".repeat(64));
+        assert_eq!(name.len(), MAX_REMOTE_NAME_BYTES + 1);
+        let limited = limit_name_bytes(name.as_bytes());
+        assert_eq!(limited.len(), MAX_REMOTE_NAME_BYTES - 1);
+        assert_eq!(std::str::from_utf8(limited).unwrap(), "A".to_string() + &"é".repeat(63));
+
+        for prefix in 0..=MAX_REMOTE_NAME_BYTES {
+            for character in ["é", "€", "😀"] {
+                let name = format!("{}{}{}", "a".repeat(prefix), character, "tail");
+                let limited = limit_name_bytes(name.as_bytes());
+                assert!(limited.len() <= MAX_REMOTE_NAME_BYTES);
+                assert!(std::str::from_utf8(limited).is_ok(), "prefix {prefix}, {character}");
+                assert!(name.as_bytes().starts_with(limited));
+            }
+        }
+    }
+
+    #[test]
+    fn sanitize_name_display_is_valid_utf8_and_bounded() {
+        let invalid = vec![0xff; MAX_REMOTE_NAME_BYTES * 4];
+        let display = sanitize_name_display(&invalid);
+        assert!(display.len() <= MAX_REMOTE_NAME_BYTES);
+        assert!(display.chars().all(|character| character == '\u{fffd}'));
+
+        let control = sanitize_name_display(b"A\tB\x1b[31mC\x7f");
+        assert_eq!(control, "AB[31mC");
+    }
+
+    #[test]
+    fn wp_controls_do_not_discard_the_position_update() {
+        let mut world = WorldState::new(None);
+        assert_eq!(
+            world.apply_wp_line(b"WP 1 2 100 200 S,25,2,0,0,1,1 A\tB\x1b[31mC"),
+            Ok(true)
+        );
+        let remote = world.get(1).expect("remote");
+        assert_eq!((remote.x, remote.y), (100.0, 200.0));
+        assert_eq!(remote.parts.primary_player().unwrap().sprite, 25);
+        assert_eq!(remote.name, b"AB[31mC");
+
+        assert_eq!(
+            world.apply_wp_line(b"WP 1 2 101 201 S,26,3,0,0,1,1 \x7f\x1b"),
+            Ok(true)
+        );
+        let remote = world.get(1).expect("remote");
+        assert_eq!((remote.x, remote.y), (101.0, 201.0));
+        assert_eq!(remote.parts.primary_player().unwrap().sprite, 26);
+        assert!(remote.name.is_empty());
+    }
+
+    #[test]
     fn wp_rejects_out_of_range_and_non_finite_positions() {
         for position in [
             MAX_COORDINATE.to_string(),
@@ -1734,6 +1804,61 @@ mod tests {
             parse_wp(b"WP 2 2 -1500000000 0 S,1,0,3000000000,0,1,1").unwrap();
         assert!(world.apply_wp(&message));
         assert_eq!(world.get(2).unwrap().parts.primary_player().unwrap().dx, 3_000_000_000.0);
+    }
+
+    #[test]
+    fn world_state_accepts_full_signed_32_bit_positions() {
+        let mut world = WorldState::new(None);
+        assert_eq!(
+            world.apply_wp_line(b"WP 1 2 2147483647 -2147483648 S,1,0,0,0,1,1 max"),
+            Ok(true)
+        );
+        assert_eq!(
+            world.apply_wp_line(b"WP 2 2 -2147483648 2147483647 S,1,0,0,0,1,1 min"),
+            Ok(true)
+        );
+        assert_eq!(
+            world.apply_wp_line(b"WP 3 2 1000000.5 -1000000.000001 S,1,0,0,0,1,1 real"),
+            Ok(true)
+        );
+        assert_eq!(
+            world.apply_wp_line(b"WP 4 2 2147483648 0 S,1,0,0,0,1,1 overflow"),
+            Err(ParseError::MalformedNumeric)
+        );
+        assert_eq!(
+            world.apply_wp_line(b"WP 5 2 0 -2147483649 S,1,0,0,0,1,1 underflow"),
+            Err(ParseError::MalformedNumeric)
+        );
+
+        let (x, y) = (world.get(1).unwrap().x, world.get(1).unwrap().y);
+        assert_eq!((x, y), (2_147_483_647.0, -2_147_483_648.0));
+        let (x, y) = (world.get(3).unwrap().x, world.get(3).unwrap().y);
+        assert_eq!((x, y), (1_000_000.5, -1_000_000.000001));
+    }
+
+    #[test]
+    fn world_state_eviction_fallback_is_deterministic() {
+        let mut world = WorldState::with_capacity(None, 2);
+        for id in [9u64, 4, 7] {
+            world.remotes.insert(
+                id,
+                Remote {
+                    id,
+                    room: 2,
+                    x: 1.0,
+                    y: 1.0,
+                    parts: Parts::default(),
+                    name: Vec::new(),
+                },
+            );
+        }
+        let (applied, evicted) =
+            world.apply_wp_with_eviction(&parse_wp(b"WP 1 2 3 4 S,1,0,0,0,1,1").unwrap());
+        assert!(applied);
+        assert_eq!(evicted, Some(4));
+        assert!(world.get(4).is_none());
+        assert!(world.get(7).is_some());
+        assert!(world.get(9).is_some());
     }
 
     #[test]
