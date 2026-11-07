@@ -482,6 +482,7 @@ dependencies = [
  "phf",
  "ramen",
  "rect_packer",
+ "reloaded-cleanroom",
  "reloaded-online",
  "rmp3",
  "rust-ini",

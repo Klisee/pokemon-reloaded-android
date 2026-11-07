@@ -423,7 +423,7 @@ impl SaveImage {
         Ok(out)
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, SaveError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, SaveError> {
         let mut reader = Reader::new(bytes);
         if reader.take(8)? != IMAGE_MAGIC {
             return Err(SaveError::corrupt("bad image magic"));
@@ -1216,14 +1216,18 @@ fn ensure_subdir(root: &Path, name: &str) -> Result<PathBuf, SaveError> {
 fn clean_temp_dir(dir: &Path) -> Result<(), SaveError> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(".tmp-") {
-            let path = entry.path();
-            let meta = fs::symlink_metadata(&path)?;
-            if meta.is_dir() && !meta.file_type().is_symlink() {
+        let path = entry.path();
+        let is_temp = entry.file_name().to_string_lossy().starts_with(".tmp-");
+        let meta = fs::symlink_metadata(&path)?;
+        let is_dir = meta.is_dir() && !meta.file_type().is_symlink();
+        if is_temp {
+            if is_dir {
                 fs::remove_dir_all(path)?;
             } else {
                 fs::remove_file(path)?;
             }
+        } else if is_dir {
+            clean_temp_dir(&path)?;
         }
     }
     Ok(())
@@ -1307,7 +1311,7 @@ impl SaveBackend for FileBackend {
             return Err(SaveError::corrupt("write verification failed"));
         }
         fs::rename(&temp, &target)?;
-        sync_dir(&dir)?;
+        let _ = sync_dir(&dir);
         Ok(SaveCommit {
             slot,
             previous,
@@ -1419,7 +1423,7 @@ impl SaveBackend for FileBackend {
             sync_dir(&temp)?;
             sync_dir(&epoch_dir)?;
             fs::rename(&temp, &final_dir)?;
-            sync_dir(&epoch_dir)?;
+            let _ = sync_dir(&epoch_dir);
             Ok(())
         })();
         if let Err(error) = result {
@@ -1577,6 +1581,18 @@ impl SaveBackend for FileBackend {
             || restored.schema != original.schema
             || restored.parts != original.parts
         {
+            if let Some(mut previous_image) = live {
+                previous_image.revision = restored.revision.max(previous_image.revision);
+                let _ = self.commit(
+                    world,
+                    slot,
+                    &previous_image,
+                    CommitOptions {
+                        mode: SaveMode::Replace,
+                        allow_world_readable: false,
+                    },
+                );
+            }
             return Err(SaveError::corrupt("restored state failed verification"));
         }
         let warnings = Vec::new();
@@ -2545,7 +2561,8 @@ impl SaveHooks {
             .backend
             .load(world, slot)?
             .ok_or_else(|| SaveError::rejected("no live save to capture"))?;
-        self.capture_with_retention(world, slot, &image, epoch, false, cause)
+        let baseline = cause == SnapshotCause::Baseline;
+        self.capture_with_retention(world, slot, &image, epoch, baseline, cause)
     }
 
     pub fn prune(&self, world: WorldId) -> Result<PruneReport, SaveError> {
@@ -2784,18 +2801,38 @@ impl SaveHooks {
         };
 
         let restore = self.backend.restore(source, expected)?;
-        let restored = self
-            .backend
-            .load(world, slot)?
-            .ok_or_else(|| SaveError::corrupt("restored state missing"))?;
+        let restored = self.backend.load(world, slot)?;
         let original = SaveImage::decode(&record.snapshot.body)?;
-        if restored.parts != original.parts
-            || restored.format != original.format
-            || restored.schema != original.schema
-        {
+        let matches = match &restored {
+            Some(restored) => {
+                restored.parts == original.parts
+                    && restored.format == original.format
+                    && restored.schema == original.schema
+            }
+            None => original.parts.is_empty(),
+        };
+        if !matches {
+            let revision = restored
+                .as_ref()
+                .map(|image| image.revision)
+                .unwrap_or(restore.current);
+            if let Some(mut previous_image) = live {
+                previous_image.revision = revision.max(previous_image.revision);
+                let _ = self.backend.commit(
+                    world,
+                    slot,
+                    &previous_image,
+                    CommitOptions {
+                        mode: SaveMode::Replace,
+                        allow_world_readable: false,
+                    },
+                );
+            }
             return Err(SaveError::corrupt("restored state failed verification"));
         }
-        audit.after_digest = Some(restored.digest()?);
+        if let Some(restored) = &restored {
+            audit.after_digest = Some(restored.digest()?);
+        }
 
         let new_epoch = {
             let mut states = self

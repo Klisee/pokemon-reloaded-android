@@ -28,6 +28,7 @@ getopts = "0.2"
 getrandom = "0.2"  # 0.3.4
 glob = "0.3"
 gm8exe = { path = "../gm8exe" }
+reloaded-cleanroom = { path = "../reloaded-cleanroom" }
 reloaded-online-net = { package = "reloaded-online", path = "../online" }
 gml-parser = { path = "../gml-parser", features = ["runner-serde-derives"] }
 hex = "0.4"
