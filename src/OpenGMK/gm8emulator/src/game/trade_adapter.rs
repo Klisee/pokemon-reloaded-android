@@ -12,34 +12,34 @@ pub const FIELD_COUNT: usize = 28;
 pub const VALUE_COUNT: usize = 49;
 
 pub const FIELDS: [&[u8]; FIELD_COUNT] = [
-    b"pkmn1",
-    b"nivel1",
-    b"indexnivel",
-    b"exp1",
-    b"IV",
-    b"objpoke1",
-    b"pkmnsex1",
-    b"indexpkmn",
-    b"extraInfo",
-    b"selue_pk1",
-    b"PP_1",
-    b"PS_1",
-    b"STD1",
-    b"MAX_PP_1",
-    b"MAX_PS_1",
-    b"XTRA_PS_1",
-    b"atk1",
-    b"def1",
-    b"vel1",
-    b"atk_sp1",
-    b"def_sp1",
-    b"prec1",
-    b"num_attack1",
-    b"tipoA1",
-    b"tipoB1",
-    b"tipoC1",
-    b"volador1",
-    b"fantasma1",
+    f3r::global::PKMN1,
+    f3r::global::NIVEL1,
+    f3r::global::INDEXNIVEL,
+    f3r::global::EXP1,
+    f3r::global::IV,
+    f3r::global::OBJPOKE1,
+    f3r::global::PKMNSEX1,
+    f3r::global::INDEXPKMN,
+    f3r::global::EXTRA_INFO,
+    f3r::global::SELUE_PK1,
+    f3r::global::PP_1,
+    f3r::global::PS_1,
+    f3r::global::STD1,
+    f3r::global::MAX_PP_1,
+    f3r::global::MAX_PS_1,
+    f3r::global::XTRA_PS_1,
+    f3r::global::ATK1,
+    f3r::global::DEF1,
+    f3r::global::VEL1,
+    f3r::global::ATK_SP1,
+    f3r::global::DEF_SP1,
+    f3r::global::PREC1,
+    f3r::global::NUM_ATTACK1,
+    f3r::global::TIPO_A1,
+    f3r::global::TIPO_B1,
+    f3r::global::TIPO_C1,
+    f3r::global::VOLADOR1,
+    f3r::global::FANTASMA1,
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -130,14 +130,14 @@ fn value_from_option(value: Option<GmlValue>, text_default: bool) -> TradeValue 
 }
 
 fn say_my_name(game: &Game) -> Vec<u8> {
-    game.global_text(b"apodoName")
+    game.global_text(f3r::global::APODO_NAME)
         .filter(|name| !name.is_empty())
-        .or_else(|| game.global_text(b"protaname"))
+        .or_else(|| game.global_text(f3r::global::PROTANAME))
         .unwrap_or_default()
 }
 
 fn mask(game: &Game) -> Result<u64, String> {
-    let base = match game.instance_value(3, b"mask1") {
+    let base = match game.instance_value(f3r::object::CONTROL, f3r::field::MASK1) {
         Some(GmlValue::Real(value)) => {
             let value = value.into_inner();
             if !value.is_finite()
@@ -191,7 +191,7 @@ fn real(value: &TradeValue) -> f64 {
 /// info 14 use the local mask, info 4 falls back to the local trainer name, and info 5 is
 /// always text. The label is display-only.
 pub fn capture(game: &Game, slot: u8) -> Result<TradeOffer, String> {
-    if slot > 5 {
+    if usize::from(slot) >= f3r::format::PARTY_SIZE {
         return Err("slot de intercambio invalido".into())
     }
     let mask = mask(game)?;
@@ -211,15 +211,15 @@ pub fn capture(game: &Game, slot: u8) -> Result<TradeOffer, String> {
         }
         values.push(value);
     }
-    for move_index in 1..=4u32 {
+    for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
         values.push(value_from_option(
-            game.global_value(b"attack1", u32::from(slot) * 32_000 + move_index),
+            game.global_value(f3r::global::ATTACK1, u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + move_index),
             false,
         ));
     }
-    for info_index in 0..=16u32 {
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
         let mut value = value_from_option(
-            game.global_value(b"info", u32::from(slot) * 32_000 + info_index),
+            game.global_value(f3r::global::INFO, u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + info_index),
             info_index == 4 || info_index == 5,
         );
         if info_index == 4 {
@@ -259,7 +259,7 @@ pub fn capture(game: &Game, slot: u8) -> Result<TradeOffer, String> {
 /// fail. The caller (`trade_tick`) still wraps apply+save in `OnlineSnapshot` for the save
 /// failure rollback required by TRADE-23.
 pub fn apply(game: &mut Game, slot: u8, offer: &TradeOffer) -> Result<(), String> {
-    if slot > 5 || offer.values.len() != VALUE_COUNT {
+    if usize::from(slot) >= f3r::format::PARTY_SIZE || offer.values.len() != VALUE_COUNT {
         return Err("intercambio invalido".into())
     }
     let codec_offer = offer.to_codec()?;
@@ -282,12 +282,12 @@ pub fn apply(game: &mut Game, slot: u8, offer: &TradeOffer) -> Result<(), String
     let mut infos: Vec<TradeValue> = offer.values[32..49].to_vec();
     let mut names = vec![
         say_my_name(game),
-        game.global_text(b"protaname").unwrap_or_default(),
-        game.global_text(b"apodoName").unwrap_or_default(),
+        game.global_text(f3r::global::PROTANAME).unwrap_or_default(),
+        game.global_text(f3r::global::APODO_NAME).unwrap_or_default(),
     ];
     names.sort();
     names.dedup();
-    for info_index in 0..=16u32 {
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
         let index = info_index as usize;
         let mut value = infos[index].clone();
         if info_index == 14 {
@@ -309,23 +309,23 @@ pub fn apply(game: &mut Game, slot: u8, offer: &TradeOffer) -> Result<(), String
     for (index, name) in FIELDS.iter().enumerate() {
         set_value(game, name, u32::from(slot), scalars[index].clone());
     }
-    for move_index in 1..=4u32 {
+    for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
         set_value(
             game,
-            b"attack1",
-            u32::from(slot) * 32_000 + move_index,
+            f3r::global::ATTACK1,
+            u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + move_index,
             offer.values[28 + move_index as usize - 1].clone(),
         );
     }
-    for info_index in 0..=16u32 {
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
         set_value(
             game,
-            b"info",
-            u32::from(slot) * 32_000 + info_index,
+            f3r::global::INFO,
+            u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + info_index,
             infos[info_index as usize].clone(),
         );
     }
-    let count = (0..=5).filter(|slot| game.global_num(f3r::global::PKMN1, *slot) > 0.0).count() as f64;
+    let count = (0..f3r::format::PARTY_SIZE).filter(|slot| game.global_num(f3r::global::PKMN1, *slot as u32) > 0.0).count() as f64;
     if game.global_num(f3r::global::ACTUAL1, 0) >= count {
         game.set_global_num(f3r::global::ACTUAL1, 0, 0.0);
     }
@@ -341,9 +341,9 @@ fn set_value(game: &mut Game, name: &[u8], index: u32, value: TradeValue) {
 }
 
 pub fn is_valid_slot(game: &Game, slot: u8) -> bool {
-    slot <= 5 && game.global_num(f3r::global::PKMN1, u32::from(slot)) > 0.0
+    usize::from(slot) < f3r::format::PARTY_SIZE && game.global_num(f3r::global::PKMN1, u32::from(slot)) > 0.0
 }
 
 pub fn occupied_slots(game: &Game) -> Vec<u8> {
-    (0..=5).filter(|slot| is_valid_slot(game, *slot)).collect()
+    (0..f3r::format::PARTY_SIZE as u8).filter(|slot| is_valid_slot(game, *slot)).collect()
 }

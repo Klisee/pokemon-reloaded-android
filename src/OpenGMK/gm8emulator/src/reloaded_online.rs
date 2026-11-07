@@ -1883,16 +1883,16 @@ fn project_part(part: &world::Part) -> Option<RemotePart> {
 
 fn battle_slot_for_facing(facing: i64) -> i32 {
     if facing == 0 {
-        return 10
+        return f3r::battle::SLOT_FACING_ZERO
     }
     if facing == -1 {
-        return 11
+        return f3r::battle::SLOT_FACING_HURT
     }
-    let Ok(slot) = i32::try_from(facing) else { return 2 };
+    let Ok(slot) = i32::try_from(facing) else { return f3r::battle::SLOT_DEFAULT };
     if world::battle_slot_label(slot).is_some() {
         slot
     } else {
-        2
+        f3r::battle::SLOT_DEFAULT
     }
 }
 
@@ -1905,7 +1905,7 @@ fn plan_battle_sprite(
     if species <= 0 {
         return PokemonSpritePlan::Missing
     }
-    let data_root = program_directory.join("data");
+    let data_root = program_directory.join(f3r::save::ROOT);
     let exists = |relative: &str| data_root.join(relative).is_file();
     match world::battle_sprite(species, slot, context, exists) {
         Ok(world::BattleSprite::File(path)) => PokemonSpritePlan::File(data_root.join(path)),
@@ -2112,13 +2112,19 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("data").join("pkmnbattle")).unwrap();
+        std::fs::create_dir_all(root.join(f3r::save::ROOT).join(f3r::world::BATTLE_SPRITE_DIR)).unwrap();
         root
     }
 
     fn touch(root: &Path, names: &[&str]) {
         for name in names {
-            std::fs::write(root.join("data").join("pkmnbattle").join(format!("{name}.gmspr")), []).unwrap();
+            std::fs::write(
+                root.join(f3r::save::ROOT)
+                    .join(f3r::world::BATTLE_SPRITE_DIR)
+                    .join(format!("{name}.{}", f3r::world::BATTLE_SPRITE_EXT)),
+                [],
+            )
+            .unwrap();
         }
     }
 
