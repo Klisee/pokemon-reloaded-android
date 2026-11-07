@@ -10,7 +10,7 @@
 
 /// Manifest revision. Increment when native ids, names, or the supported build
 /// family change.
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 /// Native build family this manifest was written for.
 pub const NATIVE_BUILD_FAMILY: &str = "Pokemon Reloaded The Last Beta 1.9.2.2";
@@ -82,12 +82,22 @@ const fn room(id: i32, name: &'static str, key: &'static str, role: &'static str
 }
 
 const fn object(id: Option<i32>, name: &'static str, key: &'static str, role: &'static str) -> Entry {
+    object_aliased(id, name, key, role, &[])
+}
+
+const fn object_aliased(
+    id: Option<i32>,
+    name: &'static str,
+    key: &'static str,
+    role: &'static str,
+    aliases: &'static [&'static str],
+) -> Entry {
     Entry {
         kind: Kind::Object,
         native_id: id,
         native_name: name,
         content_key: key,
-        aliases: &[],
+        aliases,
         role: Some(role),
         status: Status::Supported,
     }
@@ -217,11 +227,15 @@ pub mod object {
     pub const TRAINER_ENEMY: i32 = 9;
     pub const PLAYER: i32 = 14;
     pub const VARIABLES: i32 = 18;
-    pub const PLAYER_TWO: i32 = 1172;
+    pub const EXCLAMATION: i32 = 95;
+    pub const MULTIPLAYER: i32 = 1172;
+    /// Legacy alias for the multiplayer controller object.
+    pub const PLAYER_TWO: i32 = MULTIPLAYER;
 
     pub const PLAYER_NAME: &[u8] = b"obj_Prota";
     pub const INICIO_CONTROL_NAME: &[u8] = b"InicioControl";
     pub const MULTIPLAYER_NAME: &[u8] = b"MULTIPLAYER";
+    pub const EXCLAMATION_NAME: &[u8] = b"obj_EXC";
 
     pub fn is_player_name(name: &[u8]) -> bool {
         name == PLAYER_NAME
@@ -234,6 +248,20 @@ pub mod object {
     pub fn is_multiplayer_name(name: &[u8]) -> bool {
         name == MULTIPLAYER_NAME
     }
+
+    pub fn is_exclamation_name(name: &[u8]) -> bool {
+        name == EXCLAMATION_NAME
+    }
+}
+
+pub mod sprite {
+    //! Sprite content keys and native names.
+
+    pub const BALL: i32 = 63;
+    pub const PLAYER_DEFAULT: i32 = super::player::DEFAULT_SPRITE;
+
+    pub const BALL_NAME: &[u8] = b"spr_ball";
+    pub const PLAYER_DEFAULT_NAME: &[u8] = b"Mark2_D";
 }
 
 pub mod script {
@@ -530,7 +558,7 @@ pub mod save {
 
 /// Authoritative manifest table. Entries not needed by the current profile are
 /// still listed when the adapter can resolve them.
-pub static ENTRIES: &[Entry] = &[
+pub const ENTRIES: &[Entry] = &[
     room(room::CENTER, "Centro_Pokemon", "room.center", "pokemon-center"),
     room(room::SELECT, "SelectRoom", "room.select", "character-select"),
     room(room::HOME_1, "Home_1", "room.home.1", "home"),
@@ -546,10 +574,10 @@ pub static ENTRIES: &[Entry] = &[
     room(room::MULTIPLAYER_MENU, "MultijugadorMenu", "room.multiplayer-menu", "menu"),
     room(room::CREDITS, "CreditosInicioScreen", "room.credits", "menu"),
     room(room::OPTIONS, "OptionsROOM", "room.options", "menu"),
-    room(room::LAB_FOLLOWUP, "unknown#527", "room.cutscene.527", "cutscene"),
-    room(room::LAB_INTRO, "unknown#528", "room.cutscene.528", "cutscene"),
+    room(room::LAB_FOLLOWUP, "SecretRoom", "room.cutscene.527", "cutscene"),
+    room(room::LAB_INTRO, "CharlaRoom", "room.cutscene.528", "cutscene"),
     room(room::BATTLE_LAVA, "BattleROOMLava", "room.battle.lava", "battle-lava"),
-    room(room::SAFARI, "unknown#715", "room.safari", "safari"),
+    room(room::SAFARI, "SafariBasic", "room.safari", "safari"),
     object(Some(object::POKEMON_PLAYER), "Pokemon1", "object.pokemon.player", "battle-pokemon-player"),
     object(Some(object::CONTROL), "Control", "object.control", "control"),
     object(Some(object::POKEMON_ENEMY), "Pokemon2", "object.pokemon.enemy", "battle-pokemon-enemy"),
@@ -557,9 +585,15 @@ pub static ENTRIES: &[Entry] = &[
     object(Some(object::TRAINER_ENEMY), "Trainer2", "object.trainer.enemy", "battle-trainer-enemy"),
     object(Some(object::PLAYER), "obj_Prota", "object.player", "player"),
     object(Some(object::VARIABLES), "variables", "object.world-state", "world-state"),
-    object(Some(object::PLAYER_TWO), "unknown#1172", "object.player-two", "player-two"),
+    object(Some(object::EXCLAMATION), "obj_EXC", "object.exclamation", "online-marker"),
+    object_aliased(
+        Some(object::MULTIPLAYER),
+        "MULTIPLAYER",
+        "object.multiplayer",
+        "multiplayer-controller",
+        &["object.player-two"],
+    ),
     object(None, "InicioControl", "object.inicio-control", "title-controller"),
-    object(None, "MULTIPLAYER", "object.multiplayer", "multiplayer-controller"),
     script(Some(script::ADJUSTMENTS_ROOM), "AdjustmentsRoom", "script.room-adjustment", "room-adjustment"),
     script(Some(script::CARGANDO_EQUIPO), "CargandoEquipo", "script.team-load", "team-load"),
     script(Some(script::EXECUTE_FILE), "execute_file", "script.execute-file", "file"),
@@ -578,15 +612,15 @@ pub static ENTRIES: &[Entry] = &[
     script(Some(script::SLOT_BOX_CARGAR), "SlotBoxCargar", "script.slot-load", "slot-load"),
     script(Some(script::SLOT_BOX_DELETE), "SlotBoxDelete", "script.slot-delete", "slot-delete"),
     script(Some(script::SLOT_BOX_RESTORE), "SlotBoxRestore", "script.slot-restore", "slot-restore"),
-    script(Some(script::MODAL_DIALOG_PORTRAIT), "unknown#6937", "script.modal.dialog-portrait", "modal"),
-    script(Some(script::MODAL_DIALOG_MOBILE), "unknown#6941", "script.modal.dialog-mobile", "modal"),
-    script(Some(script::MODAL_DIALOG_PLAIN), "unknown#6949", "script.modal.dialog-plain", "modal"),
-    script(Some(script::MODAL_PREFERENCES), "unknown#7744", "script.modal.preferences", "modal"),
-    script(Some(script::MODAL_TEXT_ENTRY), "unknown#7754", "script.modal.text-entry", "modal"),
-    script(Some(script::MODAL_LIST), "unknown#7778", "script.modal.list", "modal"),
-    script(Some(script::MODAL_DIFFICULTY), "unknown#7836", "script.modal.difficulty", "modal"),
-    script(Some(script::MODAL_QUESTION), "unknown#9673", "script.modal.question", "modal"),
-    script(Some(script::MODAL_QUESTION_LARGE), "unknown#9674", "script.modal.question-large", "modal"),
+    script(Some(script::MODAL_DIALOG_PORTRAIT), "Dialogo", "script.modal.dialog-portrait", "modal"),
+    script(Some(script::MODAL_DIALOG_MOBILE), "DialogoMovil", "script.modal.dialog-mobile", "modal"),
+    script(Some(script::MODAL_DIALOG_PLAIN), "DialogoSimple", "script.modal.dialog-plain", "modal"),
+    script(Some(script::MODAL_PREFERENCES), "GetBigSelection", "script.modal.preferences", "modal"),
+    script(Some(script::MODAL_TEXT_ENTRY), "GetDialogString", "script.modal.text-entry", "modal"),
+    script(Some(script::MODAL_LIST), "GetMenuSelection", "script.modal.list", "modal"),
+    script(Some(script::MODAL_DIFFICULTY), "GetSelection", "script.modal.difficulty", "modal"),
+    script(Some(script::MODAL_QUESTION), "ShowDialogQuestion", "script.modal.question", "modal"),
+    script(Some(script::MODAL_QUESTION_LARGE), "ShowDialogQuestionBig", "script.modal.question-large", "modal"),
     script(None, "DayNightManageCielo", "script.day-night-sky", "visual"),
     script(None, "DrawOutdoorLighting", "script.outdoor-lighting", "visual"),
     script(None, "InitializeCielo", "script.initialize-sky", "visual"),
@@ -689,7 +723,8 @@ pub static ENTRIES: &[Entry] = &[
     field("sprINDEX", "field.sprite-index", "battle"),
     field("sprINDEX2", "field.sprite-index2", "battle"),
     field("sprR", "field.sprite-result", "battle"),
-    sprite(player::DEFAULT_SPRITE, "unknown#1860", "sprite.player-default", "player"),
+    sprite(sprite::BALL, "spr_ball", "sprite.ball", "online-battle-marker"),
+    sprite(sprite::PLAYER_DEFAULT, "Mark2_D", "sprite.player-default", "player"),
     save_path("data/partidas", "save.root", "save-root"),
     save_path("data/partidas/preonline", "save.preonline", "save-backup"),
     save_path("data/partidas/reloaded<N>.savc", "save.slot.savc", "save-slot"),
@@ -703,11 +738,117 @@ pub static ENTRIES: &[Entry] = &[
     save_path("data/pkmn_shiny/<id>.gif", "world.shiny-overworld-sprite", "overworld-sprite"),
     save_path("data/huevo/<id>.gif", "world.egg-sprite", "egg-sprite"),
     save_path("data/huevo_shiny/<id>.gif", "world.shiny-egg-sprite", "egg-sprite"),
+
 ];
 
-/// Finds a manifest entry by its stable content key.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+const fn digest_u32(mut hash: u64, value: u32) -> u64 {
+    let bytes = value.to_le_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        hash = (hash ^ bytes[index] as u64).wrapping_mul(FNV_PRIME);
+        index += 1;
+    }
+    hash
+}
+
+const fn digest_str(mut hash: u64, text: &str) -> u64 {
+    let bytes = text.as_bytes();
+    hash = digest_u32(hash, bytes.len() as u32);
+    let mut index = 0;
+    while index < bytes.len() {
+        hash = (hash ^ bytes[index] as u64).wrapping_mul(FNV_PRIME);
+        index += 1;
+    }
+    hash
+}
+
+const fn kind_tag(kind: Kind) -> u32 {
+    match kind {
+        Kind::Room => 1,
+        Kind::Object => 2,
+        Kind::Script => 3,
+        Kind::Global => 4,
+        Kind::Field => 5,
+        Kind::Sprite => 6,
+        Kind::SavePath => 7,
+    }
+}
+
+const fn status_tag(status: Status) -> u32 {
+    match status {
+        Status::Supported => 1,
+        Status::Unsupported => 2,
+        Status::DisplayOnly => 3,
+    }
+}
+
+const fn digest_entry(mut hash: u64, entry: &Entry) -> u64 {
+    hash = digest_u32(hash, kind_tag(entry.kind));
+    hash = digest_str(hash, entry.native_name);
+    hash = digest_str(hash, entry.content_key);
+    match entry.native_id {
+        Some(id) => {
+            hash = digest_u32(hash, 1);
+            hash = digest_u32(hash, id as u32);
+        },
+        None => hash = digest_u32(hash, 0),
+    }
+    hash = digest_u32(hash, entry.aliases.len() as u32);
+    let mut index = 0;
+    while index < entry.aliases.len() {
+        hash = digest_str(hash, entry.aliases[index]);
+        index += 1;
+    }
+    match entry.role {
+        Some(role) => {
+            hash = digest_u32(hash, 1);
+            hash = digest_str(hash, role);
+        },
+        None => hash = digest_u32(hash, 0),
+    }
+    digest_u32(hash, status_tag(entry.status))
+}
+
+const fn manifest_digest() -> u64 {
+    let mut hash = FNV_OFFSET;
+    hash = digest_u32(hash, BUILD.manifest);
+    hash = digest_str(hash, BUILD.family);
+    hash = digest_str(hash, BUILD.stamp);
+    hash = digest_u32(hash, BUILD.rooms);
+    hash = digest_u32(hash, BUILD.objects);
+    hash = digest_u32(hash, BUILD.scripts);
+    hash = digest_u32(hash, BUILD.globals);
+    hash = digest_u32(hash, BUILD.save_slots);
+    let mut index = 0;
+    while index < ENTRIES.len() {
+        hash = digest_entry(hash, &ENTRIES[index]);
+        index += 1;
+    }
+    hash
+}
+
+/// Stable FNV-1a digest of the build info and every manifest entry. It changes
+/// only when a native id, name, key, alias, role or status changes.
+pub const MANIFEST_DIGEST: u64 = manifest_digest();
+
+/// Returns the stable manifest digest.
+pub fn stable_digest() -> u64 {
+    MANIFEST_DIGEST
+}
+
+/// Alias for [`stable_digest`].
+pub fn digest() -> u64 {
+    MANIFEST_DIGEST
+}
+
+/// Finds a manifest entry by its stable content key or an alias.
 pub fn entry(content_key: &str) -> Option<&'static Entry> {
-    ENTRIES.iter().find(|entry| entry.content_key == content_key)
+    ENTRIES
+        .iter()
+        .find(|entry| entry.content_key == content_key || entry.aliases.contains(&content_key))
 }
 
 /// Finds a manifest entry by native namespace, id, or name.
@@ -725,6 +866,20 @@ pub fn native(kind: Kind, id: Option<i32>, name: &str) -> Option<&'static Entry>
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn manifest_digest_is_stable() {
+        assert_eq!(stable_digest(), MANIFEST_DIGEST);
+        assert_eq!(digest(), MANIFEST_DIGEST);
+        assert_eq!(MANIFEST_DIGEST, 0xba30_8794_d007_a056);
+    }
+
+    #[test]
+    fn manifest_has_no_placeholder_names() {
+        for entry in ENTRIES {
+            assert!(!entry.native_name.starts_with("unknown#"), "placeholder name {}", entry.native_name);
+        }
+    }
 
     #[test]
     fn manifest_keys_are_unique() {

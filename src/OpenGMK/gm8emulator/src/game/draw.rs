@@ -1,5 +1,6 @@
 use crate::{
     asset::{self, font, Font},
+    compat::f3r,
     game::{Game, GetAsset, PlayType, Version},
     gml,
     math::Real,
@@ -267,7 +268,7 @@ impl Game {
         if self.show_fps {
             self.draw_fps_overlay();
         }
-        if self.room.id == 30 && self.mods_available() && !self.mods_menu_open {
+        if self.room.id == f3r::room::BOOT && self.mods_available() && !self.mods_menu_open {
             self.draw_mods_button();
         }
         if self.mods_menu_open {
@@ -1233,7 +1234,7 @@ impl Game {
             .find(|(_, object)| {
                 object
                     .as_ref()
-                    .map(|object| object.name.as_ref() == b"obj_Prota")
+                    .map(|object| object.name.as_ref() == f3r::object::PLAYER_NAME)
                     .unwrap_or(false)
             })
             .and_then(|(index, _)| {
@@ -1348,7 +1349,7 @@ impl Game {
 
     fn draw_online_battle_marker(&mut self, x: f64, y: f64) {
         let angle = (online_now_ms() * 0.4) % 360.0;
-        if let Some(sprite) = self.online_sprite_by_name(b"spr_ball") {
+        if let Some(sprite) = self.online_sprite_by_name(f3r::sprite::BALL_NAME) {
             if let Some(atlas) = sprite.get_atlas_ref(0) {
                 self.renderer.draw_sprite(atlas, x, y, 1.5, 1.5, angle, 0xffffff, 1.0);
                 return
@@ -1368,7 +1369,7 @@ impl Game {
             .find(|(_, object)| {
                 object
                     .as_ref()
-                    .map(|object| object.name.as_ref() == b"obj_EXC")
+                    .map(|object| object.name.as_ref() == f3r::object::EXCLAMATION_NAME)
                     .unwrap_or(false)
             })
             .map(|(index, _)| index);
