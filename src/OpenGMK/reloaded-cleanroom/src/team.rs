@@ -581,7 +581,7 @@ fn decode_slot(
         2147483647,
         ErrorCategory::ExperienceInvalid,
     )?;
-    check_range(iv, 0, 31, ErrorCategory::IvInvalid)?;
+    check_range(iv, 0, 9_999_999, ErrorCategory::IvInvalid)?;
     check_range(held_item, 0, 65535, ErrorCategory::ItemInvalid)?;
     check_range(selue, 0, 9999999999999999, ErrorCategory::SelueInvalid)?;
     check_range(move_0, 0, 65535, ErrorCategory::MoveInvalid)?;
@@ -818,7 +818,7 @@ pub fn encode(team: &Team, options: &EncodeOptions) -> Result<EncodeResult, Team
                 2147483647,
                 ErrorCategory::ExperienceInvalid,
             )?;
-            check_range(slot.iv as i128, 0, 31, ErrorCategory::IvInvalid)?;
+            check_range(slot.iv as i128, 0, 9_999_999, ErrorCategory::IvInvalid)?;
             check_range(
                 slot.held_item as i128,
                 0,

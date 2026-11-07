@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn profile_r_ranges_are_enforced() {
         let mut team = sample();
-        team.mons[0].iv = 555_555;
+        team.mons[0].iv = 10_000_000;
         assert!(team.encode().is_err());
         assert!(team.validate().is_err());
 
