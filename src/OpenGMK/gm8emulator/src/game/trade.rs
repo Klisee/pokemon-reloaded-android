@@ -125,6 +125,97 @@ mod tests {
         assert_eq!(second.selection, 0);
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AckOutcome {
+        Wait,
+        Complete,
+        Incomplete,
+    }
+
+    // Mirrors the OK branches in `Game::trade_tick` and `Game::trade_input`.
+    // Those methods need game assets and a window, so the ordering vectors drive
+    // the same session transitions through this small test model.
+    fn receive_remote_ok(session: &mut TradeSession) -> AckOutcome {
+        session.remote_ok = true;
+        if session.phase == TradePhase::WaitingOk {
+            if session.slot.is_some() && session.remote.is_some() {
+                AckOutcome::Complete
+            } else {
+                AckOutcome::Incomplete
+            }
+        } else {
+            if session.phase == TradePhase::Confirm {
+                session.message = "El rival acepto; confirma tu intercambio.".into();
+            }
+            AckOutcome::Wait
+        }
+    }
+
+    fn receive_local_ok(session: &mut TradeSession) -> AckOutcome {
+        session.phase = TradePhase::WaitingOk;
+        if session.remote_ok {
+            if session.slot.is_some() && session.remote.is_some() {
+                AckOutcome::Complete
+            } else {
+                AckOutcome::Incomplete
+            }
+        } else {
+            AckOutcome::Wait
+        }
+    }
+
+    fn offered_session() -> TradeSession {
+        let mut session = TradeSession::new(7, "Rival".into());
+        session.slot = Some(2);
+        session.local = Some(offer("local"));
+        session.remote = Some(offer("remote"));
+        session.phase = TradePhase::Confirm;
+        session
+    }
+
+    #[test]
+    fn remote_ok_before_local_offer_or_confirm_is_remembered() {
+        // A remote OK can arrive while this side is still picking or checking
+        // the offer. It must survive the later local offer/confirm so the local
+        // OK completes the trade instead of waiting forever for a second OK.
+        let mut session = TradeSession::new(7, "Rival".into());
+        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Wait);
+        assert!(session.remote_ok);
+
+        session.remote = Some(offer("remote"));
+        session.local = Some(offer("local"));
+        session.slot = Some(2);
+        session.phase = TradePhase::Confirm;
+        assert!(session.remote_ok);
+        assert_eq!(receive_local_ok(&mut session), AckOutcome::Complete);
+    }
+
+    #[test]
+    fn crossed_ok_completes_when_local_ok_arrives_last() {
+        let mut session = offered_session();
+        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Wait);
+        assert_eq!(
+            session.message,
+            "El rival acepto; confirma tu intercambio."
+        );
+        assert_eq!(receive_local_ok(&mut session), AckOutcome::Complete);
+    }
+
+    #[test]
+    fn crossed_ok_completes_when_remote_ok_arrives_last() {
+        let mut session = offered_session();
+        assert_eq!(receive_local_ok(&mut session), AckOutcome::Wait);
+        assert_eq!(session.phase, TradePhase::WaitingOk);
+        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Complete);
+    }
+
+    #[test]
+    fn remote_ok_without_slot_or_offer_reports_an_incomplete_trade() {
+        let mut session = TradeSession::new(7, "Rival".into());
+        session.phase = TradePhase::WaitingOk;
+        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Incomplete);
+    }
+
     #[test]
     fn commit_runs_apply_then_save_without_restore() {
         let mut state = Vec::new();
