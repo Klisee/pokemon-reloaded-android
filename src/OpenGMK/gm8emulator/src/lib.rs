@@ -6,6 +6,7 @@
 
 mod action;
 mod asset;
+pub mod compat;
 pub(crate) mod game;
 mod gml;
 mod handleman;

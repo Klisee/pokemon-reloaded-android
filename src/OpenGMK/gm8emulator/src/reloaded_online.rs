@@ -5,6 +5,7 @@
 
 use crate::{
     asset,
+    compat::f3r,
     game::{Assets, GetAsset, RoomState},
     gml::kernel::parse_gmspr,
     math::Real,
@@ -1062,7 +1063,7 @@ impl ReloadedOnline {
             .find(|(_, object)| {
                 object
                     .as_ref()
-                    .map(|object| object.name.as_ref() == b"obj_Prota")
+                    .map(|object| f3r::object::is_player_name(object.name.as_ref()))
                     .unwrap_or(false)
             })
             .map(|(index, _)| index as ID)
@@ -1993,7 +1994,7 @@ fn local_state(room: &RoomState, assets: &Assets) -> Option<(i32, f64, f64, i32,
         .find(|(_, object)| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .map(|object| f3r::object::is_player_name(object.name.as_ref()))
                 .unwrap_or(false)
         })
         .map(|(index, _)| index as ID)?;
@@ -2070,19 +2071,26 @@ mod team_payload_tests {
 
     #[test]
     fn team_payload_has_five_prefix_fields_and_bytes() {
-        let meta = BattleTeamMeta { seed: 7, fondo: 3, modo: 1, sala: 47, delay: 2 };
+        let meta = BattleTeamMeta { seed: 7, fondo: 3, modo: 1, sala: f3r::room::BATTLE_AQUA, delay: 2 };
         let payload = zibelan_team_payload(b"line1\r\nline2\r\n", &meta);
-        assert_eq!(payload, b"TEAM\x1f7\x1e3\x1e1\x1e47\x1e2\x1eline1\r\nline2\r\n");
+        let expected = format!(
+            "TEAM\x1f7\x1e3\x1e1\x1e{}\x1e2\x1eline1\r\nline2\r\n",
+            f3r::room::BATTLE_AQUA
+        );
+        assert_eq!(payload, expected.as_bytes());
     }
 
     #[test]
     fn parses_team_payload_without_touching_team_bytes() {
-        let payload = b"9\x1e1001\x1e2\x1e47\x1e4\x1euno\r\ndos\r\n";
-        let (meta, data) = parse_zibelan_team(payload).expect("valid team");
+        let payload = format!(
+            "9\x1e1001\x1e2\x1e{}\x1e4\x1euno\r\ndos\r\n",
+            f3r::room::BATTLE_AQUA
+        );
+        let (meta, data) = parse_zibelan_team(payload.as_bytes()).expect("valid team");
         assert_eq!(meta.seed, 9);
         assert_eq!(meta.fondo, 1001);
         assert_eq!(meta.modo, 2);
-        assert_eq!(meta.sala, 47);
+        assert_eq!(meta.sala, f3r::room::BATTLE_AQUA);
         assert_eq!(meta.delay, 4);
         assert_eq!(data, b"uno\r\ndos\r\n");
     }

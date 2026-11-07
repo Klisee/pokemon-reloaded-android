@@ -35,6 +35,7 @@ pub use view::View;
 
 use crate::{
     action::Tree,
+    compat::f3r,
     asset::{
         self,
         font::{Character, Font},
@@ -2053,7 +2054,7 @@ impl Game {
         // Title, character selection and the intro happen before there is a player to show. They
         // must not report a character (the selection changes it on every key, which would upload a
         // head each time); the chat right after selection is where the chosen player appears.
-        let no_player_room = room_name.starts_with("inicio") || room_name.starts_with("select") || room_name.starts_with("intro");
+        let no_player_room = f3r::room::is_no_player_name(&room_name);
         static LAST_NO_PLAYER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         static LAST_CHAR: std::sync::Mutex<Option<(i32, i32, i32)>> = std::sync::Mutex::new(None);
         let was_no_player = LAST_NO_PLAYER.swap(no_player_room, std::sync::atomic::Ordering::Relaxed);
@@ -2070,13 +2071,19 @@ impl Game {
         crate::android_main::report_route(self.room.id, || {
             self.assets.rooms.get_asset(self.room.id).map(|r| r.name.to_string()).unwrap_or_default()
         });
-        // `global.battle` is the battle *mode* (0 wild, 1 trainer, -1 outside), set by `BattleMode`,
-        // and the game never resets it when the battle ends. The actual battle is the set of
-        // instances created for it: `Pokemon1` (0, the player's active Pokémon), `Pokemon2` (4, the
-        // enemy), `Trainer1` (7) and `Trainer2` (9, the trainers in trainer battles). They are
-        // destroyed when the battle ends and recreated on every switch, hence the short grace.
-        let battle_type = self.global_number(b"battle", 0).unwrap_or(-1);
-        let battle_instances = [0, 4, 7, 9].iter().any(|&object| self.room.instance_list.count(object) > 0);
+        // The battle-mode global is 0 for wild, 1 for trainer and -1 outside battle, and the game
+        // never resets it when the battle ends. The actual battle is the set of instances created
+        // for it: the player's active Pokémon, the enemy, and the trainer actors. They are destroyed
+        // when the battle ends and recreated on every switch, hence the short grace.
+        let battle_type = self.global_number(f3r::global::BATTLE, 0).unwrap_or(-1);
+        let battle_instances = [
+            f3r::object::POKEMON_PLAYER,
+            f3r::object::POKEMON_ENEMY,
+            f3r::object::TRAINER_PLAYER,
+            f3r::object::TRAINER_ENEMY,
+        ]
+        .iter()
+        .any(|&object| self.room.instance_list.count(object) > 0);
         static LAST_BATTLE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
         if battle_instances {
             if let Ok(mut last) = LAST_BATTLE.lock() {
@@ -2091,17 +2098,17 @@ impl Game {
                 .map(|last| last.elapsed().as_millis() < 500)
                 .unwrap_or(false)
         };
-        let prota = self.global_number(b"prota_index", 0).unwrap_or(-1);
-        let outfit = self.global_number(b"prota_vestuario", 0).unwrap_or(1);
+        let prota = self.global_number(f3r::global::PROTA_INDEX, 0).unwrap_or(-1);
+        let outfit = self.global_number(f3r::global::PROTA_VESTUARIO, 0).unwrap_or(1);
         let char2 = self.player_char2();
         // Menu rooms (bag, map, party) destroy the player instance, so `char2` reads as -1 there.
         // Exporting the sprite in that state did a GPU readback inside the menu and hung the game
         // thread; the head belongs to the character and only changes in the world.
-        let player_exists = self.room.instance_list.count(14) > 0;
-        // The chat with the professor has no active `obj_Prota` (the player is drawn by the script),
-        // but `global.sprD` already holds the chosen sprite. Export from that there; menus still do
-        // not export (their room names are not the chat's and the player is absent).
-        let charla_room = room_name.starts_with("charla");
+        let player_exists = self.room.instance_list.count(f3r::object::PLAYER) > 0;
+        // The chat with the professor has no active player actor (the player is drawn by the
+        // script), but the chosen-sprite global already holds it. Export from that there; menus
+        // still do not export (their room names are not the chat's and the player is absent).
+        let charla_room = f3r::room::is_charla_name(&room_name);
         let can_export = !no_player_room && !in_battle && (player_exists || charla_room);
         static LAST_EXPORT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
         if !no_player_room {
@@ -2130,7 +2137,7 @@ impl Game {
         }
         // The trainer's nickname (what the player typed when starting), not the character's name.
         if !no_player_room {
-            if let Some(name) = self.global_string(b"protaname") {
+            if let Some(name) = self.global_string(f3r::global::PROTANAME) {
                 if !name.trim().is_empty() {
                     crate::android_main::report_player_name(name.trim());
                 }
@@ -2142,7 +2149,7 @@ impl Game {
         // The trainer's name is only trusted for a trainer battle (battle_type != 0); otherwise it
         // could be a stale dialogue name.
         let trainer = if battle_type != 0 {
-            [b"enemigotrainer".as_slice(), b"TRAINER_NM".as_slice(), b"enemigotrainer2".as_slice(), b"enemigotrainer3".as_slice()]
+            [f3r::global::ENEMIGOTRAINER, f3r::global::TRAINER_NM, f3r::global::ENEMIGOTRAINER2, f3r::global::ENEMIGOTRAINER3]
                 .iter()
                 .filter_map(|name| self.global_string(name))
                 .map(|name| name.trim().to_string())
@@ -2154,9 +2161,9 @@ impl Game {
         crate::android_main::report_battle(
             in_battle,
             &trainer,
-            self.global_number(b"pkmn2", 0).unwrap_or(-1),
+            self.global_number(f3r::global::PKMN2, 0).unwrap_or(-1),
         );
-        crate::touch_navigation::report(self.room.id, self.modal_system(), room_name.contains("mochila") || room_name.contains("bagroom"));
+        crate::touch_navigation::report(self.room.id, self.modal_system(), f3r::room::is_bag_name(&room_name));
         crate::touch_controls::set_room(self.room.id);
         crate::touch_controls::set_dialogue(self.dialogue_open());
         crate::touch_controls::set_box_open(self.inside_box());
@@ -2167,12 +2174,12 @@ impl Game {
         crate::touch_controls::set_party(self.party_species());
     }
 
-    /// Each party slot's stored species value (0 = empty) straight from `global.pkmn1[0..5]`.
+    /// Each party slot's stored species value (0 = empty), read straight from the party globals.
     #[cfg(target_os = "android")]
     fn party_species(&self) -> [i32; crate::touch_controls::PICKER_SLOTS] {
         let mut species = [0; crate::touch_controls::PICKER_SLOTS];
         for (index, slot) in species.iter_mut().enumerate() {
-            *slot = self.global_number(b"pkmn1", index as u32).unwrap_or(0);
+            *slot = self.global_number(f3r::global::PKMN1, index as u32).unwrap_or(0);
         }
         species
     }
@@ -2214,15 +2221,15 @@ impl Game {
     /// The sprite the player is drawn with (the base roster and custom characters alike).
     #[cfg(target_os = "android")]
     fn player_sprite_index(&self) -> i32 {
-        // `obj_Prota` (object 14) is the player. Its instance id changes when a save is loaded or
-        // the room is rebuilt, so look it up by object index, not by `get_by_instid(3)`.
-        if let Some(handle) = self.room.instance_list.iter_by_object(14).next(&self.room.instance_list) {
+        // The player actor's instance id changes when a save is loaded or the room is rebuilt, so
+        // look it up by object content key, not by a saved instance id.
+        if let Some(handle) = self.room.instance_list.iter_by_object(f3r::object::PLAYER).next(&self.room.instance_list) {
             let sprite = self.room.instance_list.get(handle).sprite_index.get();
             if sprite >= 0 {
                 return sprite
             }
         }
-        self.global_number(b"sprD", 0).unwrap_or(-1)
+        self.global_number(f3r::global::SPRD, 0).unwrap_or(-1)
     }
 
     /// Writes the player's current sprite to `files/rpc-player.png`, head up.
@@ -2258,11 +2265,11 @@ impl Game {
 
     /// `char2` is a real: custom trainers use the fractional part as a variant.
     fn player_char2_real(&self) -> f64 {
-        let Some(field_id) = self.compiler.find_field_id(b"char2") else {
+        let Some(field_id) = self.compiler.find_field_id(f3r::field::CHAR2) else {
             return -1.0
         };
         // `char2` is a field of the `Control` object (3); fall back to the player (14).
-        for object in [3, 14] {
+        for object in [f3r::object::CONTROL, f3r::object::PLAYER] {
             let Some(handle) = self.room.instance_list.iter_by_object(object).next(&self.room.instance_list) else {
                 continue
             };
@@ -2298,7 +2305,7 @@ impl Game {
     /// -1 nothing open, -2 the variable is unknown to the compiler, -3 not present in the globals.
     #[cfg(target_os = "android")]
     fn modal_system(&self) -> i32 {
-        let Some(field_id) = self.compiler.find_field_id(b"drawModalSystem") else {
+        let Some(field_id) = self.compiler.find_field_id(f3r::global::DRAW_MODAL_SYSTEM) else {
             return -2
         };
         let Some(field) = self.globals.fields.get(&field_id) else {
@@ -2317,26 +2324,26 @@ impl Game {
     /// and leave a single button to advance it.
     ///
     /// The game draws its dialogues (and the rest of its modals) through a script whose id it keeps
-    /// in `global.drawModalSystem`; -1 means nothing is open. 6937 is the box with a portrait, 6949
-    /// the plain one and 6941 the mobile one.
+    /// in the modal global; -1 means nothing is open. The dialogue modal has portrait, plain and
+    /// mobile variants.
     #[cfg(target_os = "android")]
     fn dialogue_open(&self) -> bool {
-        matches!(self.modal_system(), 6937 | 6949 | 6941)
+        f3r::script::opens_dialogue(self.modal_system())
     }
 
     /// True while the game's own Pokémon box (the PC storage) is open. There is no single room id to
-    /// look at - the box can be reached from several places - but the game keeps `global.ENCAJA` set
-    /// while it is showing, and that is what tells it apart.
+    /// look at - the box can be reached from several places - but the game keeps the box-open global
+    /// set while it is showing, and that is what tells it apart.
     #[cfg(target_os = "android")]
     fn inside_box(&self) -> bool {
-        self.global_number(b"ENCAJA", 0).is_some_and(|value| value != 0)
+        self.global_number(f3r::global::ENCAJA, 0).is_some_and(|value| value != 0)
     }
 
     /// True while the game is showing its text-entry dialog, the one that draws the on-screen
-    /// keyboard (GML script 7754). The Android side raises the system keyboard while it is open.
+    /// keyboard. The Android side raises the system keyboard while it is open.
     #[cfg(target_os = "android")]
     fn text_entry_open(&self) -> bool {
-        self.modal_system() == 7754
+        f3r::script::is_text_entry(self.modal_system())
     }
 
     /// Slides the picture when the system keyboard comes or goes.
@@ -2416,13 +2423,13 @@ impl Game {
             let _ = self.start_test_battle();
         }
 
-        // Intercept the main menu's Multijugador action before InicioControl opens the game's
+        // Intercept the main menu's multiplayer action before the title controller opens the game's
         // classic confirmation dialog. This is an engine-level overlay; no GML is changed.
         if self.online_menu_ignore_trigger && !self.input.keyboard_check(input::Button::M as u8) {
             self.online_menu_ignore_trigger = false;
         }
         if self.play_type == PlayType::Normal
-            && self.room.id == 30
+            && self.room.id == f3r::room::BOOT
             && !self.online_menu_open
             && !self.online_menu_ignore_trigger
             && self.online_menu_trigger()
@@ -2746,16 +2753,7 @@ impl Game {
             .get_asset(self.room.id)
             .map(|room| room.name.to_string().to_ascii_lowercase())
             .unwrap_or_default();
-        name.contains("menu")
-            || name.contains("inicio")
-            || name.contains("loader")
-            || name.contains("option")
-            || name.contains("opcion")
-            || name.contains("credito")
-            || name.contains("copy")
-            || name.contains("splash")
-            || name.contains("intro")
-            || name.contains("select")
+        f3r::room::is_menu_name(&name)
     }
 
     fn gb_menu_palette(&self) -> bool {
@@ -2777,12 +2775,7 @@ impl Game {
         self.assets
             .scripts
             .get_asset(script_id)
-            .map(|script| {
-                matches!(
-                    script.name.as_ref(),
-                    b"DrawOutdoorLighting" | b"DayNightManageCielo" | b"InitializeCielo"
-                )
-            })
+            .map(|script| f3r::script::is_gb_skipped(script.name.as_ref()))
             .unwrap_or(false)
     }
 
@@ -2843,7 +2836,7 @@ impl Game {
             return;
         }
         if !self.mods_menu_open {
-            if self.room.id != 30 || !self.input.mouse_check_button_pressed(1) || self.mods_click_handled {
+            if self.room.id != f3r::room::BOOT || !self.input.mouse_check_button_pressed(1) || self.mods_click_handled {
                 return;
             }
             self.mods_click_handled = true;
@@ -2947,7 +2940,7 @@ impl Game {
         let Some(object_index) = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"InicioControl")
+                .map(|object| object.name.as_ref() == f3r::object::INICIO_CONTROL_NAME)
                 .unwrap_or(false)
         }) else {
             return false
@@ -2960,7 +2953,7 @@ impl Game {
         else {
             return false
         };
-        let Some(field_id) = self.compiler.find_field_id(b"SEL") else { return false };
+        let Some(field_id) = self.compiler.find_field_id(f3r::field::SEL) else { return false };
         let instance = self.room.instance_list.get(handle);
         let value = instance.fields.borrow().get(&field_id).and_then(|field| field.get(0));
         matches!(value, Some(gml::Value::Real(value)) if value.into_inner() == 2.0)
@@ -3037,7 +3030,7 @@ impl Game {
                 self.input.keyboard_clear_all();
                 self.input.mouse_release(1, false);
                 self.reloaded_online.start_zibelan();
-                self.scene_change = Some(SceneChange::Room(43));
+                self.scene_change = Some(SceneChange::Room(f3r::room::LOADER));
             },
             _ => (),
         }
@@ -3075,7 +3068,7 @@ impl Game {
         let object_index = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .map(|object| object.name.as_ref() == f3r::object::PLAYER_NAME)
                 .unwrap_or(false)
         })?;
         let handle = self
@@ -3104,7 +3097,7 @@ impl Game {
         let Some(object_index) = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"MULTIPLAYER")
+                .map(|object| object.name.as_ref() == f3r::object::MULTIPLAYER_NAME)
                 .unwrap_or(false)
         }) else {
             return Ok(())
@@ -3119,54 +3112,54 @@ impl Game {
         };
         let local_sprite = self.local_player_sprite().unwrap_or(1860);
         let local_index = match self
-            .variable_global_array_get(&[gml::Value::Str(gml::String::from("prota_index")), 0.into()])
+            .variable_global_array_get(&[gml::Value::Str(gml::String::from(f3r::global::PROTA_INDEX)), 0.into()])
             .unwrap_or_default()
         {
             gml::Value::Real(value) => value.into_inner(),
             _ => 0.0,
         };
-        self.set_instance_number(handle, b"p2_sprR", local_sprite as f64);
-        self.set_instance_number(handle, b"sprINDEX2", local_sprite as f64);
-        self.set_instance_number(handle, b"index2", local_index);
-        self.set_instance_number(handle, b"sp_char2", 0.0);
+        self.set_instance_number(handle, f3r::field::P2_SPRR, local_sprite as f64);
+        self.set_instance_number(handle, f3r::field::SPRINDEX2, local_sprite as f64);
+        self.set_instance_number(handle, f3r::field::INDEX2, local_index);
+        self.set_instance_number(handle, f3r::field::SP_CHAR2, 0.0);
         let _ = self.variable_global_set(&[
-            gml::Value::Str(gml::String::from("ENTR_SPR")),
+            gml::Value::Str(gml::String::from(f3r::global::ENTR_SPR)),
             gml::Value::Real(Real::from(local_sprite as f64)),
         ]);
         let _ = self.variable_global_set(&[
-            gml::Value::Str(gml::String::from("TRAINER_SPR")),
+            gml::Value::Str(gml::String::from(f3r::global::TRAINER_SPR)),
             gml::Value::Real(Real::from(local_sprite as f64)),
         ]);
         // Test battle: use the local party on both sides.
         for index in 0..6 {
             let species = match self
-                .variable_global_array_get(&[gml::Value::Str(gml::String::from("pkmn1")), index.into()])
+                .variable_global_array_get(&[gml::Value::Str(gml::String::from(f3r::global::PKMN1)), index.into()])
                 .unwrap_or_default()
             {
                 gml::Value::Real(value) => value.into_inner(),
                 _ => 0.0,
             };
-            self.set_instance_number(handle, b"PKMN1", species);
-            self.set_instance_number(handle, b"PKMN2", species as f64);
+            self.set_instance_number(handle, f3r::field::PKMN1, species);
+            self.set_instance_number(handle, f3r::field::PKMN2, species as f64);
         }
-        self.copy_global_array(b"pkmn1", b"pkmn2");
-        self.copy_global_array(b"indexnivel", b"nivel2");
-        self.copy_global_array(b"pkmnsex1", b"pkmnsex2");
-        self.copy_global_array(b"exp1", b"exp2");
-        self.copy_global_array(b"IV", b"IV2");
-        self.copy_global_array(b"objpoke1", b"objpoke2");
-        self.copy_global_array(b"selue_pk1", b"selue_pk2");
-        self.set_instance_number(handle, b"PLAYER1_INI", 1.0);
-        self.set_instance_number(handle, b"PLAYER2_INI", 1.0);
-        self.set_instance_number(handle, b"NUM_POKEMON1", 6.0);
-        self.set_instance_number(handle, b"NUM_POKEMON2", 6.0);
-        self.run_instance_script(handle, b"MultiplayerImportPlayerOne")?;
-        self.run_instance_script(handle, b"MultiplayerImportPlayerTwo")?;
-        self.run_instance_script(handle, b"MultiplayerGoBattle")?;
+        self.copy_global_array(f3r::global::PKMN1, f3r::global::PKMN2);
+        self.copy_global_array(f3r::global::INDEXNIVEL, f3r::global::NIVEL2);
+        self.copy_global_array(f3r::global::PKMNSEX1, f3r::global::PKMNSEX2);
+        self.copy_global_array(f3r::global::EXP1, f3r::global::EXP2);
+        self.copy_global_array(f3r::global::IV, f3r::global::IV2);
+        self.copy_global_array(f3r::global::OBJPOKE1, f3r::global::OBJPOKE2);
+        self.copy_global_array(f3r::global::SELUE_PK1, f3r::global::SELUE_PK2);
+        self.set_instance_number(handle, f3r::field::PLAYER1_INI, 1.0);
+        self.set_instance_number(handle, f3r::field::PLAYER2_INI, 1.0);
+        self.set_instance_number(handle, f3r::field::NUM_POKEMON1, 6.0);
+        self.set_instance_number(handle, f3r::field::NUM_POKEMON2, 6.0);
+        self.run_instance_script(handle, f3r::script::MULTIPLAYER_IMPORT_PLAYER_ONE)?;
+        self.run_instance_script(handle, f3r::script::MULTIPLAYER_IMPORT_PLAYER_TWO)?;
+        self.run_instance_script(handle, f3r::script::MULTIPLAYER_GO_BATTLE)?;
         Ok(())
     }
 
-    fn global_num(&self, name: &str, index: u32) -> f64 {
+    fn global_num(&self, name: &[u8], index: u32) -> f64 {
         match self
             .variable_global_array_get(&[gml::Value::Str(gml::String::from(name)), index.into()])
             .unwrap_or_default()
@@ -3176,7 +3169,7 @@ impl Game {
         }
     }
 
-    fn global_json(&self, name: &str, index: u32) -> serde_json::Value {
+    fn global_json(&self, name: &[u8], index: u32) -> serde_json::Value {
         match self
             .variable_global_array_get(&[gml::Value::Str(gml::String::from(name)), index.into()])
             .unwrap_or_default()
@@ -3186,7 +3179,7 @@ impl Game {
         }
     }
 
-    fn set_global_num(&mut self, name: &str, index: u32, value: f64) {
+    fn set_global_num(&mut self, name: &[u8], index: u32, value: f64) {
         let _ = self.variable_global_array_set(&[
             gml::Value::Str(gml::String::from(name)),
             index.into(),
@@ -3194,7 +3187,7 @@ impl Game {
         ]);
     }
 
-    fn set_global_json(&mut self, name: &str, index: u32, value: &serde_json::Value) {
+    fn set_global_json(&mut self, name: &[u8], index: u32, value: &serde_json::Value) {
         let value = if let Some(number) = value.as_f64() {
             gml::Value::Real(Real::from(number))
         } else {
@@ -3319,17 +3312,17 @@ impl Game {
 
     fn battle_team_export_with_header(&self) -> Option<BattleTeamExport> {
         let prota_id = self
-            .global_text(b"prota_ID")
+            .global_text(f3r::global::PROTA_ID)
             .and_then(|text| std::str::from_utf8(&text).ok().map(|text| text.trim().parse::<f64>().unwrap_or(0.0)))
             .unwrap_or(0.0) as i32;
-        let prota_index = self.global_real(b"prota_index", 0) as i32;
+        let prota_index = self.global_real(f3r::global::PROTA_INDEX, 0) as i32;
         let char2 = if prota_index == 10 { self.player_char2_real() } else { f64::from(prota_id) };
         let name = team_text_bytes(&self
-            .global_text(b"apodoName")
+            .global_text(f3r::global::APODO_NAME)
             .filter(|text| !text.is_empty())
-            .or_else(|| self.global_text(b"protaname"))
+            .or_else(|| self.global_text(f3r::global::PROTANAME))
             .unwrap_or_default());
-        let phrase = team_text_bytes(&self.instance_text(18, b"frasePropia").unwrap_or_default());
+        let phrase = team_text_bytes(&self.instance_text(f3r::object::VARIABLES, f3r::field::FRASE_PROPIA).unwrap_or_default());
 
         let mut mons: [team_file::TeamMon; 6] = std::array::from_fn(|_| team_file::TeamMon::empty());
         for (index, mon) in mons.iter_mut().enumerate() {
@@ -3337,7 +3330,7 @@ impl Game {
             let mut info: [Vec<u8>; 16] = std::array::from_fn(|_| Vec::new());
             for field in 0..16u32 {
                 let value = self
-                    .global_value(b"info", index * 32000 + field)
+                    .global_value(f3r::global::INFO, index * 32000 + field)
                     .unwrap_or(gml::Value::Real(Real::from(0.0)));
                 let mut text = match &value {
                     gml::Value::Str(text) => team_text_bytes(text.as_ref()),
@@ -3351,17 +3344,17 @@ impl Game {
 
             let mut moves = [0.0; 4];
             for move_index in 1..=4u32 {
-                moves[(move_index - 1) as usize] = self.global_real(b"attack1", index * 32000 + move_index);
+                moves[(move_index - 1) as usize] = self.global_real(f3r::global::ATTACK1, index * 32000 + move_index);
             }
 
             *mon = team_file::TeamMon {
-                species: self.global_real(b"pkmn1", index) as i32,
-                level: self.global_real(b"indexnivel", index) as i32,
-                sex: self.global_real(b"pkmnsex1", index) as i32,
-                exp: self.global_real(b"exp1", index),
-                iv: self.global_real(b"IV", index) as i32,
-                item: self.global_real(b"objpoke1", index) as i32,
-                selue: self.global_real(b"selue_pk1", index),
+                species: self.global_real(f3r::global::PKMN1, index) as i32,
+                level: self.global_real(f3r::global::INDEXNIVEL, index) as i32,
+                sex: self.global_real(f3r::global::PKMNSEX1, index) as i32,
+                exp: self.global_real(f3r::global::EXP1, index),
+                iv: self.global_real(f3r::global::IV, index) as i32,
+                item: self.global_real(f3r::global::OBJPOKE1, index) as i32,
+                selue: self.global_real(f3r::global::SELUE_PK1, index),
                 moves,
                 info,
             };
@@ -3452,27 +3445,27 @@ impl Game {
 
             let fields = if side == 1 {
                 (
-                    b"pkmn1".as_slice(),
-                    b"nivel1".as_slice(),
-                    b"pkmnsex1".as_slice(),
-                    b"exp1".as_slice(),
-                    b"IV".as_slice(),
-                    b"objpoke1".as_slice(),
-                    b"selue_pk1".as_slice(),
-                    b"attack1".as_slice(),
-                    b"info".as_slice(),
+                    f3r::global::PKMN1,
+                    f3r::global::NIVEL1,
+                    f3r::global::PKMNSEX1,
+                    f3r::global::EXP1,
+                    f3r::global::IV,
+                    f3r::global::OBJPOKE1,
+                    f3r::global::SELUE_PK1,
+                    f3r::global::ATTACK1,
+                    f3r::global::INFO,
                 )
             } else {
                 (
-                    b"pkmn2".as_slice(),
-                    b"nivel2".as_slice(),
-                    b"pkmnsex2".as_slice(),
-                    b"exp2".as_slice(),
-                    b"IV2".as_slice(),
-                    b"objpoke2".as_slice(),
-                    b"selue_pk2".as_slice(),
-                    b"attack2".as_slice(),
-                    b"info2".as_slice(),
+                    f3r::global::PKMN2,
+                    f3r::global::NIVEL2,
+                    f3r::global::PKMNSEX2,
+                    f3r::global::EXP2,
+                    f3r::global::IV2,
+                    f3r::global::OBJPOKE2,
+                    f3r::global::SELUE_PK2,
+                    f3r::global::ATTACK2,
+                    f3r::global::INFO2,
                 )
             };
             self.set_global_real(fields.0, index, f64::from(mon.species));
@@ -3489,34 +3482,34 @@ impl Game {
                 self.set_global_value(fields.8, index * 32000 + field as u32, value);
             }
             if side == 1 {
-                self.set_global_real(b"indexpkmn", index, f64::from(mon.species));
-                self.set_global_real(b"indexnivel", index, f64::from(mon.level));
+                self.set_global_real(f3r::global::INDEXPKMN, index, f64::from(mon.species));
+                self.set_global_real(f3r::global::INDEXNIVEL, index, f64::from(mon.level));
             } else {
-                self.set_global_real(b"ISEP2", index, info_six);
+                self.set_global_real(f3r::global::ISEP2, index, info_six);
             }
         }
 
         if side == 1 {
-            self.set_global_text(b"protaname", &name);
-            self.set_global_text(b"apodoName", &name);
-            self.set_global_text(b"prota_ID", format!("{:05}", prota_id).as_bytes());
-            self.set_global_real(b"prota_index", 0, f64::from(prota_index));
+            self.set_global_text(f3r::global::PROTANAME, &name);
+            self.set_global_text(f3r::global::APODO_NAME, &name);
+            self.set_global_text(f3r::global::PROTA_ID, format!("{:05}", prota_id).as_bytes());
+            self.set_global_real(f3r::global::PROTA_INDEX, 0, f64::from(prota_index));
             if prota_index == 10 {
-                if let Some(handle) = self.find_object_instance(3) {
-                    self.set_instance_number(handle, b"char2", char2);
+                if let Some(handle) = self.find_object_instance(f3r::object::CONTROL) {
+                    self.set_instance_number(handle, f3r::field::CHAR2, char2);
                 }
             }
-            if let Some(handle) = self.find_object_instance(18) {
-                self.set_instance_text(handle, b"frasePropia", &frase);
+            if let Some(handle) = self.find_object_instance(f3r::object::VARIABLES) {
+                self.set_instance_text(handle, f3r::field::FRASE_PROPIA, &frase);
             }
-        } else if let Some(handle) = handle.or_else(|| self.find_object_instance(1172)) {
-            self.set_instance_text(handle, b"protaname2", &name);
-            self.set_instance_text(handle, b"id2", format!("{:05}", prota_id).as_bytes());
-            self.set_instance_number(handle, b"index2", f64::from(prota_index));
+        } else if let Some(handle) = handle.or_else(|| self.find_object_instance(f3r::object::PLAYER_TWO)) {
+            self.set_instance_text(handle, f3r::field::PROTANAME2, &name);
+            self.set_instance_text(handle, f3r::field::ID2, format!("{:05}", prota_id).as_bytes());
+            self.set_instance_number(handle, f3r::field::INDEX2, f64::from(prota_index));
             if prota_index == 10 {
-                self.set_instance_number(handle, b"sp_char2", char2);
+                self.set_instance_number(handle, f3r::field::SP_CHAR2, char2);
             }
-            self.set_instance_text(handle, b"frase2", &frase);
+            self.set_instance_text(handle, f3r::field::FRASE2, &frase);
         }
 
         let sprite = if prota_index == 10 { char2 as i32 } else { prota_index + 1000 };
@@ -3539,13 +3532,13 @@ impl Game {
             .assets
             .scripts
             .iter()
-            .any(|script| script.as_ref().is_some_and(|script| script.name.as_ref() == b"ValorTrainerTrucado"));
+            .any(|script| script.as_ref().is_some_and(|script| script.name.as_ref() == f3r::script::VALOR_TRAINER_TRUCADO));
         if !has_mapping {
             return header.char2;
         }
         self.run_script_value(
             handle,
-            b"ValorTrainerTrucado",
+            f3r::script::VALOR_TRAINER_TRUCADO,
             &[gml::Value::Real(Real::from(header.char2))],
         )
         .ok()
@@ -3561,13 +3554,13 @@ impl Game {
             .assets
             .scripts
             .iter()
-            .any(|script| script.as_ref().is_some_and(|script| script.name.as_ref() == b"SpriteTrainer"));
+            .any(|script| script.as_ref().is_some_and(|script| script.name.as_ref() == f3r::script::SPRITE_TRAINER));
         if !has_trainer {
             return fallback;
         }
-        self.set_instance_number(handle, b"sprINDEX", spr_index);
-        let _ = self.run_instance_script(handle, b"SpriteTrainer");
-        self.get_instance_real(handle, b"sprR")
+        self.set_instance_number(handle, f3r::field::SPRINDEX, spr_index);
+        let _ = self.run_instance_script(handle, f3r::script::SPRITE_TRAINER);
+        self.get_instance_real(handle, f3r::field::SPR_R)
             .map(|value| value as i32)
             .unwrap_or(fallback)
     }
@@ -3585,7 +3578,7 @@ impl Game {
         let host = self.battle_is_host(target);
         let seed = if host { self.reloaded_online.battle_seed(target) } else { 0 };
         let fondo = if host {
-            let value = self.global_number(b"numfondobattle", 0).unwrap_or(0);
+            let value = self.global_number(f3r::global::NUMFONDOBATTLE, 0).unwrap_or(0);
             if value > 0 {
                 value
             } else {
@@ -3594,14 +3587,14 @@ impl Game {
         } else {
             0
         };
-        let modo = self.global_number(b"modeBattleBack", 0).unwrap_or(0);
+        let modo = self.global_number(f3r::global::MODE_BATTLE_BACK, 0).unwrap_or(0);
         let sala = if host { self.room.id } else { 0 };
-        let delay = self.global_number(b"NET_DELAY", 0).unwrap_or(2).clamp(2, 12);
+        let delay = self.global_number(f3r::global::NET_DELAY, 0).unwrap_or(2).clamp(2, 12);
         crate::reloaded_online::BattleTeamMeta { seed, fondo, modo, sala, delay }
     }
 
-    /// Before creating `MULTIPLAYER`, let the game's own `BattleBackground` choose the
-    /// background room and index that Zibelan sends as `sala`/`fondo`.
+    /// Before creating the multiplayer controller, let the game's own battle-background script
+    /// choose the background room and index that Zibelan sends as `sala`/`fondo`.
     fn battle_team_meta_for_send(&self, target: u64) -> crate::reloaded_online::BattleTeamMeta {
         let mut meta = self.battle_team_meta(target);
         if !self.battle_is_host(target) {
@@ -3609,16 +3602,16 @@ impl Game {
         }
         // `BattleBackground` is the authority, but running it from Rust has side effects
         // (it may create instances). These are the rooms it returns for the common maps.
-        let modo = self.global_number(b"modeBattleBack", 0).unwrap_or(0);
-        let hierba = self.global_number(b"hierba", 0).unwrap_or(0);
+        let modo = self.global_number(f3r::global::MODE_BATTLE_BACK, 0).unwrap_or(0);
+        let hierba = self.global_number(f3r::global::HIERBA, 0).unwrap_or(0);
         meta.sala = if modo != 0 {
-            191
+            f3r::room::BATTLE
         } else if hierba == 5 {
-            709
+            f3r::room::BATTLE_LAVA
         } else {
-            47
+            f3r::room::BATTLE_AQUA
         };
-        let fondo = self.global_number(b"numfondobattle", 0).unwrap_or(0);
+        let fondo = self.global_number(f3r::global::NUMFONDOBATTLE, 0).unwrap_or(0);
         if fondo > 0 {
             meta.fondo = fondo;
         }
@@ -3649,24 +3642,24 @@ impl Game {
 
     fn battle_team_snapshot(&self) -> Option<String> {
         let mut team = Vec::new();
-        let prota = self.global_number(b"prota_index", 0).unwrap_or(-1);
+        let prota = self.global_number(f3r::global::PROTA_INDEX, 0).unwrap_or(-1);
         let sprite = self.local_player_sprite().unwrap_or(1860);
         let char2 = self.player_char2();
         for index in 0..6u32 {
             let moves = (1..=4)
-                .map(|move_index| self.global_json("attack1", index * 32000 + move_index))
+                .map(|move_index| self.global_json(f3r::global::ATTACK1, index * 32000 + move_index))
                 .collect::<Vec<_>>();
             let info = (0..17)
-                .map(|field| self.global_json("info", index * 32000 + field))
+                .map(|field| self.global_json(f3r::global::INFO, index * 32000 + field))
                 .collect::<Vec<_>>();
             team.push(serde_json::json!({
-                "species": self.global_num("pkmn1", index),
-                "level": self.global_num("indexnivel", index),
-                "sex": self.global_num("pkmnsex1", index),
-                "exp": self.global_num("exp1", index),
-                "iv": self.global_num("IV", index),
-                "item": self.global_num("objpoke1", index),
-                "selue": self.global_num("selue_pk1", index),
+                "species": self.global_num(f3r::global::PKMN1, index),
+                "level": self.global_num(f3r::global::INDEXNIVEL, index),
+                "sex": self.global_num(f3r::global::PKMNSEX1, index),
+                "exp": self.global_num(f3r::global::EXP1, index),
+                "iv": self.global_num(f3r::global::IV, index),
+                "item": self.global_num(f3r::global::OBJPOKE1, index),
+                "selue": self.global_num(f3r::global::SELUE_PK1, index),
                 "moves": moves,
                 "info": info,
             }));
@@ -3702,9 +3695,29 @@ impl Game {
         let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
         let team = root.get("team")?.as_array()?;
         let fields = if side == 1 {
-            ("pkmn1", "indexnivel", "pkmnsex1", "exp1", "IV", "objpoke1", "selue_pk1", "attack1", "info")
+            (
+                f3r::global::PKMN1,
+                f3r::global::INDEXNIVEL,
+                f3r::global::PKMNSEX1,
+                f3r::global::EXP1,
+                f3r::global::IV,
+                f3r::global::OBJPOKE1,
+                f3r::global::SELUE_PK1,
+                f3r::global::ATTACK1,
+                f3r::global::INFO,
+            )
         } else {
-            ("pkmn2", "nivel2", "pkmnsex2", "exp2", "IV2", "objpoke2", "selue_pk2", "attack2", "info2")
+            (
+                f3r::global::PKMN2,
+                f3r::global::NIVEL2,
+                f3r::global::PKMNSEX2,
+                f3r::global::EXP2,
+                f3r::global::IV2,
+                f3r::global::OBJPOKE2,
+                f3r::global::SELUE_PK2,
+                f3r::global::ATTACK2,
+                f3r::global::INFO2,
+            )
         };
         for (index, pokemon) in team.iter().take(6).enumerate() {
             let index = index as u32;
@@ -3738,10 +3751,10 @@ impl Game {
         if let Some(handle) = self
             .room
             .instance_list
-            .iter_by_object(3)
+            .iter_by_object(f3r::object::CONTROL)
             .next(&self.room.instance_list)
         {
-            self.set_instance_number(handle, b"char2", value);
+            self.set_instance_number(handle, f3r::field::CHAR2, value);
         }
     }
 
@@ -3750,12 +3763,12 @@ impl Game {
             self.finish_online_battle_guard("guard anterior");
         }
 
-        let slot = self.global_num("Slot", 0) as i32;
+        let slot = self.global_num(f3r::global::SLOT, 0) as i32;
         if slot > 0 {
             let directory = std::path::PathBuf::from(self.program_directory.decode_utf8().into_owned());
             match save_guard::backup_before_online(&directory, slot) {
                 Ok(Some(path)) => eprintln!("[online] copia pre-batalla: {}", path.display()),
-                Ok(None) => eprintln!("[online] no hay .savc para copiar en el slot {slot}"),
+                Ok(None) => eprintln!("[online] no hay guardado para copiar en el slot {slot}"),
                 Err(error) => eprintln!("[online] no se pudo crear la copia pre-batalla: {error}"),
             }
         }
@@ -3813,31 +3826,31 @@ impl Game {
             return
         }
         for index in 0..6u32 {
-            let species = self.global_num("pkmn2", index);
-            let level = self.global_num("nivel2", index);
-            let sex = self.global_num("pkmnsex2", index);
-            let exp = self.global_num("exp2", index);
-            let iv = self.global_num("IV2", index);
-            let item = self.global_num("objpoke2", index);
-            let selue = self.global_num("selue_pk2", index);
-            self.set_global_num("pkmn1", index, species);
-            self.set_global_num("indexnivel", index, level);
-            self.set_global_num("pkmnsex1", index, sex);
-            self.set_global_num("exp1", index, exp);
-            self.set_global_num("IV", index, iv);
-            self.set_global_num("objpoke1", index, item);
-            self.set_global_num("selue_pk1", index, selue);
+            let species = self.global_num(f3r::global::PKMN2, index);
+            let level = self.global_num(f3r::global::NIVEL2, index);
+            let sex = self.global_num(f3r::global::PKMNSEX2, index);
+            let exp = self.global_num(f3r::global::EXP2, index);
+            let iv = self.global_num(f3r::global::IV2, index);
+            let item = self.global_num(f3r::global::OBJPOKE2, index);
+            let selue = self.global_num(f3r::global::SELUE_PK2, index);
+            self.set_global_num(f3r::global::PKMN1, index, species);
+            self.set_global_num(f3r::global::INDEXNIVEL, index, level);
+            self.set_global_num(f3r::global::PKMNSEX1, index, sex);
+            self.set_global_num(f3r::global::EXP1, index, exp);
+            self.set_global_num(f3r::global::IV, index, iv);
+            self.set_global_num(f3r::global::OBJPOKE1, index, item);
+            self.set_global_num(f3r::global::SELUE_PK1, index, selue);
             for move_index in 1..=4u32 {
-                let value = self.global_json("attack2", index * 32000 + move_index);
-                self.set_global_json("attack1", index * 32000 + move_index, &value);
+                let value = self.global_json(f3r::global::ATTACK2, index * 32000 + move_index);
+                self.set_global_json(f3r::global::ATTACK1, index * 32000 + move_index, &value);
             }
             for field in 0..17u32 {
-                let value = self.global_json("info2", index * 32000 + field);
-                self.set_global_json("info", index * 32000 + field, &value);
+                let value = self.global_json(f3r::global::INFO2, index * 32000 + field);
+                self.set_global_json(f3r::global::INFO, index * 32000 + field, &value);
             }
         }
         let _ = self.variable_global_set(&[
-            gml::Value::Str(gml::String::from("PLAYER2")),
+            gml::Value::Str(gml::String::from(f3r::global::PLAYER2)),
             gml::Value::Real(Real::from(0.0)),
         ]);
         self.battle_local_p1 = true;
@@ -3880,7 +3893,7 @@ impl Game {
         let Some(object_index) = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"MULTIPLAYER")
+                .map(|object| object.name.as_ref() == f3r::object::MULTIPLAYER_NAME)
                 .unwrap_or(false)
         }) else {
             return Ok(())
@@ -3893,12 +3906,12 @@ impl Game {
         let Some(handle) = self.room.instance_list.get_by_instid(instance_id) else {
             return Ok(())
         };
-        let original_prota = self.global_real(b"prota_index", 0);
+        let original_prota = self.global_real(f3r::global::PROTA_INDEX, 0);
         let original_char2 = self.player_char2_real();
-        let original_protaname = self.global_text(b"protaname");
-        let original_apodo = self.global_text(b"apodoName");
-        let original_prota_id = self.global_text(b"prota_ID");
-        let original_frase = self.instance_text(18, b"frasePropia");
+        let original_protaname = self.global_text(f3r::global::PROTANAME);
+        let original_apodo = self.global_text(f3r::global::APODO_NAME);
+        let original_prota_id = self.global_text(f3r::global::PROTA_ID);
+        let original_frase = self.instance_text(f3r::object::VARIABLES, f3r::field::FRASE_PROPIA);
         let remote_header = if zibelan {
             self.battle_team_import(&remote.data, if host { 2 } else { 1 }, Some(handle))
         } else {
@@ -3960,36 +3973,36 @@ impl Game {
         };
         let modo = if host { local_meta.modo } else { remote.meta.modo };
         let sala = if host { local_meta.sala } else { remote.meta.sala };
-        self.set_instance_number(handle, b"p2_sprR", p2_sprite as f64);
-        self.set_instance_number(handle, b"sprINDEX2", p2_spr_index);
-        self.set_instance_number(handle, b"index2", f64::from(p2_header.prota_index));
-        self.set_instance_number(handle, b"sp_char2", p2_header.char2);
-        self.set_instance_number(handle, b"BTTBACK_INDEX", f64::from(fondo.max(1)));
+        self.set_instance_number(handle, f3r::field::P2_SPRR, p2_sprite as f64);
+        self.set_instance_number(handle, f3r::field::SPRINDEX2, p2_spr_index);
+        self.set_instance_number(handle, f3r::field::INDEX2, f64::from(p2_header.prota_index));
+        self.set_instance_number(handle, f3r::field::SP_CHAR2, p2_header.char2);
+        self.set_instance_number(handle, f3r::field::BTTBACK_INDEX, f64::from(fondo.max(1)));
         if modo != 0 {
-            self.set_global_real(b"modeBattleBack", 0, f64::from(modo));
+            self.set_global_real(f3r::global::MODE_BATTLE_BACK, 0, f64::from(modo));
         }
         if sala != 0 {
-            self.set_global_real(b"NETW_BROOM", 0, f64::from(sala));
+            self.set_global_real(f3r::global::NETW_BROOM, 0, f64::from(sala));
         }
         let _ = self.variable_global_set(&[
-            gml::Value::Str(gml::String::from("ENTR_SPR")),
+            gml::Value::Str(gml::String::from(f3r::global::ENTR_SPR)),
             gml::Value::Real(Real::from(p1_sprite as f64)),
         ]);
         let _ = self.variable_global_set(&[
-            gml::Value::Str(gml::String::from("TRAINER_SPR")),
+            gml::Value::Str(gml::String::from(f3r::global::TRAINER_SPR)),
             gml::Value::Real(Real::from(p2_sprite as f64)),
         ]);
         if !host {
-            self.set_global_real(b"prota_index", 0, f64::from(p1_header.prota_index));
+            self.set_global_real(f3r::global::PROTA_INDEX, 0, f64::from(p1_header.prota_index));
             self.set_control_char2(p1_header.char2);
         }
         let mut count1: f64 = 0.0;
         let mut count2: f64 = 0.0;
         for index in 0..6u32 {
-            let species1 = self.global_real(b"pkmn1", index);
-            let species2 = self.global_real(b"pkmn2", index);
-            self.set_instance_array_number(handle, b"PKMN1", index, species1);
-            self.set_instance_array_number(handle, b"PKMN2", index, species2);
+            let species1 = self.global_real(f3r::global::PKMN1, index);
+            let species2 = self.global_real(f3r::global::PKMN2, index);
+            self.set_instance_array_number(handle, f3r::field::PKMN1, index, species1);
+            self.set_instance_array_number(handle, f3r::field::PKMN2, index, species2);
             if species1 > 0.0 {
                 count1 += 1.0;
             }
@@ -3997,28 +4010,28 @@ impl Game {
                 count2 += 1.0;
             }
         }
-        self.set_instance_number(handle, b"PLAYER1_INI", 1.0);
-        self.set_instance_number(handle, b"PLAYER2_INI", 1.0);
-        self.set_instance_number(handle, b"NUM_POKEMON1", count1.max(1.0));
-        self.set_instance_number(handle, b"NUM_POKEMON2", count2.max(1.0));
-        self.run_instance_script(handle, b"MultiplayerImportPlayerOne")?;
-        self.run_instance_script(handle, b"MultiplayerImportPlayerTwo")?;
-        self.run_instance_script(handle, b"MultiplayerGoBattle")?;
+        self.set_instance_number(handle, f3r::field::PLAYER1_INI, 1.0);
+        self.set_instance_number(handle, f3r::field::PLAYER2_INI, 1.0);
+        self.set_instance_number(handle, f3r::field::NUM_POKEMON1, count1.max(1.0));
+        self.set_instance_number(handle, f3r::field::NUM_POKEMON2, count2.max(1.0));
+        self.run_instance_script(handle, f3r::script::MULTIPLAYER_IMPORT_PLAYER_ONE)?;
+        self.run_instance_script(handle, f3r::script::MULTIPLAYER_IMPORT_PLAYER_TWO)?;
+        self.run_instance_script(handle, f3r::script::MULTIPLAYER_GO_BATTLE)?;
         if !host {
-            self.set_global_real(b"prota_index", 0, original_prota);
+            self.set_global_real(f3r::global::PROTA_INDEX, 0, original_prota);
             self.set_control_char2(original_char2);
             if let Some(value) = original_protaname {
-                self.set_global_text(b"protaname", &value);
+                self.set_global_text(f3r::global::PROTANAME, &value);
             }
             if let Some(value) = original_apodo {
-                self.set_global_text(b"apodoName", &value);
+                self.set_global_text(f3r::global::APODO_NAME, &value);
             }
             if let Some(value) = original_prota_id {
-                self.set_global_text(b"prota_ID", &value);
+                self.set_global_text(f3r::global::PROTA_ID, &value);
             }
             if let Some(value) = original_frase {
-                if let Some(handle) = self.find_object_instance(18) {
-                    self.set_instance_text(handle, b"frasePropia", &value);
+                if let Some(handle) = self.find_object_instance(f3r::object::VARIABLES) {
+                    self.set_instance_text(handle, f3r::field::FRASE_PROPIA, &value);
                 }
             }
         }
@@ -4044,18 +4057,18 @@ impl Game {
             hash = hash.wrapping_mul(16_777_619);
         };
         add(self.room.id);
-        add(self.global_number(b"battle", 0).unwrap_or(-1));
-        add(self.global_number(b"battleTurnos", 0).unwrap_or(-1));
-        let actual1 = self.global_number(b"actual1", 0).unwrap_or(-1);
-        let actual2 = self.global_number(b"actual2", 0).unwrap_or(-1);
+        add(self.global_number(f3r::global::BATTLE, 0).unwrap_or(-1));
+        add(self.global_number(f3r::global::BATTLE_TURNOS, 0).unwrap_or(-1));
+        let actual1 = self.global_number(f3r::global::ACTUAL1, 0).unwrap_or(-1);
+        let actual2 = self.global_number(f3r::global::ACTUAL2, 0).unwrap_or(-1);
         add(actual1 ^ actual2);
         let pairs: [(&[u8], &[u8]); 6] = [
-            (b"pkmn1".as_slice(), b"pkmn2".as_slice()),
-            (b"nivel1".as_slice(), b"nivel2".as_slice()),
-            (b"PS_1".as_slice(), b"PS_2".as_slice()),
-            (b"MAX_PS_1".as_slice(), b"MAX_PS_2".as_slice()),
-            (b"PP_1".as_slice(), b"PP_2".as_slice()),
-            (b"STD1".as_slice(), b"STD2".as_slice()),
+            (f3r::global::PKMN1, f3r::global::PKMN2),
+            (f3r::global::NIVEL1, f3r::global::NIVEL2),
+            (f3r::global::PS_1, f3r::global::PS_2),
+            (f3r::global::MAX_PS_1, f3r::global::MAX_PS_2),
+            (f3r::global::PP_1, f3r::global::PP_2),
+            (f3r::global::STD1, f3r::global::STD2),
         ];
         for (left, right) in pairs {
             for index in 0..6 {
@@ -4188,7 +4201,7 @@ impl Game {
         let object_index = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .map(|object| object.name.as_ref() == f3r::object::PLAYER_NAME)
                 .unwrap_or(false)
         })?;
         let handle = self
@@ -4211,7 +4224,7 @@ impl Game {
         let object_index = self.assets.objects.iter().position(|object| {
             object
                 .as_ref()
-                .map(|object| object.name.as_ref() == b"obj_Prota")
+                .map(|object| object.name.as_ref() == f3r::object::PLAYER_NAME)
                 .unwrap_or(false)
         })?;
         self.room
@@ -4247,7 +4260,7 @@ impl Game {
         };
         self.run_script_value(
             handle,
-            b"GuardarPartida",
+            f3r::script::GUARDAR_PARTIDA_NAME,
             &[gml::Value::Real(Real::from(1.0))],
         )
         .map(|_| ())
@@ -4317,15 +4330,15 @@ impl Game {
                         };
                         let snapshot = online_snapshot::OnlineSnapshot::capture(self);
                         if let Some(handle) = self.local_player_handle() {
-                            let _ = self.run_instance_script(handle, b"GetSecurityPK");
-                            let _ = self.run_instance_script(handle, b"GetSecurityPK2");
+                            let _ = self.run_instance_script(handle, f3r::script::GET_SECURITY_PK);
+                            let _ = self.run_instance_script(handle, f3r::script::GET_SECURITY_PK_2);
                         }
                         match trade::apply(self, slot, &remote) {
                             Ok(()) => {
                                 if let Some(handle) = self.local_player_handle() {
-                                    let _ = self.run_instance_script(handle, b"SecurityPK");
-                                    let _ = self.run_instance_script(handle, b"SecurityPK2");
-                                    let _ = self.run_instance_script(handle, b"NetTeamSprites");
+                                    let _ = self.run_instance_script(handle, f3r::script::SECURITY_PK);
+                                    let _ = self.run_instance_script(handle, f3r::script::SECURITY_PK_2);
+                                    let _ = self.run_instance_script(handle, f3r::script::NET_TEAM_SPRITES);
                                 }
                                 match self.save_trade() {
                                     Ok(()) => {
@@ -5549,10 +5562,10 @@ impl Game {
             .get_asset(self.room.id)
             .map(|room| {
                 let name = room.name.to_string().to_ascii_lowercase();
-                name.contains("opcion") || name.contains("option")
+                f3r::room::is_options_name(&name)
             })
             .unwrap_or(false);
-        if (self.room.id == 30 || options) && (80..=240).contains(&x) {
+        if (self.room.id == f3r::room::BOOT || options) && (80..=240).contains(&x) {
             x.min(178)
         } else {
             x
@@ -6178,7 +6191,7 @@ struct BattleTeamExport {
     header: BattleTeamHeader,
 }
 
-/// GameMaker 8 `.TEAM` files are ANSI (Windows-1252), while Kotlin/Compose strings are
+/// GameMaker 8 team files are ANSI (Windows-1252), while Kotlin/Compose strings are
 /// UTF-8. Convert only valid UTF-8 text; already-ANSI bytes are left untouched.
 fn team_text_bytes(bytes: &[u8]) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(bytes) else { return bytes.to_vec() };

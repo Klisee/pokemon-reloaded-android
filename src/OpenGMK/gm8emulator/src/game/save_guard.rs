@@ -1,12 +1,13 @@
 //! Backups and atomic writes for save files.
 
+use crate::compat::f3r;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SAVE_EXTENSIONS: [&str; 3] = ["savc", "nfo", "data"];
+const SAVE_EXTENSIONS: [&str; 3] = f3r::save::EXTENSIONS;
 
 static ONLINE_SAVE_GUARD: AtomicBool = AtomicBool::new(false);
 
@@ -23,18 +24,18 @@ pub(crate) fn redirect_online_write(path: &str) -> Option<String> {
     }
 
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
-    if normalized.ends_with(".online") {
+    if f3r::save::is_online_path(&normalized) {
         return None
     }
-    if normalized.ends_with(".savc") || normalized.ends_with(".nfo") || normalized.ends_with(".data") {
-        Some(format!("{path}.online"))
+    if f3r::save::is_save_path(&normalized) {
+        Some(format!("{path}{}", f3r::save::ONLINE_SUFFIX))
     } else {
         None
     }
 }
 
 pub(crate) fn cleanup_online_saves(program_dir: &Path) -> io::Result<()> {
-    let partidas = program_dir.join("data").join("partidas");
+    let partidas = program_dir.join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
     let entries = match fs::read_dir(partidas) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
@@ -44,30 +45,35 @@ pub(crate) fn cleanup_online_saves(program_dir: &Path) -> io::Result<()> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|extension| extension == "online") {
+        if path.is_file()
+            && path.extension().is_some_and(|extension| extension == f3r::save::ONLINE_EXT)
+        {
             let _ = fs::remove_file(path);
         }
     }
     Ok(())
 }
 
-/// Copies the save slot to `data/partidas/preonline/` before an online session.
+/// Copies the save slot to the pre-online backup directory before an online session.
 ///
-/// Returns the timestamped backup directory, or `None` when the `.savc` file
-/// does not exist. Missing `.nfo`/`.data` files are skipped.
+/// Returns the timestamped backup directory, or `None` when the primary save file
+/// does not exist. Missing sidecar files are skipped.
 pub(crate) fn backup_before_online(program_dir: &Path, slot: i32) -> io::Result<Option<PathBuf>> {
-    let partidas = program_dir.join("data").join("partidas");
-    let stem = format!("reloaded{slot}");
-    let savc = partidas.join(format!("{stem}.savc"));
+    let partidas = program_dir.join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
+    let stem = f3r::save::slot_stem(slot);
+    let savc = partidas.join(f3r::save::slot_file_name(slot, f3r::save::EXT_SAVC));
 
     if !savc.is_file() {
         return Ok(None);
     }
 
-    let preonline = partidas.join("preonline");
+    let preonline = partidas.join(f3r::save::PREONLINE);
     fs::create_dir_all(&preonline)?;
 
-    let backup_dir = create_unique_dir(&preonline, &format!("{stem}_preonline_{}", timestamp()))?;
+    let backup_dir = create_unique_dir(
+        &preonline,
+        &format!("{stem}{}{}", f3r::save::PREONLINE_INFIX, timestamp()),
+    )?;
 
     let result = (|| {
         for extension in SAVE_EXTENSIONS {
@@ -79,7 +85,9 @@ pub(crate) fn backup_before_online(program_dir: &Path, slot: i32) -> io::Result<
             let destination = backup_dir.join(format!("{stem}.{extension}"));
             match atomic_copy(&source, &destination) {
                 Ok(()) => {},
-                Err(error) if extension != "savc" && error.kind() == ErrorKind::NotFound => {
+                Err(error)
+                    if extension != f3r::save::EXT_SAVC && error.kind() == ErrorKind::NotFound =>
+                {
                     continue;
                 },
                 Err(error) => return Err(error),
@@ -256,31 +264,45 @@ mod tests {
         fs::write(path, bytes).expect("write test fixture");
     }
 
+    fn native_path(name: &str) -> String {
+        format!("{}\\{}\\{name}", f3r::save::ROOT, f3r::save::PARTIDAS)
+    }
+
+    fn slot_name(slot: i32, extension: &str) -> String {
+        f3r::save::slot_file_name(slot, extension)
+    }
+
     #[test]
     fn online_guard_redirects_save_writes_and_cleanup() {
         set_online_save_guard(true);
+        let savc = native_path(&slot_name(1, f3r::save::EXT_SAVC));
+        let nfo = native_path(&slot_name(1, f3r::save::EXT_NFO));
+        let online = format!("{savc}{}", f3r::save::ONLINE_SUFFIX);
+        assert_eq!(redirect_online_write(&savc).as_deref(), Some(online.as_str()));
         assert_eq!(
-            redirect_online_write("data\\partidas\\reloaded1.savc").as_deref(),
-            Some("data\\partidas\\reloaded1.savc.online")
+            redirect_online_write(&nfo).as_deref(),
+            Some(format!("{nfo}{}", f3r::save::ONLINE_SUFFIX).as_str())
         );
-        assert_eq!(
-            redirect_online_write("data\\partidas\\reloaded1.nfo").as_deref(),
-            Some("data\\partidas\\reloaded1.nfo.online")
-        );
-        assert_eq!(redirect_online_write("data\\partidas\\reloaded1.savc.online"), None);
-        assert_eq!(redirect_online_write("data\\text\\otro.txt"), None);
+        assert_eq!(redirect_online_write(&online), None);
+        assert_eq!(redirect_online_write(&format!("{savc}.txt")), None);
 
         let temp = TestDir::new("online-guard");
-        let partidas = temp.path().join("data").join("partidas");
+        let partidas = temp.path().join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
         fs::create_dir_all(&partidas).expect("create partidas");
-        write_fixture(&partidas.join("reloaded1.savc.online"), b"online");
-        write_fixture(&partidas.join("reloaded1.savc"), b"real");
+        let live = partidas.join(slot_name(1, f3r::save::EXT_SAVC));
+        let overlay = partidas.join(format!(
+            "{}{}",
+            slot_name(1, f3r::save::EXT_SAVC),
+            f3r::save::ONLINE_SUFFIX
+        ));
+        write_fixture(&overlay, b"online");
+        write_fixture(&live, b"real");
         cleanup_online_saves(temp.path()).expect("cleanup");
-        assert!(!partidas.join("reloaded1.savc.online").exists());
-        assert!(partidas.join("reloaded1.savc").exists());
+        assert!(!overlay.exists());
+        assert!(live.exists());
 
         set_online_save_guard(false);
-        assert_eq!(redirect_online_write("data\\partidas\\reloaded1.savc"), None);
+        assert_eq!(redirect_online_write(&savc), None);
     }
 
     #[test]
@@ -310,65 +332,77 @@ mod tests {
     }
 
     #[test]
-    fn backup_returns_none_when_savc_is_missing() {
+    fn backup_returns_none_when_primary_file_is_missing() {
         let temp = TestDir::new("missing-savc");
-        let partidas = temp.path().join("data").join("partidas");
+        let partidas = temp.path().join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
         fs::create_dir_all(&partidas).unwrap();
-        write_fixture(&partidas.join("reloaded3.nfo"), b"nfo");
+        write_fixture(&partidas.join(slot_name(3, f3r::save::EXT_NFO)), b"nfo");
 
         let backup = backup_before_online(temp.path(), 3).expect("backup");
 
         assert!(backup.is_none());
-        assert!(!partidas.join("preonline").exists());
+        assert!(!partidas.join(f3r::save::PREONLINE).exists());
     }
 
     #[test]
     fn backup_copies_all_present_files() {
         let temp = TestDir::new("backup-all");
-        let partidas = temp.path().join("data").join("partidas");
+        let partidas = temp.path().join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
         fs::create_dir_all(&partidas).unwrap();
-        write_fixture(&partidas.join("reloaded9.savc"), b"savc data");
-        write_fixture(&partidas.join("reloaded9.nfo"), b"nfo data");
-        write_fixture(&partidas.join("reloaded9.data"), b"data data");
+        for extension in f3r::save::EXTENSIONS {
+            write_fixture(&partidas.join(slot_name(9, extension)), extension.as_bytes());
+        }
 
         let backup = backup_before_online(temp.path(), 9).expect("backup").expect("backup directory");
         let name = backup.file_name().unwrap().to_string_lossy();
 
-        assert!(name.starts_with("reloaded9_preonline_"));
-        assert!(backup.starts_with(partidas.join("preonline")));
-        assert_eq!(fs::read(backup.join("reloaded9.savc")).unwrap(), b"savc data");
-        assert_eq!(fs::read(backup.join("reloaded9.nfo")).unwrap(), b"nfo data");
-        assert_eq!(fs::read(backup.join("reloaded9.data")).unwrap(), b"data data");
-        assert!(!backup.join("reloaded9.savc.tmp").exists());
+        assert!(name.starts_with(&format!(
+            "{}{}",
+            f3r::save::slot_stem(9),
+            f3r::save::PREONLINE_INFIX
+        )));
+        assert!(backup.starts_with(partidas.join(f3r::save::PREONLINE)));
+        for extension in f3r::save::EXTENSIONS {
+            assert_eq!(
+                fs::read(backup.join(slot_name(9, extension))).unwrap(),
+                extension.as_bytes()
+            );
+        }
+        assert!(!backup
+            .join(format!("{}.tmp", slot_name(9, f3r::save::EXT_SAVC)))
+            .exists());
     }
 
     #[test]
     fn backup_skips_missing_optional_files() {
         let temp = TestDir::new("backup-savc-only");
-        let partidas = temp.path().join("data").join("partidas");
+        let partidas = temp.path().join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
         fs::create_dir_all(&partidas).unwrap();
-        write_fixture(&partidas.join("reloaded2.savc"), b"only savc");
+        let savc = slot_name(2, f3r::save::EXT_SAVC);
+        write_fixture(&partidas.join(&savc), b"only savc");
 
         let backup = backup_before_online(temp.path(), 2).expect("backup").expect("backup directory");
 
-        assert_eq!(fs::read(backup.join("reloaded2.savc")).unwrap(), b"only savc");
-        assert!(!backup.join("reloaded2.nfo").exists());
-        assert!(!backup.join("reloaded2.data").exists());
+        assert_eq!(fs::read(backup.join(&savc)).unwrap(), b"only savc");
+        assert!(!backup.join(slot_name(2, f3r::save::EXT_NFO)).exists());
+        assert!(!backup.join(slot_name(2, f3r::save::EXT_DATA)).exists());
     }
 
     #[test]
     fn repeated_backups_do_not_overwrite_each_other() {
         let temp = TestDir::new("backup-twice");
-        let partidas = temp.path().join("data").join("partidas");
+        let partidas = temp.path().join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
         fs::create_dir_all(&partidas).unwrap();
-        write_fixture(&partidas.join("reloaded4.savc"), b"first");
+        let savc = slot_name(4, f3r::save::EXT_SAVC);
+        write_fixture(&partidas.join(&savc), b"first");
 
         let first = backup_before_online(temp.path(), 4).expect("first backup").expect("first backup directory");
-        write_fixture(&partidas.join("reloaded4.savc"), b"second");
+        write_fixture(&partidas.join(&savc), b"second");
         let second = backup_before_online(temp.path(), 4).expect("second backup").expect("second backup directory");
 
         assert_ne!(first, second);
-        assert_eq!(fs::read(first.join("reloaded4.savc")).unwrap(), b"first");
-        assert_eq!(fs::read(second.join("reloaded4.savc")).unwrap(), b"second");
+        assert_eq!(fs::read(first.join(&savc)).unwrap(), b"first");
+        assert_eq!(fs::read(second.join(&savc)).unwrap(), b"second");
     }
+
 }

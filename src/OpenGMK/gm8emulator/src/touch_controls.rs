@@ -16,6 +16,7 @@
 //! only need the basics, the overworld needs the joystick and interaction keys, and battle needs
 //! the combat extras. The emulator reports the current room every frame.
 
+use crate::compat::f3r;
 use ramen::input::Key;
 use std::{
     sync::{
@@ -82,8 +83,8 @@ pub const CHOICE: u8 = 32;
 pub const SAFARI: u8 = 64;
 pub const MENU_NAV: u8 = 128;
 
-/// The actual puzzle room: PuzleUNW, 202.
-pub const PUZZLE_ROOM: i32 = 202;
+/// The puzzle room, from the F3R manifest.
+pub const PUZZLE_ROOM: i32 = f3r::room::PUZZLE;
 pub const ROTATE_NAME: &str = "girar";
 
 #[derive(Clone, Copy, PartialEq)]
@@ -285,16 +286,16 @@ pub fn set_combo_used() {
 }
 
 /// The room the character picker reports. Its own dialogues and its list of questions both live here.
-const CHARACTER_ROOM: i32 = 3;
 
 /// The modals the game draws, right after the character, as lists of options to pick from: the
 /// preferences it asks about first and the difficulty right after. Both are walked with the movement
-/// keys and answered with Z and X. Confirmed on the device: the picker's room 3 reports these ids
+/// keys and answered with Z and X. Confirmed on the device: the picker's room reports these ids
 /// while each list is up, and nothing that is not one of them.
-const PREFERENCES_MODAL: i32 = 7744;
-const DIFFICULTY_MODAL: i32 = 7836;
-const QUESTION_MODAL: i32 = 9673;
-const LIST_MODAL: i32 = 7778;
+const PREFERENCES_MODAL: i32 = f3r::script::MODAL_PREFERENCES;
+const DIFFICULTY_MODAL: i32 = f3r::script::MODAL_DIFFICULTY;
+const QUESTION_MODAL: i32 = f3r::script::MODAL_QUESTION;
+const QUESTION_MODAL_LARGE: i32 = f3r::script::MODAL_QUESTION_LARGE;
+const LIST_MODAL: i32 = f3r::script::MODAL_LIST;
 
 /// The most characters the picker offers at once: one while choosing the player, two while choosing
 /// the rival. Anything beyond that is the whole roster drawn at once by the game's own trick.
@@ -692,7 +693,7 @@ pub fn dialogue_open() -> bool {
 
 /// Whether the game's own Pokémon box (the PC storage) is open. Its screen is driven entirely with
 /// the game's own click boxes, so nothing of the overlay is wanted there; the engine reports it from
-/// the game's `ENCAJA` global.
+/// the game's box-open global.
 static BOX_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_box_open(open: bool) {
@@ -703,9 +704,9 @@ pub fn box_open() -> bool {
     BOX_OPEN.load(Ordering::Relaxed)
 }
 
-/// Whether the game has its own text-entry dialog open (the modal that draws the on-screen keyboard,
-/// GML script 7754). The engine reports it every time it draws, and the Android side raises the
-/// system keyboard while it is true.
+/// Whether the game has its own text-entry dialog open (the modal that draws the on-screen keyboard).
+/// The engine reports it every time it draws, and the Android side raises the system keyboard while
+/// it is true.
 static TEXT_ENTRY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn set_text_entry(open: bool) {
@@ -820,10 +821,10 @@ pub fn current_context() -> u8 {
         return MENU
     }
     // The game's yes/no questions are answered by touching their Sí/No boxes: the buttons would
-    // only cover them. Confirmed on the device: the exit-game and the escape question both report
-    // 9673, and 9674 is the bigger variant. Read straight from the current frame (not the sticky
-    // state) so the buttons come back as soon as the question closes instead of after a grace.
-    if matches!(modal_id(), QUESTION_MODAL | 9674) {
+    // only cover them. The exit-game and escape question use the same modal, with a larger variant.
+    // Read straight from the current frame (not the sticky state) so the buttons come back as soon
+    // as the question closes instead of after a grace.
+    if matches!(modal_id(), QUESTION_MODAL | QUESTION_MODAL_LARGE) {
         return MENU
     }
     // The game's option lists are navigated with the joystick and the entries are touched directly.
@@ -831,15 +832,21 @@ pub fn current_context() -> u8 {
         return MENU_NAV
     }
     match ROOM.load(Ordering::Relaxed) {
-        // IntroROOM, InicioROOM, CargarPartida, MultijugadorMenu, CreditosInicioScreen, OptionsROOM:
-        // these screens are fully clickable (once the game's own click boxes are fixed, see
-        // `crate::patches`), so they need no on-screen controls at all.
+        // The title, boot, loader, multiplayer-menu, credits and options screens are fully
+        // clickable (once the game's own click boxes are fixed, see `crate::patches`), so they need
+        // no on-screen controls at all.
         //
-        // 528 is the Oak laboratory's introduction and 527 the unknown place that follows it: both
-        // are cutscenes the player watches before they can take a step, so nothing of the map's
-        // overlay belongs over them. Their dialogues still get their own button, handled above.
-        // Confirmed on the device - the two report as rooms 528 and 527.
-        22 | 30 | 43 | 461 | 465 | 466 | 527 | 528 => MENU,
+        // The Oak laboratory's introduction and the place that follows it are cutscenes the
+        // player watches before they can take a step, so nothing of the map's overlay belongs
+        // over them. Their dialogues still get their own button, handled above.
+        f3r::room::TITLE
+        | f3r::room::BOOT
+        | f3r::room::LOADER
+        | f3r::room::MULTIPLAYER_MENU
+        | f3r::room::CREDITS
+        | f3r::room::OPTIONS
+        | f3r::room::LAB_FOLLOWUP
+        | f3r::room::LAB_INTRO => MENU,
         // The screen where a new game asks you to pick your character, just after the title menu. It
         // has controls of its own (the two arrows) instead of the map's. Its room cannot be named
         // from the game's data - the names are not readable - so this is the room it reports.
@@ -848,7 +855,7 @@ pub fn current_context() -> u8 {
         // screen - is walked with the movement keys and answered with Z and X, so it gets those and
         // the joystick. A dialogue here is handled above and stays on the dialogue's two buttons; the
         // name the game types in is handled by the keyboard, so it gets nothing.
-        CHARACTER_ROOM => {
+        f3r::room::SELECT => {
             if text_entry_open() {
                 MENU
             } else if matches!(modal_id(), PREFERENCES_MODAL | DIFFICULTY_MODAL) {
@@ -857,13 +864,12 @@ pub fn current_context() -> u8 {
                 CHARACTER
             }
         },
-        // BattleROOM, BattleROOMAqua, BattleROOMLava.
-        47 | 191 | 709 => BATTLE,
-        // The Safari Zone's catching room. Confirmed on the device: it reports room 715 while the
-        // ball is being thrown there. It keeps the map's buttons bar the stick and the attacks.
-        715 => SAFARI,
+        // The three battle rooms share one control set.
+        f3r::room::BATTLE_AQUA | f3r::room::BATTLE | f3r::room::BATTLE_LAVA => BATTLE,
+        // The Safari Zone's catching room keeps the map's buttons bar the stick and the attacks.
+        f3r::room::SAFARI => SAFARI,
         // The puzzle uses only its three buttons; everything else steps aside.
-        PUZZLE_ROOM => MENU,
+        f3r::room::PUZZLE => MENU,
         // Before the first frame we don't know the room yet; show nothing rather than flashing the
         // whole overlay for one frame.
         -1 => MENU,
@@ -1274,7 +1280,7 @@ pub fn contains(shape: Shape, nx: f32, ny: f32, ww: f32, wh: f32) -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Party data. The game keeps it in `global.pkmn1[0..5]` (each slot's species); `game.rs` reads it
+// Party data. The game keeps each slot's species in the party globals; `game.rs` reads it
 // and drops it here, so the overlay can draw each Pokémon's own sprite in its hexagon.
 
 /// Name of the button that opens the party wheel. It presses no key of its own. It deliberately has

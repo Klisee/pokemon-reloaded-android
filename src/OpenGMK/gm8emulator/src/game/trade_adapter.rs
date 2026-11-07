@@ -4,6 +4,7 @@
 //! read/write stay in this module. `trade_codec` has no game types.
 
 use super::{trade_codec as codec, Game};
+use crate::compat::f3r;
 use crate::gml::{self, Value as GmlValue};
 use crate::math::Real;
 
@@ -324,9 +325,9 @@ pub fn apply(game: &mut Game, slot: u8, offer: &TradeOffer) -> Result<(), String
             infos[info_index as usize].clone(),
         );
     }
-    let count = (0..=5).filter(|slot| game.global_num("pkmn1", *slot) > 0.0).count() as f64;
-    if game.global_num("actual1", 0) >= count {
-        game.set_global_num("actual1", 0, 0.0);
+    let count = (0..=5).filter(|slot| game.global_num(f3r::global::PKMN1, *slot) > 0.0).count() as f64;
+    if game.global_num(f3r::global::ACTUAL1, 0) >= count {
+        game.set_global_num(f3r::global::ACTUAL1, 0, 0.0);
     }
     Ok(())
 }
@@ -340,7 +341,7 @@ fn set_value(game: &mut Game, name: &[u8], index: u32, value: TradeValue) {
 }
 
 pub fn is_valid_slot(game: &Game, slot: u8) -> bool {
-    slot <= 5 && game.global_num("pkmn1", u32::from(slot)) > 0.0
+    slot <= 5 && game.global_num(f3r::global::PKMN1, u32::from(slot)) > 0.0
 }
 
 pub fn occupied_slots(game: &Game) -> Vec<u8> {
