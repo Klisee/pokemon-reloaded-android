@@ -1525,6 +1525,83 @@ mod tests {
     }
 
     #[test]
+    fn live_offer_accepts_pp_and_hp_above_stored_base_maxima() {
+        // Live saves can carry current PP/HP above the stored base maxima after
+        // PP Ups, badge/level recalculation or a stale MAX field. Those values
+        // are bounded but must not reject an otherwise valid offer.
+        for (pp, max_pp, hp, max_hp) in [
+            (15.0, 10.0, 150.0, 150.0),
+            (10.0, 10.0, 210.0, 200.0),
+            (15.0, 10.0, 210.0, 200.0),
+            (40.0, 35.0, 999.0, 900.0),
+        ] {
+            let mut offer = safety_ready_offer();
+            offer.fields[10] = n(pp);
+            offer.fields[13] = n(max_pp);
+            offer.fields[11] = n(hp);
+            offer.fields[14] = n(max_hp);
+            assert_eq!(
+                validate_safety(&offer, None),
+                Ok(ValidatedOffer {
+                    species: 448,
+                    level: 50
+                }),
+                "pp={pp} max_pp={max_pp} hp={hp} max_hp={max_hp}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_offer_accepts_stale_move_count_with_existing_slots() {
+        // `num_attack1` can be stale while the four move slots are populated.
+        // Transfers copy the slots as they are, so the counter is informational.
+        for (count, moves) in [
+            (0.0, [33.0, 34.0, 35.0, 36.0]),
+            (1.0, [33.0, 34.0, 35.0, 36.0]),
+            (2.0, [33.0, 34.0, 0.0, 36.0]),
+            (4.0, [33.0, 0.0, 0.0, 0.0]),
+        ] {
+            let mut offer = safety_ready_offer();
+            offer.fields[22] = n(count);
+            for (index, move_id) in moves.iter().enumerate() {
+                offer.fields[28 + index] = n(*move_id);
+            }
+            assert_eq!(
+                validate_safety(&offer, None),
+                Ok(ValidatedOffer {
+                    species: 448,
+                    level: 50
+                }),
+                "count={count} moves={moves:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_wrapped_species_151150_and_153046_are_story_gated() {
+        // Alternate encodings can wrap a story species into a high-looking ID:
+        // 150 + 150000 + 1000 and 2046 + 150000 + 1000. Both must resolve to
+        // the story-gated base and fail validation in either species field.
+        for (wrapped, base) in [(151_150.0, 150), (153_046.0, 2046)] {
+            assert_eq!(canonical_species(wrapped), Ok(base));
+            for field in [0usize, 7] {
+                let mut offer = safety_ready_offer();
+                offer.fields[field] = n(wrapped);
+                assert_eq!(
+                    validate(&offer),
+                    Err(ValidateError::Story),
+                    "wrapped={wrapped} field={field}"
+                );
+                assert_eq!(
+                    validate_safety(&offer, None),
+                    Err(SafetyError::Wire(ValidateError::Story)),
+                    "wrapped={wrapped} field={field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn transport_envelope_round_trip() {
         let envelope = encode_envelope(&golden_offer(), b"Fixture Nv. 50").unwrap();
         assert!(envelope.starts_with(b"OFFER\x1f"));
