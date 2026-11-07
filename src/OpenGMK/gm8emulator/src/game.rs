@@ -4371,6 +4371,7 @@ impl Game {
                     }
                 },
                 crate::reloaded_online::PeerMessageKind::Ok => {
+                    session.remote_ok = true;
                     if session.phase == trade::TradePhase::WaitingOk {
                         let Some(slot) = session.slot else {
                             self.cancel_trade("El intercambio quedo incompleto.");
@@ -4382,65 +4383,11 @@ impl Game {
                             finished = true;
                             break
                         };
-                        let snapshot = online_snapshot::OnlineSnapshot::capture(self);
-                        let outcome = trade::commit_transaction(
-                            self,
-                            |game| {
-                                if let Some(handle) = game.local_player_handle() {
-                                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK);
-                                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK_2);
-                                }
-                                let result = trade::apply(game, slot, &remote);
-                                if result.is_ok() {
-                                    if let Some(handle) = game.local_player_handle() {
-                                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK);
-                                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK_2);
-                                        let _ = game.run_instance_script(handle, f3r::script::NET_TEAM_SPRITES);
-                                    }
-                                }
-                                result
-                            },
-                            |game| game.save_trade(),
-                            |game| {
-                                let _ = snapshot.restore(game);
-                            },
-                        );
-                        match outcome {
-                            trade::TradeCommit::Committed => {
-                                self.reloaded_online.end_session();
-                                self.interaction_response = Some((
-                                    format!("Intercambio hecho. Has recibido a {}.", remote.label),
-                                    true,
-                                ));
-                                eprintln!("[trade] intercambio aplicado slot={slot}");
-                                finished = true;
-                                break
-                            },
-                            trade::TradeCommit::SaveFailed(error) => {
-                                eprintln!("[trade] no se pudo guardar: {error}");
-                                self.reloaded_online.send_peer_message(
-                                    crate::reloaded_online::PeerMessageKind::No,
-                                    &[],
-                                );
-                                self.reloaded_online.end_session();
-                                self.interaction_response =
-                                    Some(("No se pudo guardar el intercambio.".into(), false));
-                                finished = true;
-                                break
-                            },
-                            trade::TradeCommit::ApplyFailed(error) => {
-                                eprintln!("[trade] no se pudo aplicar: {error}");
-                                self.reloaded_online.send_peer_message(
-                                    crate::reloaded_online::PeerMessageKind::No,
-                                    &[],
-                                );
-                                self.reloaded_online.end_session();
-                                self.interaction_response =
-                                    Some(("No se pudo aplicar el intercambio.".into(), false));
-                                finished = true;
-                                break
-                            },
-                        }
+                        self.complete_trade(slot, &remote);
+                        finished = true;
+                        break
+                    } else if session.phase == trade::TradePhase::Confirm {
+                        session.message = "El rival acepto; confirma tu intercambio.".into();
                     }
                 },
                 crate::reloaded_online::PeerMessageKind::No => {
@@ -4459,6 +4406,62 @@ impl Game {
         }
         if !finished {
             self.trade = Some(session);
+        }
+    }
+
+    fn complete_trade(&mut self, slot: u8, remote: &trade::TradeOffer) {
+        let snapshot = online_snapshot::OnlineSnapshot::capture(self);
+        let outcome = trade::commit_transaction(
+            self,
+            |game| {
+                if let Some(handle) = game.local_player_handle() {
+                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK);
+                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK_2);
+                }
+                let result = trade::apply(game, slot, remote);
+                if result.is_ok() {
+                    if let Some(handle) = game.local_player_handle() {
+                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK);
+                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK_2);
+                        let _ = game.run_instance_script(handle, f3r::script::NET_TEAM_SPRITES);
+                    }
+                }
+                result
+            },
+            |game| game.save_trade(),
+            |game| {
+                let _ = snapshot.restore(game);
+            },
+        );
+        match outcome {
+            trade::TradeCommit::Committed => {
+                self.reloaded_online.end_session();
+                self.interaction_response = Some((
+                    format!("Intercambio hecho. Has recibido a {}.", remote.label),
+                    true,
+                ));
+                eprintln!("[trade] intercambio aplicado slot={slot}");
+            },
+            trade::TradeCommit::SaveFailed(error) => {
+                eprintln!("[trade] no se pudo guardar: {error}");
+                self.reloaded_online.send_peer_message(
+                    crate::reloaded_online::PeerMessageKind::No,
+                    &[],
+                );
+                self.reloaded_online.end_session();
+                self.interaction_response =
+                    Some(("No se pudo guardar el intercambio.".into(), false));
+            },
+            trade::TradeCommit::ApplyFailed(error) => {
+                eprintln!("[trade] no se pudo aplicar: {error}");
+                self.reloaded_online.send_peer_message(
+                    crate::reloaded_online::PeerMessageKind::No,
+                    &[],
+                );
+                self.reloaded_online.end_session();
+                self.interaction_response =
+                    Some(("No se pudo aplicar el intercambio.".into(), false));
+            },
         }
     }
 
@@ -4595,8 +4598,21 @@ impl Game {
                             crate::reloaded_online::PeerMessageKind::Ok,
                             &[],
                         ) {
-                            eprintln!("[trade] OK enviado; esperando OK del rival");
                             session.phase = trade::TradePhase::WaitingOk;
+                            if session.remote_ok {
+                                let Some(slot) = session.slot else {
+                                    self.cancel_trade("El intercambio quedo incompleto.");
+                                    return
+                                };
+                                let Some(remote) = session.remote.clone() else {
+                                    self.cancel_trade("El intercambio quedo incompleto.");
+                                    return
+                                };
+                                eprintln!("[trade] OK cruzado; aplicando intercambio");
+                                self.complete_trade(slot, &remote);
+                                return
+                            }
+                            eprintln!("[trade] OK enviado; esperando OK del rival");
                             session.message = "Esperando la confirmacion del rival...".into();
                         } else {
                             self.cancel_trade("No se pudo confirmar el intercambio.");

@@ -25,6 +25,7 @@ pub struct TradeSession {
     pub slot: Option<u8>,
     pub local: Option<TradeOffer>,
     pub remote: Option<TradeOffer>,
+    pub remote_ok: bool,
     pub selection: usize,
     pub message: String,
 }
@@ -38,6 +39,7 @@ impl TradeSession {
             slot: None,
             local: None,
             remote: None,
+            remote_ok: false,
             selection: 0,
             message: String::new(),
         }
@@ -100,6 +102,7 @@ mod tests {
         assert_eq!(session.slot, None);
         assert!(session.local.is_none());
         assert!(session.remote.is_none());
+        assert!(!session.remote_ok);
         assert_eq!(session.selection, 0);
         assert!(session.message.is_empty());
     }
