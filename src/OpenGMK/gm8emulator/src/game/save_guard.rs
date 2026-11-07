@@ -93,12 +93,25 @@ pub(crate) fn backup_before_online(program_dir: &Path, slot: i32) -> io::Result<
         return Err(error);
     }
 
+    if let Err(error) = super::reloaded_save::begin_online_session(program_dir, slot) {
+        eprintln!("[save] no se pudo crear el snapshot previo a online: {error}");
+    }
+
     Ok(Some(backup_dir))
 }
 
 /// Writes `bytes` to `path` through a temporary file, syncs it and renames it
-/// into place.
+/// into place. Canonical save-slot files also go through the clean-room save
+/// hooks so backups and rollback stay available.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(result) = super::reloaded_save::save_part_atomic(path, bytes) {
+        return result
+    }
+    write_file_atomic(path, bytes)
+}
+
+/// Raw atomic write used by the save adapter itself.
+pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temporary = temporary_path(path);
 
     let result = (|| {
@@ -176,7 +189,7 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
-fn sync_parent_dir(path: &Path) {
+pub(crate) fn sync_parent_dir(path: &Path) {
     if let Ok(directory) = File::open(parent_dir(path)) {
         let _ = directory.sync_all();
     }

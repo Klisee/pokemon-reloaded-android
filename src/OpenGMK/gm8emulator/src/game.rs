@@ -9,6 +9,7 @@ pub mod info_window;
 pub mod model;
 pub mod movement;
 mod online_snapshot;
+mod reloaded_save;
 mod team_file;
 mod team_adapter;
 mod team_codec_clean;
