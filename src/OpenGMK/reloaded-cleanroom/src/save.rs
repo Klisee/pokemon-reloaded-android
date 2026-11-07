@@ -2425,6 +2425,12 @@ impl SaveHooks {
                         },
                     }
                 }
+                None if image.parts.is_empty() => SnapshotVerification {
+                    valid: true,
+                    compatibility: Compatibility::Writable,
+                    digest_matches: true,
+                    warnings: Vec::new(),
+                },
                 None => invalid_verification("committed save missing"),
             }
         };
@@ -3755,5 +3761,88 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o007, 0);
         }
+    }
+
+    #[test]
+    fn startup_removes_crashed_temp_artifacts_without_losing_live_or_snapshots() {
+        let dir = TempDir::new("crash-clean");
+        let backend = FileBackend::open(dir.path()).unwrap();
+        backend
+            .commit(
+                WORLD,
+                SLOT,
+                &image(1, b"live"),
+                CommitOptions {
+                    mode: SaveMode::Replace,
+                    allow_world_readable: false,
+                },
+            )
+            .unwrap();
+        let snapshot = backend
+            .capture(
+                WORLD,
+                SLOT,
+                &image(1, b"live"),
+                SnapshotMetaRequest {
+                    epoch: 1,
+                    baseline: false,
+                    cause: SnapshotCause::Manual,
+                    captured_at: Timestamp(1),
+                },
+                SnapshotBudget {
+                    max_total_bytes: 1024 * 1024,
+                    min_free_bytes: 0,
+                    allow_world_readable: false,
+                },
+            )
+            .unwrap();
+
+        let live_dir = backend.live.join(format!("world-{}", hex16(&WORLD.0)));
+        let crashed_save = live_dir.join(".tmp-save-crash");
+        fs::create_dir_all(crashed_save.join("inner")).unwrap();
+        fs::write(crashed_save.join("inner").join("partial"), b"x").unwrap();
+        let epoch_dir = backend
+            .backups
+            .join(format!("world-{}", hex16(&WORLD.0)))
+            .join("epoch-00000000000000000001");
+        let crashed_snap = epoch_dir.join(".tmp-snap-crash");
+        fs::create_dir_all(&crashed_snap).unwrap();
+        fs::write(crashed_snap.join("image.bin"), b"partial").unwrap();
+        drop(backend);
+
+        let reopened = FileBackend::open(dir.path()).unwrap();
+        assert!(!crashed_save.exists());
+        assert!(!crashed_snap.exists());
+        let live = reopened.load(WORLD, SLOT).unwrap().expect("live save");
+        assert_eq!(&live.parts["state.dat"][..], b"live");
+        assert!(reopened.verify(snapshot.snapshot.id).unwrap().valid);
+    }
+
+    #[test]
+    fn empty_image_commit_is_verified_as_a_clean_deletion() {
+        let dir = TempDir::new("empty-commit");
+        let backend = Arc::new(FileBackend::open(dir.path()).unwrap());
+        let hooks = SaveHooks::new(backend.clone(), config());
+        hooks.begin_session(WORLD);
+        hooks
+            .save(
+                WORLD,
+                replace_target(),
+                image(1, b"one"),
+                SaveTrigger::Manual,
+            )
+            .unwrap();
+        let attempt = hooks
+            .save(
+                WORLD,
+                replace_target(),
+                SaveImage::empty(FORMAT, CURRENT_IMAGE_SCHEMA, 2),
+                SaveTrigger::Manual,
+            )
+            .unwrap();
+        assert_eq!(attempt.record.outcome, SaveResult::Committed);
+        let live = backend.load(WORLD, SLOT).unwrap().expect("empty container");
+        assert!(live.parts.is_empty());
+        assert_eq!(live.revision, 2);
     }
 }

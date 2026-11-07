@@ -503,15 +503,39 @@ pub fn file_exists(path: &str) -> bool {
     Path::new(path).is_file()
 }
 
-pub fn rename(from: &str, to: &str) -> Result<()> {
-    if !Path::new(to).exists() {
-        std::fs::rename(from, to)?;
+fn redirect_online_mutation(path: &str) -> std::borrow::Cow<'_, str> {
+    match crate::game::save_guard::redirect_online_write(path) {
+        Some(redirected) => std::borrow::Cow::Owned(redirected),
+        None => std::borrow::Cow::Borrowed(path),
     }
+}
+
+pub fn rename(from: &str, to: &str) -> Result<()> {
+    let from = redirect_online_mutation(from);
+    let to = redirect_online_mutation(to);
+    if Path::new(to.as_ref()).exists() {
+        return Ok(())
+    }
+    if let Some(result) =
+        crate::game::reloaded_save::rename_save_path(Path::new(from.as_ref()), Path::new(to.as_ref()))
+    {
+        result?;
+        return Ok(())
+    }
+    std::fs::rename(from.as_ref(), to.as_ref())?;
     Ok(())
 }
 
 pub fn copy(from: &str, to: &str) -> Result<()> {
-    std::fs::copy(from, to)?;
+    let from = redirect_online_mutation(from);
+    let to = redirect_online_mutation(to);
+    if let Some(result) =
+        crate::game::reloaded_save::copy_save_path(Path::new(from.as_ref()), Path::new(to.as_ref()))
+    {
+        result?;
+        return Ok(())
+    }
+    std::fs::copy(from.as_ref(), to.as_ref())?;
     Ok(())
 }
 
@@ -525,9 +549,15 @@ pub fn dir_create(path: &str) -> Result<()> {
 }
 
 pub fn delete(path: &str) -> Result<()> {
-    if Path::new(path).exists() {
-        std::fs::remove_file(path)?;
+    let path = redirect_online_mutation(path);
+    if !Path::new(path.as_ref()).exists() {
+        return Ok(())
     }
+    if let Some(result) = crate::game::reloaded_save::delete_save_part(Path::new(path.as_ref())) {
+        result?;
+        return Ok(())
+    }
+    std::fs::remove_file(path.as_ref())?;
     Ok(())
 }
 
