@@ -1,9 +1,9 @@
 //! Host adapter for the clean-room save hooks.
 //!
 //! The clean-room module owns snapshot, retention, audit, and rollback policy.
-//! This module maps the host slot layout (`data/partidas/reloaded{slot}` with
-//! `.savc`, `.nfo`, and `.data` companions) to opaque save images and keeps the
-//! live files at their canonical paths.
+//! This module maps the manifest slot layout (`save.root` plus the `save.slot.*`
+//! companions) to opaque save images and keeps the live files at their canonical
+//! paths.
 
 use crate::compat::f3r;
 use std::collections::{BTreeMap, HashMap};
@@ -537,7 +537,7 @@ impl SaveBackend for HostSaveBackend {
 
         // All changed parts are fully written and fsynced before the journal is
         // published. The journal then renames them in canonical order
-        // (`.savc`, `.nfo`, `.data`) and removes absent companions last; a
+        // canonical companion set and removes absent companions last; a
         // crash at any point is completed on the next open.
         let journal = self.prepare_journal(slot, image.revision, JOURNAL_COMMIT, writes, removes)?;
         if let Err(error) = journal.write() {
@@ -1648,12 +1648,7 @@ mod tests {
         let before = service.load(slot).unwrap().expect("slot").revision;
 
         let savc = live(&dir, 20, f3r::save::EXT_SAVC);
-        let backup = save_root(dir.path()).join(format!(
-            "{}{}_bk.{}",
-            f3r::save::SLOT_PREFIX,
-            20,
-            f3r::save::EXT_SAVC
-        ));
+        let backup = save_root(dir.path()).join(f3r::save::backup_file_name(20, f3r::save::EXT_SAVC));
         crate::gml::file::rename(savc.to_str().unwrap(), backup.to_str().unwrap()).unwrap();
         assert!(!savc.exists());
         assert_eq!(fs::read(&backup).unwrap(), b"slot-bytes");
