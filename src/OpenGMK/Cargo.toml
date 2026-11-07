@@ -8,6 +8,7 @@ members = [
     "gm8decompiler",
     "gml-parser",
     "gm8exe",
+    "reloaded-cleanroom",
 ]
 
 [profile.release]
