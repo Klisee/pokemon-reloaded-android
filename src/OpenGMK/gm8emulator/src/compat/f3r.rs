@@ -1,8 +1,9 @@
 //! F3R (Pokemon Reloaded) compatibility manifest.
 //!
-//! Every native room, object, script, global and save-path identifier used by the
-//! emulator is declared here. Core code addresses content through these content
-//! keys and constants; it must not carry native names or numeric ids of its own.
+//! Every native room, object, script, global, instance field, sprite and save-path
+//! identifier used by the emulator is declared here. Core code addresses content
+//! through these content keys and constants; it must not carry native names or
+//! numeric ids of its own.
 //!
 //! Numeric ids are build-scoped. A different F3R build needs a new manifest
 //! revision rather than core changes.
@@ -45,6 +46,8 @@ pub enum Kind {
     Object,
     Script,
     Global,
+    Field,
+    Sprite,
     SavePath,
 }
 
@@ -106,6 +109,30 @@ const fn global(name: &'static str, key: &'static str, role: &'static str) -> En
     Entry {
         kind: Kind::Global,
         native_id: None,
+        native_name: name,
+        content_key: key,
+        aliases: &[],
+        role: Some(role),
+        status: Status::Supported,
+    }
+}
+
+const fn field(name: &'static str, key: &'static str, role: &'static str) -> Entry {
+    Entry {
+        kind: Kind::Field,
+        native_id: None,
+        native_name: name,
+        content_key: key,
+        aliases: &[],
+        role: Some(role),
+        status: Status::Supported,
+    }
+}
+
+const fn sprite(id: i32, name: &'static str, key: &'static str, role: &'static str) -> Entry {
+    Entry {
+        kind: Kind::Sprite,
+        native_id: Some(id),
         native_name: name,
         content_key: key,
         aliases: &[],
@@ -288,6 +315,7 @@ pub mod global {
     pub const ENTR_SPR: &[u8] = b"ENTR_SPR";
     pub const EXP1: &[u8] = b"exp1";
     pub const EXP2: &[u8] = b"exp2";
+    pub const EXTRA_INFO: &[u8] = b"extraInfo";
     pub const HIERBA: &[u8] = b"hierba";
     pub const INDEXNIVEL: &[u8] = b"indexnivel";
     pub const INDEXPKMN: &[u8] = b"indexpkmn";
@@ -296,8 +324,22 @@ pub mod global {
     pub const ISEP2: &[u8] = b"ISEP2";
     pub const IV: &[u8] = b"IV";
     pub const IV2: &[u8] = b"IV2";
+    pub const MAX_PP_1: &[u8] = b"MAX_PP_1";
     pub const MAX_PS_1: &[u8] = b"MAX_PS_1";
     pub const MAX_PS_2: &[u8] = b"MAX_PS_2";
+    pub const XTRA_PS_1: &[u8] = b"XTRA_PS_1";
+    pub const ATK1: &[u8] = b"atk1";
+    pub const DEF1: &[u8] = b"def1";
+    pub const VEL1: &[u8] = b"vel1";
+    pub const ATK_SP1: &[u8] = b"atk_sp1";
+    pub const DEF_SP1: &[u8] = b"def_sp1";
+    pub const PREC1: &[u8] = b"prec1";
+    pub const NUM_ATTACK1: &[u8] = b"num_attack1";
+    pub const TIPO_A1: &[u8] = b"tipoA1";
+    pub const TIPO_B1: &[u8] = b"tipoB1";
+    pub const TIPO_C1: &[u8] = b"tipoC1";
+    pub const VOLADOR1: &[u8] = b"volador1";
+    pub const FANTASMA1: &[u8] = b"fantasma1";
     pub const MODE_BATTLE_BACK: &[u8] = b"modeBattleBack";
     pub const NET_DELAY: &[u8] = b"NET_DELAY";
     pub const NETW_BROOM: &[u8] = b"NETW_BROOM";
@@ -338,6 +380,7 @@ pub mod field {
     pub const FRASE_PROPIA: &[u8] = b"frasePropia";
     pub const ID2: &[u8] = b"id2";
     pub const INDEX2: &[u8] = b"index2";
+    pub const MASK1: &[u8] = b"mask1";
     pub const NUM_POKEMON1: &[u8] = b"NUM_POKEMON1";
     pub const NUM_POKEMON2: &[u8] = b"NUM_POKEMON2";
     pub const P2_SPRR: &[u8] = b"p2_sprR";
@@ -351,6 +394,89 @@ pub mod field {
     pub const SPRINDEX: &[u8] = b"sprINDEX";
     pub const SPRINDEX2: &[u8] = b"sprINDEX2";
     pub const SPR_R: &[u8] = b"sprR";
+}
+
+pub mod battle {
+    //! Battle content keys and the special values the engine must reproduce.
+
+    /// Battle sprite slot used when the companion faces zero.
+    pub const SLOT_FACING_ZERO: i32 = 10;
+    /// Battle sprite slot used by the hurt/back pose.
+    pub const SLOT_FACING_HURT: i32 = 11;
+    /// Battle sprite slot used when the game reports no usable facing.
+    pub const SLOT_DEFAULT: i32 = 2;
+
+    /// `global.hierba` value that selects the lava battle room.
+    pub const GRASS_LAVA: i32 = 5;
+    /// Number of battle backgrounds the game rolls when none is set.
+    pub const BACKGROUND_COUNT: u32 = 253;
+    /// Trainer name the game writes for a wild encounter.
+    pub const WILD_TRAINER_NAME: &str = "salvaje";
+
+    pub fn is_wild_trainer_name(name: &str) -> bool {
+        name.eq_ignore_ascii_case(WILD_TRAINER_NAME)
+    }
+}
+
+pub mod player {
+    //! Player index and sprite conventions.
+
+    /// `prota_index` value for a custom character.
+    pub const CUSTOM_INDEX: i32 = 10;
+    /// Base sprite index for roster characters (`prota_index + offset`).
+    pub const SPRITE_OFFSET: i32 = 1000;
+    /// Sprite used when the player instance and `sprD` cannot be read.
+    pub const DEFAULT_SPRITE: i32 = 1860;
+
+    pub fn is_custom(index: i32) -> bool {
+        index == CUSTOM_INDEX
+    }
+
+    pub fn sprite_index(index: i32, custom_sprite: i32) -> i32 {
+        if is_custom(index) {
+            custom_sprite
+        } else {
+            index + SPRITE_OFFSET
+        }
+    }
+}
+
+pub mod format {
+    //! Sizes and strides of the native party/trade data layout.
+
+    pub const PARTY_SIZE: usize = 6;
+    pub const MOVE_COUNT: usize = 4;
+    pub const INFO_FIELDS: usize = 17;
+    pub const TEAM_INFO_LINES: usize = 16;
+    pub const PARTY_ARRAY_STRIDE: u32 = 32_000;
+}
+
+pub mod team {
+    //! Native team-file version stamps and field kinds.
+
+    pub const CURRENT_VERSION: i32 = 20260802;
+    pub const DEFAULT_VERSION: i32 = 20240713;
+    pub const LEGACY_OUTFIT_CUTOVER: i32 = 20241217;
+    pub const MIN_VERSION: i32 = 20080101;
+    pub const MAX_VERSION: i32 = 21001231;
+    pub const CUSTOM_OUTFIT_LIMIT: f64 = 210.0;
+    pub const INFO_KINDS: [u8; 16] = [0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 2, 2, 0, 0, 0, 0];
+
+    pub const INFO_KIND_NUMERIC: u8 = 0;
+    pub const INFO_KIND_TEXT: u8 = 1;
+    pub const INFO_KIND_ENCODED: u8 = 2;
+}
+
+pub mod world {
+    //! Native paths for battle and overworld sprites under the data root.
+
+    pub const BATTLE_SPRITE_DIR: &str = "pkmnbattle";
+    pub const BATTLE_SPRITE_EXT: &str = "gmspr";
+    pub const OVERWORLD_SPRITE_DIR: &str = "pkmn";
+    pub const EGG_SPRITE_DIR: &str = "huevo";
+    pub const SHINY_OVERWORLD_SPRITE_DIR: &str = "pkmn_shiny";
+    pub const SHINY_EGG_SPRITE_DIR: &str = "huevo_shiny";
+    pub const SPRITE_EXT: &str = "gif";
 }
 
 pub mod save {
@@ -372,6 +498,14 @@ pub mod save {
 
     pub const ONLINE_EXT: &str = "online";
     pub const ONLINE_SUFFIX: &str = ".online";
+
+    pub const TEAM_DIR: &str = "equipos";
+    pub const TEAM_EXT: &str = "TEAM";
+
+    pub const SAVE_HEADER: [u8; 4] = [0x1d, 0x02, 0x00, 0x00];
+
+    pub const TEMP_SUFFIX: &str = ".tmp";
+    pub const WINDOWS_BACKUP_INFIX: &str = ".bak.";
 
     pub fn slot_stem(slot: i32) -> String {
         format!("{SLOT_PREFIX}{slot}")
@@ -481,6 +615,7 @@ pub static ENTRIES: &[Entry] = &[
     global("ENTR_SPR", "global.entrance-sprite", "battle"),
     global("exp1", "global.exp1", "party"),
     global("exp2", "global.exp2", "party"),
+    global("extraInfo", "global.extra-info", "party"),
     global("hierba", "global.grass", "battle-background"),
     global("indexnivel", "global.level-index", "party"),
     global("indexpkmn", "global.species-index", "party"),
@@ -489,8 +624,22 @@ pub static ENTRIES: &[Entry] = &[
     global("ISEP2", "global.isep2", "party"),
     global("IV", "global.iv", "party"),
     global("IV2", "global.iv2", "party"),
+    global("MAX_PP_1", "global.max-pp1", "party"),
     global("MAX_PS_1", "global.max-hp1", "party"),
     global("MAX_PS_2", "global.max-hp2", "party"),
+    global("XTRA_PS_1", "global.extra-hp1", "party"),
+    global("atk1", "global.attack-stat1", "party"),
+    global("def1", "global.defense-stat1", "party"),
+    global("vel1", "global.speed-stat1", "party"),
+    global("atk_sp1", "global.special-attack1", "party"),
+    global("def_sp1", "global.special-defense1", "party"),
+    global("prec1", "global.accuracy1", "party"),
+    global("num_attack1", "global.move-count1", "party"),
+    global("tipoA1", "global.type-a1", "party"),
+    global("tipoB1", "global.type-b1", "party"),
+    global("tipoC1", "global.type-c1", "party"),
+    global("volador1", "global.flying1", "party"),
+    global("fantasma1", "global.ghost1", "party"),
     global("modeBattleBack", "global.battle-back-mode", "battle-background"),
     global("NET_DELAY", "global.net-delay", "online"),
     global("NETW_BROOM", "global.net-battle-room", "online"),
@@ -520,12 +669,40 @@ pub static ENTRIES: &[Entry] = &[
     global("STD2", "global.status2", "party"),
     global("TRAINER_NM", "global.trainer-name", "battle"),
     global("TRAINER_SPR", "global.trainer-sprite", "battle"),
+    field("BTTBACK_INDEX", "field.battle-back-index", "battle-background"),
+    field("char2", "field.character", "player"),
+    field("frase2", "field.phrase2", "player-two"),
+    field("frasePropia", "field.phrase", "player"),
+    field("id2", "field.player-id2", "player-two"),
+    field("index2", "field.player-index2", "player-two"),
+    field("mask1", "field.selue-mask", "trade"),
+    field("NUM_POKEMON1", "field.party-count1", "battle"),
+    field("NUM_POKEMON2", "field.party-count2", "battle"),
+    field("p2_sprR", "field.player-two-sprite", "battle"),
+    field("PKMN1", "field.party-species1", "battle"),
+    field("PKMN2", "field.party-species2", "battle"),
+    field("PLAYER1_INI", "field.player-one-ready", "battle"),
+    field("PLAYER2_INI", "field.player-two-ready", "battle"),
+    field("protaname2", "field.player-name2", "player-two"),
+    field("SEL", "field.menu-selection", "title"),
+    field("sp_char2", "field.character2", "player-two"),
+    field("sprINDEX", "field.sprite-index", "battle"),
+    field("sprINDEX2", "field.sprite-index2", "battle"),
+    field("sprR", "field.sprite-result", "battle"),
+    sprite(player::DEFAULT_SPRITE, "unknown#1860", "sprite.player-default", "player"),
     save_path("data/partidas", "save.root", "save-root"),
     save_path("data/partidas/preonline", "save.preonline", "save-backup"),
     save_path("data/partidas/reloaded<N>.savc", "save.slot.savc", "save-slot"),
     save_path("data/partidas/reloaded<N>.nfo", "save.slot.nfo", "save-summary"),
     save_path("data/partidas/reloaded<N>.data", "save.slot.data", "save-sidecar"),
     save_path("data/partidas/reloaded<N>.savc.online", "save.online-overlay", "save-overlay"),
+    save_path("data/equipos/<name>.TEAM", "save.team-file", "team"),
+    save_path("data/pkmnbattle/P<id>_<slot>.gmspr", "world.battle-sprite", "battle-sprite"),
+    save_path("data/pkmnbattle/P<id>_<slot>_ALT.gmspr", "world.battle-sprite-alt", "battle-sprite"),
+    save_path("data/pkmn/<id>.gif", "world.overworld-sprite", "overworld-sprite"),
+    save_path("data/pkmn_shiny/<id>.gif", "world.shiny-overworld-sprite", "overworld-sprite"),
+    save_path("data/huevo/<id>.gif", "world.egg-sprite", "egg-sprite"),
+    save_path("data/huevo_shiny/<id>.gif", "world.shiny-egg-sprite", "egg-sprite"),
 ];
 
 /// Finds a manifest entry by its stable content key.
@@ -580,6 +757,63 @@ mod tests {
         assert_eq!(save::slot_file_name(9, save::EXT_SAVC), "reloaded9.savc");
         assert!(save::is_save_path("data/partidas/reloaded9.savc"));
         assert!(!save::is_save_path("data/partidas/reloaded9.txt"));
+    }
+
+    #[test]
+    fn manifest_entries_cover_instance_fields() {
+        let fields = [
+            field::BTTBACK_INDEX,
+            field::CHAR2,
+            field::FRASE2,
+            field::FRASE_PROPIA,
+            field::ID2,
+            field::INDEX2,
+            field::MASK1,
+            field::NUM_POKEMON1,
+            field::NUM_POKEMON2,
+            field::P2_SPRR,
+            field::PKMN1,
+            field::PKMN2,
+            field::PLAYER1_INI,
+            field::PLAYER2_INI,
+            field::PROTANAME2,
+            field::SEL,
+            field::SP_CHAR2,
+            field::SPRINDEX,
+            field::SPRINDEX2,
+            field::SPR_R,
+        ];
+        for name in fields {
+            let name = std::str::from_utf8(name).unwrap();
+            assert!(native(Kind::Field, None, name).is_some(), "missing field entry {name}");
+        }
+    }
+
+    #[test]
+    fn manifest_entries_cover_world_paths_and_default_sprite() {
+        for key in [
+            "save.team-file",
+            "world.battle-sprite",
+            "world.battle-sprite-alt",
+            "world.overworld-sprite",
+            "world.shiny-overworld-sprite",
+            "world.egg-sprite",
+            "world.shiny-egg-sprite",
+        ] {
+            assert!(entry(key).is_some(), "missing path entry {key}");
+        }
+        assert_eq!(
+            native(Kind::Sprite, Some(player::DEFAULT_SPRITE), "").map(|entry| entry.content_key),
+            Some("sprite.player-default")
+        );
+    }
+
+    #[test]
+    fn player_sprite_index_matches_native_convention() {
+        assert!(player::is_custom(player::CUSTOM_INDEX));
+        assert!(!player::is_custom(player::CUSTOM_INDEX + 1));
+        assert_eq!(player::sprite_index(25, -1), 25 + player::SPRITE_OFFSET);
+        assert_eq!(player::sprite_index(player::CUSTOM_INDEX, 77), 77);
     }
 
     #[test]

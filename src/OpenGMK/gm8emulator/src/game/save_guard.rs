@@ -202,7 +202,7 @@ fn create_unique_dir(parent: &Path, stem: &str) -> io::Result<PathBuf> {
 
 fn temporary_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
-    name.push(".tmp");
+    name.push(f3r::save::TEMP_SUFFIX);
     PathBuf::from(name)
 }
 
@@ -238,8 +238,9 @@ fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
                 && matches!(first_error.kind(), ErrorKind::AlreadyExists | ErrorKind::PermissionDenied) =>
         {
             let backup = parent_dir(destination).join(format!(
-                "{}.bak.{}",
+                "{}{}{}",
                 destination.file_name().map(|name| name.to_string_lossy()).unwrap_or_default(),
+                f3r::save::WINDOWS_BACKUP_INFIX,
                 timestamp()
             ));
 
@@ -343,7 +344,7 @@ mod tests {
         atomic_write(&path, b"new").expect("atomic write");
 
         assert_eq!(fs::read(&path).unwrap(), b"new");
-        assert!(!temp.path().join("save.dat.tmp").exists());
+        assert!(!temp.path().join(format!("save.dat{}", f3r::save::TEMP_SUFFIX)).exists());
     }
 
     #[test]
@@ -357,7 +358,7 @@ mod tests {
         atomic_copy(&source, &destination).expect("atomic copy");
 
         assert_eq!(fs::read(&destination).unwrap(), b"source bytes");
-        assert!(!temp.path().join("destination.dat.tmp").exists());
+        assert!(!temp.path().join(format!("destination.dat{}", f3r::save::TEMP_SUFFIX)).exists());
     }
 
     #[test]
@@ -398,7 +399,7 @@ mod tests {
             );
         }
         assert!(!backup
-            .join(format!("{}.tmp", slot_name(9, f3r::save::EXT_SAVC)))
+            .join(format!("{}{}", slot_name(9, f3r::save::EXT_SAVC), f3r::save::TEMP_SUFFIX))
             .exists());
     }
 

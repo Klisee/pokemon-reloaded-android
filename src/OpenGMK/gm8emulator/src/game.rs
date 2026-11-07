@@ -1574,7 +1574,7 @@ impl Game {
                     let dummy_instance = game
                         .room
                         .instance_list
-                        .insert_dummy(Instance::new_dummy(game.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                        .insert_dummy(Instance::new_dummy(game.assets.objects.get_asset(f3r::object::POKEMON_PLAYER).map(|x| x.as_ref())));
                     let value = game.eval(&expr, &mut Context::with_single_instance(dummy_instance))?;
                     game.constants.push(value);
                     game.room.instance_list.remove_dummy(dummy_instance);
@@ -1587,7 +1587,7 @@ impl Game {
             let dummy_instance = game
                 .room
                 .instance_list
-                .insert_dummy(Instance::new_dummy(game.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                .insert_dummy(Instance::new_dummy(game.assets.objects.get_asset(f3r::object::POKEMON_PLAYER).map(|x| x.as_ref())));
             let value = game.eval(&expr, &mut Context::with_single_instance(dummy_instance))?;
             game.constants.push(value);
             game.room.instance_list.remove_dummy(dummy_instance);
@@ -1899,7 +1899,7 @@ impl Game {
             let dummy_instance = self
                 .room
                 .instance_list
-                .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(f3r::object::POKEMON_PLAYER).map(|x| x.as_ref())));
             let mut new_context = Context::with_single_instance(dummy_instance);
             self.execute(&room.creation_code?, &mut new_context)?;
             self.room.instance_list.remove_dummy(dummy_instance);
@@ -2036,7 +2036,7 @@ impl Game {
             },
             None => None,
         };
-        let magic = [0x1d, 0x02, 0x00, 0x00];
+        let magic = f3r::save::SAVE_HEADER;
         let save: GMSave = if let Some(bytes) = staged {
             if bytes.len() < magic.len() || bytes[..magic.len()] != magic {
                 return Err(Box::new(gml::Error::FunctionError(
@@ -2179,7 +2179,7 @@ impl Game {
                 .iter()
                 .filter_map(|name| self.global_string(name))
                 .map(|name| name.trim().to_string())
-                .find(|name| !name.is_empty() && !name.eq_ignore_ascii_case("salvaje"))
+                .find(|name| !name.is_empty() && !f3r::battle::is_wild_trainer_name(&name))
                 .unwrap_or_default()
         } else {
             String::new()
@@ -3078,7 +3078,7 @@ impl Game {
     }
 
     fn copy_global_array(&mut self, from: &[u8], to: &[u8]) {
-        for index in 0..6u32 {
+        for index in 0..f3r::format::PARTY_SIZE as u32 {
             let value = self
                 .variable_global_array_get(&[gml::Value::Str(gml::String::from(from)), index.into()])
                 .unwrap_or_default();
@@ -3136,7 +3136,7 @@ impl Game {
         let Some(handle) = self.room.instance_list.get_by_instid(instance_id) else {
             return Ok(())
         };
-        let local_sprite = self.local_player_sprite().unwrap_or(1860);
+        let local_sprite = self.local_player_sprite().unwrap_or(f3r::player::DEFAULT_SPRITE);
         let local_index = match self
             .variable_global_array_get(&[gml::Value::Str(gml::String::from(f3r::global::PROTA_INDEX)), 0.into()])
             .unwrap_or_default()
@@ -3157,7 +3157,7 @@ impl Game {
             gml::Value::Real(Real::from(local_sprite as f64)),
         ]);
         // Test battle: use the local party on both sides.
-        for index in 0..6 {
+        for index in 0..f3r::format::PARTY_SIZE {
             let species = match self
                 .variable_global_array_get(&[gml::Value::Str(gml::String::from(f3r::global::PKMN1)), index.into()])
                 .unwrap_or_default()
@@ -3342,7 +3342,7 @@ impl Game {
             .and_then(|text| std::str::from_utf8(&text).ok().map(|text| text.trim().parse::<f64>().unwrap_or(0.0)))
             .unwrap_or(0.0) as i32;
         let prota_index = self.global_real(f3r::global::PROTA_INDEX, 0) as i32;
-        let char2 = if prota_index == 10 { self.player_char2_real() } else { f64::from(prota_id) };
+        let char2 = if f3r::player::is_custom(prota_index) { self.player_char2_real() } else { f64::from(prota_id) };
         let name = team_text_bytes(&self
             .global_text(f3r::global::APODO_NAME)
             .filter(|text| !text.is_empty())
@@ -3350,13 +3350,14 @@ impl Game {
             .unwrap_or_default());
         let phrase = team_text_bytes(&self.instance_text(f3r::object::VARIABLES, f3r::field::FRASE_PROPIA).unwrap_or_default());
 
-        let mut mons: [team_file::TeamMon; 6] = std::array::from_fn(|_| team_file::TeamMon::empty());
+        let mut mons: [team_file::TeamMon; f3r::format::PARTY_SIZE] =
+            std::array::from_fn(|_| team_file::TeamMon::empty());
         for (index, mon) in mons.iter_mut().enumerate() {
             let index = index as u32;
-            let mut info: [Vec<u8>; 16] = std::array::from_fn(|_| Vec::new());
-            for field in 0..16u32 {
+            let mut info: [Vec<u8>; f3r::format::TEAM_INFO_LINES] = std::array::from_fn(|_| Vec::new());
+            for field in 0..f3r::format::TEAM_INFO_LINES as u32 {
                 let value = self
-                    .global_value(f3r::global::INFO, index * 32000 + field)
+                    .global_value(f3r::global::INFO, index * f3r::format::PARTY_ARRAY_STRIDE + field)
                     .unwrap_or(gml::Value::Real(Real::from(0.0)));
                 let mut text = match &value {
                     gml::Value::Str(text) => team_text_bytes(text.as_ref()),
@@ -3368,9 +3369,9 @@ impl Game {
                 info[field as usize] = text;
             }
 
-            let mut moves = [0.0; 4];
-            for move_index in 1..=4u32 {
-                moves[(move_index - 1) as usize] = self.global_real(f3r::global::ATTACK1, index * 32000 + move_index);
+            let mut moves = [0.0; f3r::format::MOVE_COUNT];
+            for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
+                moves[(move_index - 1) as usize] = self.global_real(f3r::global::ATTACK1, index * f3r::format::PARTY_ARRAY_STRIDE + move_index);
             }
 
             *mon = team_file::TeamMon {
@@ -3402,7 +3403,7 @@ impl Game {
                 return None;
             }
         };
-        let sprite = if prota_index == 10 { char2 as i32 } else { prota_index + 1000 };
+        let sprite = f3r::player::sprite_index(prota_index, char2 as i32);
         Some(BattleTeamExport {
             data,
             header: BattleTeamHeader {
@@ -3435,17 +3436,17 @@ impl Game {
         let prota_id = team.trainer_id;
         let prota_index = team.trainer_index;
         let mut char2 = -1.0;
-        if prota_index == 10 {
+        if f3r::player::is_custom(prota_index) {
             char2 = team.outfit;
-            if version < 20241217 && char2 > 210.0 {
+            if version < f3r::team::LEGACY_OUTFIT_CUTOVER && char2 > f3r::team::CUSTOM_OUTFIT_LIMIT {
                 char2 += 1.0;
             }
         }
         let frase = team.phrase;
 
-        for index in 0..6u32 {
+        for index in 0..f3r::format::PARTY_SIZE as u32 {
             let mon = &team.mons[index as usize];
-            let info_values: Vec<gml::Value> = (0..16u32)
+            let info_values: Vec<gml::Value> = (0..f3r::format::TEAM_INFO_LINES as u32)
                 .map(|field| {
                     let raw = &mon.info[field as usize];
                     let string_field = match side {
@@ -3501,11 +3502,11 @@ impl Game {
             self.set_global_real(fields.4, index, f64::from(mon.iv));
             self.set_global_real(fields.5, index, f64::from(mon.item));
             self.set_global_real(fields.6, index, mon.selue);
-            for (slot, move_index) in (1..=4u32).enumerate() {
-                self.set_global_real(fields.7, index * 32000 + move_index, mon.moves[slot]);
+            for (slot, move_index) in (1..=f3r::format::MOVE_COUNT as u32).enumerate() {
+                self.set_global_real(fields.7, index * f3r::format::PARTY_ARRAY_STRIDE + move_index, mon.moves[slot]);
             }
             for (field, value) in info_values.into_iter().enumerate() {
-                self.set_global_value(fields.8, index * 32000 + field as u32, value);
+                self.set_global_value(fields.8, index * f3r::format::PARTY_ARRAY_STRIDE + field as u32, value);
             }
             if side == 1 {
                 self.set_global_real(f3r::global::INDEXPKMN, index, f64::from(mon.species));
@@ -3520,7 +3521,7 @@ impl Game {
             self.set_global_text(f3r::global::APODO_NAME, &name);
             self.set_global_text(f3r::global::PROTA_ID, format!("{:05}", prota_id).as_bytes());
             self.set_global_real(f3r::global::PROTA_INDEX, 0, f64::from(prota_index));
-            if prota_index == 10 {
+            if f3r::player::is_custom(prota_index) {
                 if let Some(handle) = self.find_object_instance(f3r::object::CONTROL) {
                     self.set_instance_number(handle, f3r::field::CHAR2, char2);
                 }
@@ -3532,13 +3533,13 @@ impl Game {
             self.set_instance_text(handle, f3r::field::PROTANAME2, &name);
             self.set_instance_text(handle, f3r::field::ID2, format!("{:05}", prota_id).as_bytes());
             self.set_instance_number(handle, f3r::field::INDEX2, f64::from(prota_index));
-            if prota_index == 10 {
+            if f3r::player::is_custom(prota_index) {
                 self.set_instance_number(handle, f3r::field::SP_CHAR2, char2);
             }
             self.set_instance_text(handle, f3r::field::FRASE2, &frase);
         }
 
-        let sprite = if prota_index == 10 { char2 as i32 } else { prota_index + 1000 };
+        let sprite = f3r::player::sprite_index(prota_index, char2 as i32);
         Some(BattleTeamHeader {
             name,
             prota_id,
@@ -3551,8 +3552,8 @@ impl Game {
     }
 
     fn team_spr_index(&mut self, handle: usize, header: &BattleTeamHeader) -> f64 {
-        if header.prota_index != 10 {
-            return f64::from(header.prota_index + 1000);
+        if !f3r::player::is_custom(header.prota_index) {
+            return f64::from(f3r::player::sprite_index(header.prota_index, header.char2 as i32));
         }
         let has_mapping = self
             .assets
@@ -3608,7 +3609,7 @@ impl Game {
             if value > 0 {
                 value
             } else {
-                (seed.unsigned_abs() % 253) as i32 + 1
+                (seed.unsigned_abs() % f3r::battle::BACKGROUND_COUNT) as i32 + 1
             }
         } else {
             0
@@ -3632,7 +3633,7 @@ impl Game {
         let hierba = self.global_number(f3r::global::HIERBA, 0).unwrap_or(0);
         meta.sala = if modo != 0 {
             f3r::room::BATTLE
-        } else if hierba == 5 {
+        } else if hierba == f3r::battle::GRASS_LAVA {
             f3r::room::BATTLE_LAVA
         } else {
             f3r::room::BATTLE_AQUA
@@ -3669,14 +3670,14 @@ impl Game {
     fn battle_team_snapshot(&self) -> Option<String> {
         let mut team = Vec::new();
         let prota = self.global_number(f3r::global::PROTA_INDEX, 0).unwrap_or(-1);
-        let sprite = self.local_player_sprite().unwrap_or(1860);
+        let sprite = self.local_player_sprite().unwrap_or(f3r::player::DEFAULT_SPRITE);
         let char2 = self.player_char2();
-        for index in 0..6u32 {
+        for index in 0..f3r::format::PARTY_SIZE as u32 {
             let moves = (1..=4)
-                .map(|move_index| self.global_json(f3r::global::ATTACK1, index * 32000 + move_index))
+                .map(|move_index| self.global_json(f3r::global::ATTACK1, index * f3r::format::PARTY_ARRAY_STRIDE + move_index))
                 .collect::<Vec<_>>();
-            let info = (0..17)
-                .map(|field| self.global_json(f3r::global::INFO, index * 32000 + field))
+            let info = (0..f3r::format::INFO_FIELDS)
+                .map(|field| self.global_json(f3r::global::INFO, index * f3r::format::PARTY_ARRAY_STRIDE + field as u32))
                 .collect::<Vec<_>>();
             team.push(serde_json::json!({
                 "species": self.global_num(f3r::global::PKMN1, index),
@@ -3703,7 +3704,7 @@ impl Game {
         let root = serde_json::from_str::<serde_json::Value>(data).ok()?;
         Some((
             root.get("prota").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
-            root.get("sprite").and_then(|value| value.as_i64()).unwrap_or(1860) as i32,
+            root.get("sprite").and_then(|value| value.as_i64()).unwrap_or(i64::from(f3r::player::DEFAULT_SPRITE)) as i32,
             root.get("char2").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
         ))
     }
@@ -3756,19 +3757,19 @@ impl Game {
             self.set_global_num(fields.5, index, number("item"));
             self.set_global_num(fields.6, index, number("selue"));
             if let Some(moves) = pokemon.get("moves").and_then(|value| value.as_array()) {
-                for (move_index, value) in moves.iter().take(4).enumerate() {
-                    self.set_global_json(fields.7, index * 32000 + move_index as u32 + 1, value);
+                for (move_index, value) in moves.iter().take(f3r::format::MOVE_COUNT).enumerate() {
+                    self.set_global_json(fields.7, index * f3r::format::PARTY_ARRAY_STRIDE + move_index as u32 + 1, value);
                 }
             }
             if let Some(info) = pokemon.get("info").and_then(|value| value.as_array()) {
-                for (field, value) in info.iter().take(17).enumerate() {
-                    self.set_global_json(fields.8, index * 32000 + field as u32, value);
+                for (field, value) in info.iter().take(f3r::format::INFO_FIELDS).enumerate() {
+                    self.set_global_json(fields.8, index * f3r::format::PARTY_ARRAY_STRIDE + field as u32, value);
                 }
             }
         }
         Some((
             root.get("prota").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
-            root.get("sprite").and_then(|value| value.as_i64()).unwrap_or(1860) as i32,
+            root.get("sprite").and_then(|value| value.as_i64()).unwrap_or(i64::from(f3r::player::DEFAULT_SPRITE)) as i32,
             root.get("char2").and_then(|value| value.as_i64()).unwrap_or(-1) as i32,
         ))
     }
@@ -3851,7 +3852,7 @@ impl Game {
         if self.battle_local_p1 {
             return
         }
-        for index in 0..6u32 {
+        for index in 0..f3r::format::PARTY_SIZE as u32 {
             let species = self.global_num(f3r::global::PKMN2, index);
             let level = self.global_num(f3r::global::NIVEL2, index);
             let sex = self.global_num(f3r::global::PKMNSEX2, index);
@@ -3866,13 +3867,13 @@ impl Game {
             self.set_global_num(f3r::global::IV, index, iv);
             self.set_global_num(f3r::global::OBJPOKE1, index, item);
             self.set_global_num(f3r::global::SELUE_PK1, index, selue);
-            for move_index in 1..=4u32 {
-                let value = self.global_json(f3r::global::ATTACK2, index * 32000 + move_index);
-                self.set_global_json(f3r::global::ATTACK1, index * 32000 + move_index, &value);
+            for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
+                let value = self.global_json(f3r::global::ATTACK2, index * f3r::format::PARTY_ARRAY_STRIDE + move_index);
+                self.set_global_json(f3r::global::ATTACK1, index * f3r::format::PARTY_ARRAY_STRIDE + move_index, &value);
             }
-            for field in 0..17u32 {
-                let value = self.global_json(f3r::global::INFO2, index * 32000 + field);
-                self.set_global_json(f3r::global::INFO, index * 32000 + field, &value);
+            for field in 0..f3r::format::INFO_FIELDS as u32 {
+                let value = self.global_json(f3r::global::INFO2, index * f3r::format::PARTY_ARRAY_STRIDE + field);
+                self.set_global_json(f3r::global::INFO, index * f3r::format::PARTY_ARRAY_STRIDE + field, &value);
             }
         }
         let _ = self.variable_global_set(&[
@@ -4024,7 +4025,7 @@ impl Game {
         }
         let mut count1: f64 = 0.0;
         let mut count2: f64 = 0.0;
-        for index in 0..6u32 {
+        for index in 0..f3r::format::PARTY_SIZE as u32 {
             let species1 = self.global_real(f3r::global::PKMN1, index);
             let species2 = self.global_real(f3r::global::PKMN2, index);
             self.set_instance_array_number(handle, f3r::field::PKMN1, index, species1);
@@ -4097,9 +4098,9 @@ impl Game {
             (f3r::global::STD1, f3r::global::STD2),
         ];
         for (left, right) in pairs {
-            for index in 0..6 {
-                let left = self.global_number(left, index).unwrap_or(0);
-                let right = self.global_number(right, index).unwrap_or(0);
+            for index in 0..f3r::format::PARTY_SIZE {
+                let left = self.global_number(left, index as u32).unwrap_or(0);
+                let right = self.global_number(right, index as u32).unwrap_or(0);
                 add(left ^ right);
             }
         }
@@ -4961,7 +4962,7 @@ impl Game {
             let dummy_instance = self
                 .room
                 .instance_list
-                .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(f3r::object::POKEMON_PLAYER).map(|x| x.as_ref())));
             let instructions = self.compiler.compile(&self.library_init_strings[i])?;
             self.execute(&instructions, &mut Context::with_single_instance(dummy_instance))?;
             self.room.instance_list.remove_dummy(dummy_instance);
@@ -4972,7 +4973,7 @@ impl Game {
             let dummy_instance = self
                 .room
                 .instance_list
-                .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(0).map(|x| x.as_ref())));
+                .insert_dummy(Instance::new_dummy(self.assets.objects.get_asset(f3r::object::POKEMON_PLAYER).map(|x| x.as_ref())));
             self.run_extension_function(
                 self.extension_initializers[i],
                 &mut Context::with_single_instance(dummy_instance),

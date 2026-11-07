@@ -8,16 +8,17 @@ use std::fmt;
 use super::team_codec_clean::{
     self, DecodeOptions, EncodeOptions, InfoCell, PartySlot, Team, Trainer,
 };
+use crate::compat::f3r;
 
-pub(crate) const CURRENT_VERSION: i32 = team_codec_clean::CURRENT_VERSION as i32;
+pub(crate) const CURRENT_VERSION: i32 = f3r::team::CURRENT_VERSION;
 
-const PARTY_SIZE: usize = 6;
-const INFO_LINES: usize = 16;
+const PARTY_SIZE: usize = f3r::format::PARTY_SIZE;
+const INFO_LINES: usize = f3r::format::TEAM_INFO_LINES;
 
-const INFO_KIND_NUMERIC: u8 = 0;
-const INFO_KIND_TEXT: u8 = 1;
-const INFO_KIND_ENCODED: u8 = 2;
-const INFO_KINDS: [u8; INFO_LINES] = [0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 2, 2, 0, 0, 0, 0];
+const INFO_KIND_NUMERIC: u8 = f3r::team::INFO_KIND_NUMERIC;
+const INFO_KIND_TEXT: u8 = f3r::team::INFO_KIND_TEXT;
+const INFO_KIND_ENCODED: u8 = f3r::team::INFO_KIND_ENCODED;
+const INFO_KINDS: [u8; INFO_LINES] = f3r::team::INFO_KINDS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TeamError(pub String);
@@ -506,12 +507,12 @@ mod tests {
         let mut team = sample();
         team.trainer_index = 10;
         team.outfit = 212.0;
-        team.version = 20240713;
+        team.version = f3r::team::DEFAULT_VERSION;
         let data = team.encode().expect("legacy encode");
         let decoded = TeamFile::decode(&data).expect("decode");
         assert_eq!(decoded.outfit, 211.0, "codec must return the raw wire value");
         let mut host_char2 = decoded.outfit;
-        if decoded.version < 20241217 && host_char2 > 210.0 {
+        if decoded.version < f3r::team::LEGACY_OUTFIT_CUTOVER && host_char2 > f3r::team::CUSTOM_OUTFIT_LIMIT {
             host_char2 += 1.0;
         }
         assert_eq!(host_char2, 212.0, "host rule applies the +1 exactly once");
