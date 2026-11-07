@@ -2349,4 +2349,80 @@ mod tests {
         assert_eq!(say_time_ms("12345"), 3300);
         assert_eq!(say_time_ms(&"x".repeat(200)), 9000);
     }
+
+    fn queue_wire(online: &mut ReloadedOnline, wire: &[u8]) {
+        online.handle_roz_message(wire);
+    }
+
+    #[test]
+    fn offer_transport_queues_the_payload_after_the_envelope() {
+        let payload = b"Fixture Nv. 50\x1er448.000000\x1d";
+        let mut wire = b"OFFER\x1f".to_vec();
+        wire.extend_from_slice(payload);
+
+        let mut online = ReloadedOnline::default();
+        queue_wire(&mut online, &wire);
+
+        let message = online.take_peer_message().expect("queued offer");
+        assert_eq!(message.kind, PeerMessageKind::Offer);
+        assert_eq!(message.payload, payload);
+        assert!(online.take_peer_message().is_none());
+    }
+
+    #[test]
+    fn offer_transport_keeps_empty_and_non_utf8_payloads_verbatim() {
+        let mut online = ReloadedOnline::default();
+        queue_wire(&mut online, b"OFFER\x1f");
+        queue_wire(&mut online, b"OFFER\x1f\xff\xfe\x1f\x00");
+
+        assert_eq!(online.take_peer_message().unwrap().payload, b"");
+        assert_eq!(
+            online.take_peer_message().unwrap().payload,
+            b"\xff\xfe\x1f\x00"
+        );
+    }
+
+    #[test]
+    fn offer_transport_requires_a_complete_prefix() {
+        let mut online = ReloadedOnline::default();
+        queue_wire(&mut online, b"OFFER");
+        queue_wire(&mut online, b"OFFERX\x1fpayload");
+        assert!(online.take_peer_message().is_none());
+
+        queue_wire(&mut online, b"GIFT\x1fgift");
+        queue_wire(&mut online, b"OK\x1f");
+        queue_wire(&mut online, b"NO\x1f");
+        assert_eq!(online.take_peer_message().unwrap().kind, PeerMessageKind::Gift);
+        assert_eq!(online.take_peer_message().unwrap().kind, PeerMessageKind::Ok);
+        assert_eq!(online.take_peer_message().unwrap().kind, PeerMessageKind::No);
+    }
+
+    #[test]
+    fn repeated_offer_is_queued_twice_without_deduplication() {
+        let mut online = ReloadedOnline::default();
+        let wire = b"OFFER\x1fsame";
+        queue_wire(&mut online, wire);
+        queue_wire(&mut online, wire);
+
+        assert_eq!(online.take_peer_message().unwrap().payload, b"same");
+        assert_eq!(online.take_peer_message().unwrap().payload, b"same");
+        assert!(online.take_peer_message().is_none());
+    }
+
+    #[test]
+    fn peer_message_queue_is_capped_at_64_and_drops_the_oldest() {
+        let mut online = ReloadedOnline::default();
+        for index in 0..66 {
+            let mut wire = b"OFFER\x1f".to_vec();
+            wire.extend_from_slice(format!("offer-{index}").as_bytes());
+            queue_wire(&mut online, &wire);
+        }
+
+        let queued: Vec<Vec<u8>> = std::iter::from_fn(|| online.take_peer_message())
+            .map(|message| message.payload)
+            .collect();
+        assert_eq!(queued.len(), 64);
+        assert_eq!(queued.first().unwrap(), b"offer-2");
+        assert_eq!(queued.last().unwrap(), b"offer-65");
+    }
 }

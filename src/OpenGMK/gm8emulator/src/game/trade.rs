@@ -43,3 +43,204 @@ impl TradeSession {
         }
     }
 }
+
+/// Result of the transactional apply/save sequence used by `trade_tick`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TradeCommit {
+    Committed,
+    ApplyFailed(String),
+    SaveFailed(String),
+}
+
+/// Run `apply`, then `save` only if apply succeeded. `restore` runs exactly once
+/// after either failure, before the error is returned to the caller.
+pub(crate) fn commit_transaction<S, A, B, R>(
+    state: &mut S,
+    apply: A,
+    save: B,
+    restore: R,
+) -> TradeCommit
+where
+    A: FnOnce(&mut S) -> Result<(), String>,
+    B: FnOnce(&mut S) -> Result<(), String>,
+    R: FnOnce(&mut S),
+{
+    match apply(state) {
+        Ok(()) => match save(state) {
+            Ok(()) => TradeCommit::Committed,
+            Err(error) => {
+                restore(state);
+                TradeCommit::SaveFailed(error)
+            },
+        },
+        Err(error) => {
+            restore(state);
+            TradeCommit::ApplyFailed(error)
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offer(label: &str) -> TradeOffer {
+        TradeOffer {
+            label: label.into(),
+            values: vec![TradeValue::Real(0.0); VALUE_COUNT],
+        }
+    }
+
+    #[test]
+    fn session_binds_peer_and_name_on_creation() {
+        let session = TradeSession::new(7, "Rival".into());
+        assert_eq!(session.peer, 7);
+        assert_eq!(session.name, "Rival");
+        assert_eq!(session.phase, TradePhase::Pick);
+        assert_eq!(session.slot, None);
+        assert!(session.local.is_none());
+        assert!(session.remote.is_none());
+        assert_eq!(session.selection, 0);
+        assert!(session.message.is_empty());
+    }
+
+    #[test]
+    fn sessions_do_not_share_offers_or_selection() {
+        let mut first = TradeSession::new(1, "Uno".into());
+        let second = TradeSession::new(2, "Dos".into());
+        first.local = Some(offer("local"));
+        first.remote = Some(offer("remote"));
+        first.slot = Some(4);
+        first.selection = 2;
+        first.phase = TradePhase::Confirm;
+
+        assert_eq!(second.peer, 2);
+        assert_eq!(second.phase, TradePhase::Pick);
+        assert_eq!(second.slot, None);
+        assert!(second.local.is_none());
+        assert!(second.remote.is_none());
+        assert_eq!(second.selection, 0);
+    }
+
+    #[test]
+    fn commit_runs_apply_then_save_without_restore() {
+        let mut state = Vec::new();
+        let outcome = commit_transaction(
+            &mut state,
+            |state| {
+                state.push("apply");
+                Ok(())
+            },
+            |state| {
+                state.push("save");
+                Ok(())
+            },
+            |state| state.push("restore"),
+        );
+        assert_eq!(outcome, TradeCommit::Committed);
+        assert_eq!(state, ["apply", "save"]);
+    }
+
+    #[test]
+    fn apply_failure_skips_save_and_restores() {
+        let mut state = Vec::new();
+        let outcome = commit_transaction(
+            &mut state,
+            |state| {
+                state.push("apply");
+                Err("E_APPLY".into())
+            },
+            |state| {
+                state.push("save");
+                Ok(())
+            },
+            |state| state.push("restore"),
+        );
+        assert_eq!(outcome, TradeCommit::ApplyFailed("E_APPLY".into()));
+        assert_eq!(state, ["apply", "restore"]);
+    }
+
+    #[test]
+    fn save_failure_restores_after_the_attempt() {
+        let mut state = Vec::new();
+        let outcome = commit_transaction(
+            &mut state,
+            |state| {
+                state.push("apply");
+                Ok(())
+            },
+            |state| {
+                state.push("save");
+                Err("GuardarPartida".into())
+            },
+            |state| state.push("restore"),
+        );
+        assert_eq!(outcome, TradeCommit::SaveFailed("GuardarPartida".into()));
+        assert_eq!(state, ["apply", "save", "restore"]);
+    }
+
+    #[test]
+    fn failed_commit_restores_state_and_attempts_save_once() {
+        #[derive(Default)]
+        struct State {
+            party: Vec<u8>,
+            writes: usize,
+            restores: usize,
+        }
+
+        let mut state = State {
+            party: b"before".to_vec(),
+            writes: 0,
+            restores: 0,
+        };
+        let outcome = commit_transaction(
+            &mut state,
+            |state| {
+                state.party = b"after".to_vec();
+                state.writes += 1;
+                Ok(())
+            },
+            |state| {
+                state.writes += 1;
+                Err("disk full".into())
+            },
+            |state| {
+                state.party = b"before".to_vec();
+                state.restores += 1;
+            },
+        );
+        assert_eq!(outcome, TradeCommit::SaveFailed("disk full".into()));
+        assert_eq!(state.party, b"before");
+        assert_eq!(state.writes, 2);
+        assert_eq!(state.restores, 1);
+    }
+
+    #[test]
+    fn apply_failure_does_not_touch_state_without_restore_logic() {
+        #[derive(Default)]
+        struct State {
+            party: Vec<u8>,
+            writes: usize,
+            restores: usize,
+        }
+
+        let mut state = State {
+            party: b"before".to_vec(),
+            writes: 0,
+            restores: 0,
+        };
+        let outcome = commit_transaction(
+            &mut state,
+            |_| Err("rejected".into()),
+            |state| {
+                state.writes += 1;
+                Ok(())
+            },
+            |state| state.restores += 1,
+        );
+        assert_eq!(outcome, TradeCommit::ApplyFailed("rejected".into()));
+        assert_eq!(state.party, b"before");
+        assert_eq!(state.writes, 0);
+        assert_eq!(state.restores, 1);
+    }
+}
