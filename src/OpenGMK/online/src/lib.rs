@@ -262,14 +262,7 @@ impl Drop for OnlineClient {
 }
 
 fn cap_name(name: &str) -> String {
-    if name.len() <= world::MAX_REMOTE_NAME_BYTES {
-        return name.to_string();
-    }
-    let mut end = world::MAX_REMOTE_NAME_BYTES;
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name[..end].to_string()
+    String::from_utf8_lossy(&world::sanitize_name_bytes(name.as_bytes())).into_owned()
 }
 
 fn read_loop(stream: TcpStream, tx: Sender<Event>) {

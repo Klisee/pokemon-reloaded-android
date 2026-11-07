@@ -1229,12 +1229,22 @@ impl ReloadedOnline {
         match event {
             Event::Connected { id } => {
                 self.local_id = Some(id);
+                self.world.set_local_id(Some(id));
                 self.status = format!("Reloaded Online conectado como #{id}");
             },
             Event::Joined { id, name } => {
                 self.status = format!("Reloaded Online conectado con {name} (#{id})");
             },
             Event::State { id, name, room, x, y, sprite, frame, xs, ys, angle, visible, bbox, depth, blend, alpha } => {
+                self.world.set_local_id(self.local_id);
+                let (applied, evicted) =
+                    self.world.apply_remote_state(id, room, x, y, name.as_bytes());
+                if let Some(evicted) = evicted {
+                    self.drop_remote_state(evicted);
+                }
+                if !applied {
+                    return
+                }
                 let parts = if visible {
                     vec![RemotePart {
                         kind: RemotePartKind::Player { sprite },
@@ -1275,9 +1285,8 @@ impl ReloadedOnline {
                 if self.battle_active && self.battle_peer == Some(id) {
                     self.fail_battle("el rival salio");
                 }
-                self.remotes.remove(&id);
-                self.pending_say.remove(&id);
-                self.pending_exclaim.remove(&id);
+                self.world.apply_wdel(id);
+                self.drop_remote_state(id);
             },
             Event::Error(error) => {
                 eprintln!("[reloaded-online] {error}");
@@ -1286,6 +1295,8 @@ impl ReloadedOnline {
             Event::Disconnected(error) => {
                 self.status = error.clone();
                 self.remotes.clear();
+                self.world.clear();
+                self.world.set_local_id(None);
                 self.connection = Some(Connection::Failed(error.clone()));
                 self.fail_battle(error);
             },
@@ -1611,14 +1622,18 @@ impl ReloadedOnline {
         }
     }
 
+    fn drop_remote_state(&mut self, id: u64) {
+        self.remotes.remove(&id);
+        self.pending_say.remove(&id);
+        self.pending_exclaim.remove(&id);
+    }
+
     fn apply_local_id(&mut self, id: Option<u64>) {
         self.local_id = id;
         self.world.set_local_id(id);
         if let Some(id) = id {
             self.world.apply_wdel(id);
-            self.remotes.remove(&id);
-            self.pending_say.remove(&id);
-            self.pending_exclaim.remove(&id);
+            self.drop_remote_state(id);
         }
     }
 
@@ -1626,9 +1641,7 @@ impl ReloadedOnline {
         self.world.set_local_id(self.local_id);
         let (applied, evicted) = self.world.apply_wp_with_eviction(message);
         if let Some(id) = evicted {
-            self.remotes.remove(&id);
-            self.pending_say.remove(&id);
-            self.pending_exclaim.remove(&id);
+            self.drop_remote_state(id);
         }
         if !applied {
             return
@@ -1639,9 +1652,7 @@ impl ReloadedOnline {
 
     fn apply_wdel_message(&mut self, message: &world::WdelMessage) {
         self.world.apply_wdel(message.id);
-        self.remotes.remove(&message.id);
-        self.pending_say.remove(&message.id);
-        self.pending_exclaim.remove(&message.id);
+        self.drop_remote_state(message.id);
     }
 
     fn project_world_remote(&mut self, remote: &world::Remote) {
@@ -1732,13 +1743,6 @@ impl ReloadedOnline {
             return
         }
         let name = cap_remote_name(&name);
-        if !self.remotes.contains_key(&id) && self.remotes.len() >= world::MAX_REMOTES {
-            if let Some(oldest) = self.remotes.keys().copied().find(|other| Some(*other) != self.local_id) {
-                self.remotes.remove(&oldest);
-                self.pending_say.remove(&oldest);
-                self.pending_exclaim.remove(&oldest);
-            }
-        }
         let pending_say = self.pending_say.remove(&id);
         let pending_exclaim = self.pending_exclaim.remove(&id);
         if !self.remotes.contains_key(&id) {
@@ -1807,14 +1811,7 @@ impl ReloadedOnline {
 }
 
 fn cap_remote_name(name: &str) -> String {
-    if name.len() <= world::MAX_REMOTE_NAME_BYTES {
-        return name.to_string();
-    }
-    let mut end = world::MAX_REMOTE_NAME_BYTES;
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name[..end].to_string()
+    String::from_utf8_lossy(&world::sanitize_name_bytes(name.as_bytes())).into_owned()
 }
 
 fn overlaps(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
@@ -2427,6 +2424,67 @@ mod tests {
         online.apply_local_id(Some(5));
         apply_line(&mut online, "WP 5 2 100 200 S,25,0,0,0,1,1 Ada");
         assert!(!online.remotes.contains_key(&5));
+        assert!(online.world.is_empty());
+    }
+
+    #[test]
+    fn wp_control_bytes_are_sanitized_for_world_and_host() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 S,25,0,0,0,1,1 A\tB\x7fC");
+        assert_eq!(online.remotes.get(&1).expect("remote").name, "ABC");
+        assert_eq!(online.world.get(1).expect("world remote").name, b"ABC");
+    }
+
+    #[test]
+    fn wp_accepts_signed_32_bit_coordinates() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 2147483647 -2147483648 S,25,0,0,0,1,1 Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert_eq!((remote.x, remote.y), (2_147_483_647.0, -2_147_483_648.0));
+        assert!(world::parse_wp(b"WP 2 2 2147483648 0 S,1,0,0,0,1,1").is_err());
+    }
+
+    fn json_state(id: u64, name: &str, room: i32, x: f64, y: f64) -> Event {
+        Event::State {
+            id,
+            name: name.to_string(),
+            room,
+            x,
+            y,
+            sprite: 1,
+            frame: 0,
+            xs: 1.0,
+            ys: 1.0,
+            angle: 0.0,
+            visible: true,
+            bbox: [0, 0, 0, 0],
+            depth: 0.0,
+            blend: 0xffffff,
+            alpha: 1.0,
+        }
+    }
+
+    #[test]
+    fn json_state_uses_world_lru_capacity_authority() {
+        let mut online = ReloadedOnline::default();
+        online.world = world::WorldState::with_capacity(None, 2);
+        online.handle_json_event(json_state(1, "A\t", 3, 1.0, 1.0));
+        online.handle_json_event(json_state(2, "B", 2, 2.0, 2.0));
+        online.handle_json_event(json_state(3, "C\x7f", 2, 3.0, 3.0));
+
+        assert!(!online.remotes.contains_key(&1));
+        assert!(online.remotes.contains_key(&2));
+        assert!(online.remotes.contains_key(&3));
+        assert!(online.world.get(1).is_none());
+        assert_eq!(online.world.len(), 2);
+        assert_eq!(online.remotes.get(&3).expect("remote").name, "C");
+        assert_eq!(online.world.get(3).expect("world remote").name, b"C");
+
+        online.handle_json_event(Event::Left { id: 2 });
+        assert!(!online.remotes.contains_key(&2));
+        assert!(online.world.get(2).is_none());
+        online.handle_json_event(Event::Disconnected("fin".into()));
+        assert!(online.remotes.is_empty());
         assert!(online.world.is_empty());
     }
 

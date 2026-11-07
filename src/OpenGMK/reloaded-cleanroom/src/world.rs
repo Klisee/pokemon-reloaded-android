@@ -11,13 +11,21 @@ pub const MAX_NAME_BYTES: usize = MAX_REMOTE_NAME_BYTES;
 /// Alias used by the list/render adapters.
 pub const MAX_WORLD_NAME_BYTES: usize = MAX_REMOTE_NAME_BYTES;
 /// Maximum number of remote peers retained at once.
-pub const MAX_REMOTES: usize = MAX_LIST_ENTRIES;
+///
+/// This is a world-state bound, not the `WLIST` page size; a large world may
+/// legitimately contain thousands of participants while still exposing only a
+/// 250-entry list page.
+pub const MAX_REMOTES: usize = 4096;
 /// Alias used by the online host when it mirrors [`WorldState`].
 pub const MAX_REMOTE_ENTRIES: usize = MAX_REMOTES;
-/// Largest absolute world coordinate accepted from the network.
-pub const MAX_COORDINATE: f64 = 1_000_000.0;
+/// Smallest world coordinate accepted from the network (signed 32-bit).
+pub const MIN_COORDINATE: f64 = i32::MIN as f64;
+/// Largest world coordinate accepted from the network (signed 32-bit).
+pub const MAX_COORDINATE: f64 = i32::MAX as f64;
 /// Alias used by parsers that speak about positions rather than coordinates.
 pub const MAX_POSITION: f64 = MAX_COORDINATE;
+/// Alias used by parsers that speak about positions rather than coordinates.
+pub const MIN_POSITION: f64 = MIN_COORDINATE;
 pub const HIDDEN_POSITION_X: f64 = -500.0;
 pub const BATTLE_PLACEHOLDER_SPRITE: u8 = 8;
 
@@ -232,9 +240,9 @@ fn parse_real_strict(bytes: &[u8]) -> Option<f64> {
     Some(value)
 }
 
-/// Whether a coordinate is finite and inside the accepted world range.
+/// Whether a coordinate is finite and inside the signed 32-bit world range.
 pub fn valid_coordinate(value: f64) -> bool {
-    value.is_finite() && value.abs() <= MAX_COORDINATE
+    value.is_finite() && (MIN_COORDINATE..=MAX_COORDINATE).contains(&value)
 }
 
 /// Whether a remote position can be stored safely.
@@ -242,22 +250,76 @@ pub fn valid_position(x: f64, y: f64) -> bool {
     valid_coordinate(x) && valid_coordinate(y)
 }
 
+/// Whether the primary rendered part still lands inside the world range.
+///
+/// Part offsets and scales are reals and are not limited to the base position
+/// range, but the final rendered origin must be representable consistently by
+/// every transport (the JSON bridge also composes `x + dx`/`y + dy`).
+pub fn valid_rendered_position(x: f64, y: f64, parts: &Parts) -> bool {
+    if !valid_position(x, y) {
+        return false;
+    }
+    match parts.primary_player() {
+        Some(player) => valid_position(x + player.dx, y + player.dy),
+        None => true,
+    }
+}
+
 fn parse_coordinate_strict(bytes: &[u8]) -> Option<f64> {
     let value = parse_real_strict(bytes)?;
     valid_coordinate(value).then_some(value)
 }
 
-/// Whether the bytes are usable as a remote display name.
-///
-/// Spaces and non-UTF-8 high bytes are valid (the original server relays ANSI
-/// names), but C0 controls and DEL are rejected so a peer cannot inject them.
-pub fn valid_remote_name(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&byte| byte >= 0x20 && byte != 0x7f)
+fn is_name_control(byte: u8) -> bool {
+    byte < 0x20 || byte == 0x7f
 }
 
-/// Truncates a remote name to [`MAX_REMOTE_NAME_BYTES`] without allocating.
+/// Whether the bytes contain no C0 controls or DEL.
+///
+/// Stored names are sanitized with [`sanitize_name_bytes`]; this helper is
+/// kept for callers that want to test an already-truncated prefix.
+pub fn valid_remote_name(bytes: &[u8]) -> bool {
+    !bytes.iter().any(|&byte| is_name_control(byte))
+}
+
+/// Truncates a remote name to [`MAX_REMOTE_NAME_BYTES`] without splitting a
+/// valid UTF-8 sequence. Non-UTF-8 bytes are preserved as opaque name data.
 pub fn limit_name_bytes(bytes: &[u8]) -> &[u8] {
-    &bytes[..bytes.len().min(MAX_REMOTE_NAME_BYTES)]
+    if bytes.len() <= MAX_REMOTE_NAME_BYTES {
+        return bytes;
+    }
+    let end = MAX_REMOTE_NAME_BYTES;
+    if end == bytes.len() {
+        return bytes;
+    }
+    // If the first discarded byte is a UTF-8 continuation byte, the cut would
+    // split the sequence that owns it. Move the cut back to that sequence's
+    // lead byte, but only when the lead is a plausible UTF-8 start.
+    if bytes[end] & 0xc0 == 0x80 {
+        let mut lead = end;
+        while lead > 0 && bytes[lead] & 0xc0 == 0x80 {
+            lead -= 1;
+        }
+        let expected = match bytes[lead] {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => 0,
+        };
+        if expected > 0 && lead + expected > end {
+            return &bytes[..lead];
+        }
+    }
+    &bytes[..end]
+}
+
+/// Truncates and removes C0 controls/DEL from a remote display name.
+pub fn sanitize_name_bytes(bytes: &[u8]) -> Vec<u8> {
+    limit_name_bytes(bytes)
+        .iter()
+        .copied()
+        .filter(|&byte| !is_name_control(byte))
+        .collect()
 }
 
 fn valid_parts_token(token: &[u8]) -> bool {
@@ -339,10 +401,10 @@ fn parse_player_segment(fields: &[&[u8]]) -> Option<PlayerPart> {
     Some(PlayerPart {
         sprite: sprite as u16,
         frame: parse_i64_strict(fields[2])?,
-        dx: parse_coordinate_strict(fields[3])?,
-        dy: parse_coordinate_strict(fields[4])?,
-        xs: parse_coordinate_strict(fields[5])?,
-        ys: parse_coordinate_strict(fields[6])?,
+        dx: parse_real_strict(fields[3])?,
+        dy: parse_real_strict(fields[4])?,
+        xs: parse_real_strict(fields[5])?,
+        ys: parse_real_strict(fields[6])?,
     })
 }
 
@@ -354,10 +416,10 @@ fn parse_pokemon_segment(fields: &[&[u8]]) -> Option<PokemonPart> {
         species: parse_i64_strict(fields[1])?,
         facing: parse_i64_strict(fields[2])?,
         frame: parse_i64_strict(fields[3])?,
-        dx: parse_coordinate_strict(fields[4])?,
-        dy: parse_coordinate_strict(fields[5])?,
-        xs: parse_coordinate_strict(fields[6])?,
-        ys: parse_coordinate_strict(fields[7])?,
+        dx: parse_real_strict(fields[4])?,
+        dy: parse_real_strict(fields[5])?,
+        xs: parse_real_strict(fields[6])?,
+        ys: parse_real_strict(fields[7])?,
     })
 }
 
@@ -415,10 +477,7 @@ pub fn parse_wp(line: &[u8]) -> Result<WpMessage, ParseError> {
     }
 
     skip_spaces(&mut cursor);
-    if !valid_remote_name(cursor) {
-        return Err(ParseError::MalformedText);
-    }
-    let name = limit_name_bytes(cursor).to_vec();
+    let name = sanitize_name_bytes(cursor);
     let parts = parse_parts(parts_token);
     Ok(WpMessage {
         id,
@@ -633,19 +692,32 @@ impl Remote {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WorldState {
     local_id: Option<u64>,
     remotes: HashMap<u64, Remote>,
     order: VecDeque<u64>,
+    max_remotes: usize,
+}
+
+impl Default for WorldState {
+    fn default() -> Self {
+        Self::with_capacity(None, MAX_REMOTES)
+    }
 }
 
 impl WorldState {
     pub fn new(local_id: Option<u64>) -> Self {
+        Self::with_capacity(local_id, MAX_REMOTES)
+    }
+
+    /// Creates a world with an explicit remote capacity (useful for tests).
+    pub fn with_capacity(local_id: Option<u64>, max_remotes: usize) -> Self {
         Self {
             local_id,
             remotes: HashMap::new(),
             order: VecDeque::new(),
+            max_remotes: max_remotes.max(1),
         }
     }
 
@@ -675,7 +747,7 @@ impl WorldState {
 
     /// Capacity in remote peers. The map never grows past this.
     pub fn capacity(&self) -> usize {
-        MAX_REMOTES
+        self.max_remotes
     }
 
     fn touch(&mut self, id: u64) {
@@ -683,56 +755,94 @@ impl WorldState {
         self.order.push_back(id);
     }
 
+    /// Chooses the least-recently-used remote, preferring one in another room
+    /// so idle peers elsewhere do not displace current-room participants.
+    fn evict_victim(&mut self, incoming_room: i32) -> Option<u64> {
+        let mut same_room = None;
+        let mut victim = None;
+        for &id in &self.order {
+            let Some(remote) = self.remotes.get(&id) else { continue };
+            if remote.room != incoming_room {
+                victim = Some(id);
+                break;
+            }
+            if same_room.is_none() {
+                same_room = Some(id);
+            }
+        }
+        let victim = victim
+            .or(same_room)
+            .or_else(|| self.remotes.keys().next().copied())?;
+        self.remotes.remove(&victim);
+        self.order.retain(|&other| other != victim);
+        Some(victim)
+    }
+
+    fn upsert(
+        &mut self,
+        id: u64,
+        room: i32,
+        x: f64,
+        y: f64,
+        parts: Parts,
+        name: Vec<u8>,
+    ) -> (bool, Option<u64>) {
+        if let Some(remote) = self.remotes.get_mut(&id) {
+            remote.room = room;
+            remote.x = x;
+            remote.y = y;
+            remote.parts = parts;
+            remote.name = name;
+            self.touch(id);
+            return (true, None);
+        }
+        let evicted = if self.remotes.len() >= self.max_remotes {
+            self.evict_victim(room)
+        } else {
+            None
+        };
+        self.remotes.insert(
+            id,
+            Remote {
+                id,
+                room,
+                x,
+                y,
+                parts,
+                name,
+            },
+        );
+        self.order.push_back(id);
+        (true, evicted)
+    }
+
     fn apply_wp_inner(&mut self, message: &WpMessage) -> (bool, Option<u64>) {
+        let mut parts = message.parts.clone();
+        parts.segments.truncate(MAX_PARTS_SEGMENTS);
         if self.local_id == Some(message.id)
-            || !valid_position(message.x, message.y)
-            || !valid_remote_name(&message.name)
+            || !valid_rendered_position(message.x, message.y, &parts)
         {
             return (false, None);
         }
-        let name = limit_name_bytes(&message.name).to_vec();
-        let mut parts = message.parts.clone();
-        parts.segments.truncate(MAX_PARTS_SEGMENTS);
+        let name = sanitize_name_bytes(&message.name);
+        self.upsert(message.id, message.room, message.x, message.y, parts, name)
+    }
 
-        {
-            let Some(remote) = self.remotes.get_mut(&message.id) else {
-                let mut evicted = None;
-                if self.remotes.len() >= MAX_REMOTES {
-                    while let Some(oldest) = self.order.pop_front() {
-                        if self.remotes.remove(&oldest).is_some() {
-                            evicted = Some(oldest);
-                            break;
-                        }
-                    }
-                    if evicted.is_none() {
-                        if let Some(oldest) = self.remotes.keys().next().copied() {
-                            self.remotes.remove(&oldest);
-                            evicted = Some(oldest);
-                        }
-                    }
-                }
-                self.remotes.insert(
-                    message.id,
-                    Remote {
-                        id: message.id,
-                        room: message.room,
-                        x: message.x,
-                        y: message.y,
-                        parts,
-                        name,
-                    },
-                );
-                self.order.push_back(message.id);
-                return (true, evicted);
-            };
-            remote.room = message.room;
-            remote.x = message.x;
-            remote.y = message.y;
-            remote.parts = parts;
-            remote.name = name;
+    /// Applies a position-only state update used by transports that already
+    /// decoded the richer rendering fields.
+    pub fn apply_remote_state(
+        &mut self,
+        id: u64,
+        room: i32,
+        x: f64,
+        y: f64,
+        name: &[u8],
+    ) -> (bool, Option<u64>) {
+        if self.local_id == Some(id) || !valid_position(x, y) {
+            return (false, None);
         }
-        self.touch(message.id);
-        (true, None)
+        let name = sanitize_name_bytes(name);
+        self.upsert(id, room, x, y, Parts::default(), name)
     }
 
     /// Applies a remote update and returns whether it changed the visible state.
@@ -1543,32 +1653,54 @@ mod tests {
     }
 
     #[test]
-    fn wp_rejects_control_bytes_in_name() {
-        assert_eq!(
-            parse_wp(b"WP 1 2 3 4 S,1,0,0,0,1,1 A\tB"),
-            Err(ParseError::MalformedText)
-        );
-        assert_eq!(
-            parse_wp(b"WP 1 2 3 4 S,1,0,0,0,1,1 A\x7fB"),
-            Err(ParseError::MalformedText)
-        );
-        assert!(parse_wp("WP 1 2 3 4 S,1,0,0,0,1,1 AéB".as_bytes()).is_ok());
+    fn wp_name_caps_on_utf8_boundary() {
+        let name = format!("{}é{}", "a".repeat(MAX_REMOTE_NAME_BYTES - 1), "tail");
+        let line = format!("WP 1 2 3 4 S,1,0,0,0,1,1 {name}");
+        let message = parse_wp(line.as_bytes()).unwrap();
+        assert!(message.name.len() <= MAX_REMOTE_NAME_BYTES);
+        assert!(std::str::from_utf8(&message.name).is_ok());
+        assert_eq!(message.name, vec![b'a'; MAX_REMOTE_NAME_BYTES - 1]);
+
+        let exact = format!("{}é{}", "a".repeat(MAX_REMOTE_NAME_BYTES - 2), "tail");
+        let line = format!("WP 1 2 3 4 S,1,0,0,0,1,1 {exact}");
+        let message = parse_wp(line.as_bytes()).unwrap();
+        assert_eq!(message.name.len(), MAX_REMOTE_NAME_BYTES);
+        assert_eq!(std::str::from_utf8(&message.name).unwrap(), &exact[..MAX_REMOTE_NAME_BYTES]);
+    }
+
+    #[test]
+    fn wp_sanitizes_control_bytes_inside_retained_prefix() {
+        let message = parse_wp(b"WP 1 2 3 4 S,1,0,0,0,1,1 A\tB\x7fC\x1bD").unwrap();
+        assert_eq!(message.name, b"ABCD");
+        assert!(message.raw_remainder.ends_with(b"A\tB\x7fC\x1bD"));
+
+        let prefix = "N".repeat(MAX_REMOTE_NAME_BYTES);
+        let line = format!("WP 1 2 3 4 S,1,0,0,0,1,1 {prefix}\tignored");
+        let message = parse_wp(line.as_bytes()).unwrap();
+        assert_eq!(message.name, vec![b'N'; MAX_REMOTE_NAME_BYTES]);
+    }
+
+    #[test]
+    fn wp_accepts_utf8_names_and_keeps_spaces() {
+        assert!(parse_wp("WP 1 2 3 4 S,1,0,0,0,1,1 Aé B ".as_bytes()).is_ok());
+        let message = parse_wp("WP 1 2 3 4 S,1,0,0,0,1,1 Aé B ".as_bytes()).unwrap();
+        assert_eq!(message.name, "Aé B ".as_bytes());
     }
 
     #[test]
     fn wp_rejects_out_of_range_and_non_finite_positions() {
         for position in [
             MAX_COORDINATE.to_string(),
-            format!("-{}", MAX_COORDINATE),
-            "1000000.5".to_string(),
-            "-1000000.5".to_string(),
+            format!("-{}", MAX_COORDINATE.abs()),
+            "2147483648".to_string(),
+            "-2147483649".to_string(),
             "1e3".to_string(),
             "NaN".to_string(),
             "inf".to_string(),
         ] {
             let line = format!("WP 1 2 {position} 0 S,1,0,0,0,1,1");
             let expected = if position == MAX_COORDINATE.to_string()
-                || position == format!("-{}", MAX_COORDINATE)
+                || position == format!("-{}", MAX_COORDINATE.abs())
             {
                 None
             } else {
@@ -1576,28 +1708,45 @@ mod tests {
             };
             assert_eq!(parse_wp(line.as_bytes()).err(), expected, "{line}");
         }
-        assert!(parse_wp(b"WP 1 2 1000000 1000000 S,1,0,0,0,1,1").is_ok());
+        assert!(parse_wp(b"WP 1 2 2147483647 2147483647 S,1,0,0,0,1,1").is_ok());
+        assert!(parse_wp(b"WP 1 2 -2147483648 -2147483648 S,1,0,0,0,1,1").is_ok());
     }
 
     #[test]
-    fn parts_reject_out_of_range_offsets() {
-        let parts = parse_parts(b"S,1,0,1000001,0,1,1;S,2,0,0,0,1,1");
-        assert_eq!(parts.segments.len(), 1);
-        assert_eq!(parts.primary_player().unwrap().sprite, 2);
-        assert!(parse_parts(b"P,25,2,0,0,0,1,1000001").is_empty());
+    fn parts_accept_large_finite_geometry_but_reject_non_finite() {
+        let parts = parse_parts(b"S,1,0,3000000000,0,1,1;S,2,0,0,0,1,1");
+        assert_eq!(parts.segments.len(), 2);
+        assert_eq!(parts.primary_player().unwrap().dx, 3_000_000_000.0);
+        assert!(parse_parts(b"P,25,2,0,0,0,1,3000000000").pokemon().next().is_some());
+        assert!(parse_parts(b"S,1,0,NaN,0,1,1").is_empty());
+        assert!(parse_parts(b"S,1,0,inf,0,1,1").is_empty());
+    }
+
+    #[test]
+    fn world_state_rejects_rendered_position_outside_range() {
+        let mut world = WorldState::new(None);
+        let message =
+            parse_wp(b"WP 1 2 2147483647 0 S,1,0,1,0,1,1").unwrap();
+        assert!(!world.apply_wp(&message));
+        assert!(world.is_empty());
+
+        let message =
+            parse_wp(b"WP 2 2 -1500000000 0 S,1,0,3000000000,0,1,1").unwrap();
+        assert!(world.apply_wp(&message));
+        assert_eq!(world.get(2).unwrap().parts.primary_player().unwrap().dx, 3_000_000_000.0);
     }
 
     #[test]
     fn wpos_rejects_out_of_range_positions() {
         assert_eq!(
-            parse_wpos(b"WPOS 7 1000000.5 96 S,1,0,0,0,1,1"),
+            parse_wpos(b"WPOS 7 2147483648 96 S,1,0,0,0,1,1"),
             Err(ParseError::MalformedNumeric)
         );
         assert_eq!(
-            parse_wpos(b"WPOS 7 128 -1000000.5"),
+            parse_wpos(b"WPOS 7 128 -2147483649"),
             Err(ParseError::MalformedNumeric)
         );
-        assert!(parse_wpos(b"WPOS 7 1000000 -1000000").is_ok());
+        assert!(parse_wpos(b"WPOS 7 2147483647 -2147483648").is_ok());
     }
 
     #[test]
@@ -1631,6 +1780,56 @@ mod tests {
         world.apply_wp_line(b"WP 999999 2 10 20 S,5,1,0,0,1,1").unwrap();
         assert!(world.get(0).is_some());
         assert!(world.get(1).is_none());
+    }
+
+    #[test]
+    fn world_state_capacity_is_independent_from_wlist_page_size() {
+        assert!(MAX_REMOTES > MAX_LIST_ENTRIES);
+        let world = WorldState::new(None);
+        assert_eq!(world.capacity(), MAX_REMOTES);
+    }
+
+    #[test]
+    fn world_state_evicts_idle_rooms_before_current_room() {
+        let mut world = WorldState::with_capacity(None, 3);
+        for (id, room) in [(0u64, 3i32), (1, 3), (2, 2)] {
+            world
+                .apply_wp_line(format!("WP {id} {room} {id} 20 S,5,1,0,0,1,1 R{id}").as_bytes())
+                .unwrap();
+        }
+
+        let (applied, evicted) =
+            world.apply_wp_with_eviction(&parse_wp(b"WP 3 2 10 20 S,5,1,0,0,1,1 R3").unwrap());
+        assert!(applied);
+        assert_eq!(evicted, Some(0));
+        assert!(world.get(0).is_none());
+        assert!(world.get(2).is_some());
+
+        let (applied, evicted) =
+            world.apply_wp_with_eviction(&parse_wp(b"WP 4 2 11 20 S,5,1,0,0,1,1 R4").unwrap());
+        assert!(applied);
+        assert_eq!(evicted, Some(1));
+        assert!(world.get(1).is_none());
+        assert!(world.get(2).is_some());
+
+        let (applied, evicted) =
+            world.apply_wp_with_eviction(&parse_wp(b"WP 5 2 12 20 S,5,1,0,0,1,1 R5").unwrap());
+        assert!(applied);
+        assert_eq!(evicted, Some(2));
+        assert!(world.get(2).is_none());
+        assert_eq!(world.len(), 3);
+    }
+
+    #[test]
+    fn world_state_applies_position_only_state_with_same_capacity_policy() {
+        let mut world = WorldState::with_capacity(None, 2);
+        assert!(world.apply_remote_state(1, 2, 10.0, 20.0, b"Ada").0);
+        assert!(world.apply_remote_state(2, 3, 11.0, 21.0, b"Bob").0);
+        let (applied, evicted) = world.apply_remote_state(3, 2, 12.0, 22.0, b"Cy\t!");
+        assert!(applied);
+        assert_eq!(evicted, Some(2));
+        assert_eq!(world.get(3).unwrap().name, b"Cy!");
+        assert!(world.get(2).is_none());
     }
 
     #[test]
