@@ -5,6 +5,7 @@
 //! adapters without contaminating the core.
 
 pub mod ports;
+pub mod roz;
 pub mod save;
 pub mod team;
 pub mod trade;
