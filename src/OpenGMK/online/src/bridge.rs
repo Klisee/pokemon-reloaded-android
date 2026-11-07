@@ -244,12 +244,18 @@ fn parse_wp(rest: &str) -> Option<ServerMessage> {
     let room = fields.next()?.parse::<i32>().ok()?;
     let x = fields.next()?.parse::<f64>().ok()?;
     let y = fields.next()?.parse::<f64>().ok()?;
+    if !crate::world::valid_position(x, y) {
+        return None;
+    }
     let parts = fields.next()?;
-    let name = fields.next().unwrap_or("").to_string();
+    let name = cap_name(fields.next().unwrap_or(""));
     let (sprite, frame, xs, ys, dx, dy) = parse_parts(parts);
     let visible = x > -500.0;
     let x = x + dx;
     let y = y + dy;
+    if !crate::world::valid_position(x, y) {
+        return None;
+    }
     Some(ServerMessage::State {
         id,
         name,
@@ -274,19 +280,74 @@ fn parse_wp(rest: &str) -> Option<ServerMessage> {
     })
 }
 
+fn cap_name(name: &str) -> String {
+    crate::world::sanitize_name_display(name.as_bytes())
+}
+
+fn finite_component(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
 fn parse_parts(parts: &str) -> (i32, i32, f64, f64, f64, f64) {
-    for part in parts.split(';') {
+    for part in parts.split(';').take(crate::world::MAX_PARTS_SEGMENTS) {
         let mut fields = part.split(',');
         if fields.next() != Some("S") {
             continue
         }
         let Some(sprite) = fields.next().and_then(|value| value.parse::<i32>().ok()) else { continue };
+        if !(0..=3856).contains(&sprite) {
+            continue
+        }
         let Some(frame) = fields.next().and_then(|value| value.parse::<i32>().ok()) else { continue };
-        let Some(dx) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
-        let Some(dy) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
-        let Some(xs) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
-        let Some(ys) = fields.next().and_then(|value| value.parse::<f64>().ok()) else { continue };
+        let Some(dx) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        let Some(dy) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        let Some(xs) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        let Some(ys) = fields.next().and_then(|value| value.parse::<f64>().ok()).and_then(finite_component) else { continue };
+        if fields.next().is_some() {
+            continue
+        }
         return (sprite, frame, xs, ys, dx, dy)
     }
     (-1, 0, 1.0, 1.0, 0.0, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(rest: &str) -> ServerMessage {
+        parse_wp(rest).expect("valid upstream WP")
+    }
+
+    fn state_fields(message: ServerMessage) -> (u64, String, i32, f64, f64) {
+        match message {
+            ServerMessage::State { id, name, room, x, y, .. } => (id, name, room, x, y),
+            other => panic!("expected state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wp_accepts_signed_32_bit_positions_and_large_finite_offsets() {
+        let (id, _, room, x, y) =
+            state_fields(state("1 2 2147483647 -2147483648 S,1,0,0,0,1,1 Ada"));
+        assert_eq!((id, room, x, y), (1, 2, 2147483647.0, -2147483648.0));
+
+        let (_, _, _, x, _) =
+            state_fields(state("2 2 -1500000000 0 S,1,0,3000000000,0,1,1 Ada"));
+        assert_eq!(x, 1_500_000_000.0);
+
+        assert!(parse_wp("3 2 2147483648 0 S,1,0,0,0,1,1 Ada").is_none());
+        assert!(parse_wp("4 2 2147483647 0 S,1,0,1,0,1,1 Ada").is_none());
+    }
+
+    #[test]
+    fn wp_truncates_names_on_char_boundaries_and_strips_controls() {
+        let long_name = format!("{}é{}", "a".repeat(crate::world::MAX_REMOTE_NAME_BYTES - 1), "tail");
+        let (_, name, _, _, _) = state_fields(state(&format!("1 2 3 4 S,1,0,0,0,1,1 {long_name}")));
+        assert_eq!(name.len(), crate::world::MAX_REMOTE_NAME_BYTES - 1);
+        assert_eq!(name, "a".repeat(crate::world::MAX_REMOTE_NAME_BYTES - 1));
+
+        let (_, name, _, _, _) = state_fields(state("1 2 3 4 S,1,0,0,0,1,1 A\tB\x7fC"));
+        assert_eq!(name, "ABC");
+    }
 }

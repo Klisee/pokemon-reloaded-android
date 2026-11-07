@@ -261,6 +261,10 @@ impl Drop for OnlineClient {
     }
 }
 
+fn cap_name(name: &str) -> String {
+    world::sanitize_name_display(name.as_bytes())
+}
+
 fn read_loop(stream: TcpStream, tx: Sender<Event>) {
     let reader = BufReader::new(stream);
     for line in reader.lines() {
@@ -284,17 +288,41 @@ fn read_loop(stream: TcpStream, tx: Sender<Event>) {
         };
         let event = match msg {
             ServerMessage::Welcome { id } => Event::Connected { id },
-            ServerMessage::Joined { id, name } => Event::Joined { id, name },
+            ServerMessage::Joined { id, name } => Event::Joined { id, name: cap_name(&name) },
             ServerMessage::State { id, name, room, x, y, sprite, frame, xs, ys, angle, visible, bbox, depth, blend, alpha } => {
-                Event::State { id, name, room, x, y, sprite, frame, xs, ys, angle, visible, bbox, depth, blend, alpha }
+                if !world::valid_position(x, y) {
+                    let _ = tx.send(Event::Error("estado remoto fuera de rango".into()));
+                    continue
+                }
+                Event::State {
+                    id,
+                    name: cap_name(&name),
+                    room,
+                    x,
+                    y,
+                    sprite,
+                    frame,
+                    xs,
+                    ys,
+                    angle,
+                    visible,
+                    bbox,
+                    depth,
+                    blend,
+                    alpha,
+                }
             },
-            ServerMessage::Request { id, name, kind, info } => Event::Request { id, name, kind, info },
-            ServerMessage::Response { id, name, accept } => Event::Response { id, name, accept },
-            ServerMessage::BattleTeam { id, name, data } => Event::BattleTeam { id, name, data },
+            ServerMessage::Request { id, name, kind, info } => {
+                Event::Request { id, name: cap_name(&name), kind, info }
+            },
+            ServerMessage::Response { id, name, accept } => {
+                Event::Response { id, name: cap_name(&name), accept }
+            },
+            ServerMessage::BattleTeam { id, name, data } => Event::BattleTeam { id, name: cap_name(&name), data },
             ServerMessage::BattleInput { id, mask, seq, frame, checksum } => {
                 Event::BattleInput { id, mask, seq, frame, checksum }
             },
-            ServerMessage::Chat { id, name, text } => Event::Chat { id, name, text },
+            ServerMessage::Chat { id, name, text } => Event::Chat { id, name: cap_name(&name), text },
             ServerMessage::Left { id } => Event::Left { id },
             ServerMessage::Error { message } => Event::Error(message),
         };
@@ -391,6 +419,9 @@ impl Relay {
                 }
             },
             ClientMessage::State { room, x, y, sprite, frame, xs, ys, angle, visible, bbox, depth, blend, alpha } => {
+                if !world::valid_position(x, y) {
+                    return
+                }
                 let Some((name, peer_room)) = self.peers.get(&id).map(|p| (p.name.clone(), p.room.clone())) else { return };
                 let msg = ServerMessage::State {
                     id,

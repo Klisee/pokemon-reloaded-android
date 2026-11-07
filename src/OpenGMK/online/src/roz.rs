@@ -852,7 +852,7 @@ fn dispatch_world_line(line: &[u8], events: &EventQueue) -> bool {
                     x: message.x,
                     y: message.y,
                     parts: String::from_utf8_lossy(&message.parts_token).into_owned(),
-                    name: String::from_utf8_lossy(&message.name).into_owned(),
+                    name: world::sanitize_name_display(&message.name),
                     name_bytes: message.name,
                     decoded: message.parts,
                     parts_token: message.parts_token,
@@ -1473,6 +1473,63 @@ mod tests {
             },
             other => panic!("evento inesperado: {other:?}"),
         }
+    }
+
+    #[test]
+    fn world_position_limits_names_accepts_i32_and_sanitizes_controls() {
+        let long_name = "N".repeat(world::MAX_REMOTE_NAME_BYTES * 2);
+        let utf8_name = format!("A{}", "é".repeat(64));
+        let addr = spawn_mock(move |mut stream| {
+            stream
+                .write_all(
+                    format!(
+                        "WP 1 2 3 4 S,1,0,0,0,1,1 {long_name}\n\
+                         WP 2 2 2147483647 -2147483648 S,1,0,0,0,1,1 big\n\
+                         WP 3 2 3 4 S,1,0,0,0,1,1 bad\tname\n\
+                         WP 4 2 2147483648 4 S,1,0,0,0,1,1 bad\n\
+                         WP 5 2 5 6 S,1,0,0,0,1,1 {utf8_name}\nWAIT\n"
+                    )
+                    .as_bytes(),
+                )
+                .expect("write");
+            stream.flush().expect("flush");
+        });
+
+        let client = connect(addr);
+        match next_event(&client) {
+            RozEvent::WorldPosition(position) => {
+                assert_eq!(position.id, 1);
+                assert_eq!(position.name_bytes.len(), world::MAX_REMOTE_NAME_BYTES);
+                assert_eq!(position.name.len(), world::MAX_REMOTE_NAME_BYTES);
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
+        match next_event(&client) {
+            RozEvent::WorldPosition(position) => {
+                assert_eq!(position.id, 2);
+                assert_eq!((position.x, position.y), (2147483647.0, -2147483648.0));
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
+        match next_event(&client) {
+            RozEvent::WorldPosition(position) => {
+                assert_eq!(position.id, 3);
+                assert_eq!(position.name_bytes, b"badname".to_vec());
+                assert_eq!(position.name, "badname");
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
+        assert!(matches!(next_event(&client), RozEvent::Malformed { .. }));
+        match next_event(&client) {
+            RozEvent::WorldPosition(position) => {
+                assert_eq!(position.id, 5);
+                assert_eq!(position.name_bytes.len(), world::MAX_REMOTE_NAME_BYTES - 1);
+                assert!(std::str::from_utf8(&position.name_bytes).is_ok());
+                assert_eq!(position.name, format!("A{}", "é".repeat(63)));
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
+        assert_eq!(next_event(&client), RozEvent::Wait);
     }
 
     #[test]
