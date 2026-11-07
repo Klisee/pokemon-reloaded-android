@@ -1082,6 +1082,7 @@ version = "0.1.0"
 name = "reloaded-online"
 version = "0.1.0"
 dependencies = [
+ "reloaded-cleanroom",
  "serde",
  "serde_json",
 ]

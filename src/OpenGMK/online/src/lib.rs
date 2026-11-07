@@ -1,8 +1,9 @@
 //! Clean-room online transport for Pokemon Reloaded.
 //!
-//! This crate deliberately knows nothing about the game's GML or assets. It only carries
-//! line-delimited JSON between a client and a relay server. The game-side adapter lives in
-//! `gm8emulator::online`.
+//! This crate deliberately knows nothing about the game's GML or assets. It carries the
+//! legacy line-delimited JSON between a client and a relay server, and re-exports the
+//! clean-room world parsers used by the Zibelan transport. The game-side rendering adapter
+//! lives in `gm8emulator::reloaded_online`.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,6 +20,8 @@ use std::{
 
 pub mod bridge;
 pub mod roz;
+
+pub use reloaded_cleanroom::world;
 
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_LINE: usize = 64 * 1024;

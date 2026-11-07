@@ -14,7 +14,7 @@ use crate::{
 };
 use reloaded_online_net::{
     roz::{RozClient, RozEvent},
-    Event, OnlineClient,
+    world, Event, OnlineClient,
 };
 use serde::Deserialize;
 use std::{
@@ -138,6 +138,14 @@ struct Remote {
     exclaim_at: Instant,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PokemonSpritePlan {
+    File(PathBuf),
+    Mirrored(PathBuf),
+    Placeholder { sprite: i32, missing: String },
+    Missing,
+}
+
 #[derive(Clone, Debug)]
 pub struct RemoteOverlay {
     pub name: String,
@@ -251,7 +259,10 @@ pub struct ReloadedOnline {
     chat: Vec<(String, String)>,
     world_list: Vec<String>,
     program_directory: PathBuf,
-    pokemon_paths: HashMap<(i32, i32), Option<PathBuf>>,
+    world: world::WorldState,
+    battle_context: world::BattleContext,
+    pokemon_plans: HashMap<(i64, i32), PokemonSpritePlan>,
+    pokemon_missing: HashMap<String, ()>,
     pokemon_sprites: HashMap<String, Option<Box<asset::Sprite>>>,
     pending_say: HashMap<u64, (String, Instant)>,
     pending_exclaim: HashMap<u64, (i32, Instant)>,
@@ -293,7 +304,10 @@ impl Default for ReloadedOnline {
             chat: Vec::new(),
             world_list: Vec::new(),
             program_directory: PathBuf::new(),
-            pokemon_paths: HashMap::new(),
+            world: world::WorldState::new(None),
+            battle_context: world::BattleContext::default(),
+            pokemon_plans: HashMap::new(),
+            pokemon_missing: HashMap::new(),
             pokemon_sprites: HashMap::new(),
             pending_say: HashMap::new(),
             pending_exclaim: HashMap::new(),
@@ -411,6 +425,8 @@ impl ReloadedOnline {
         self.connection_mode = None;
         self.remotes.clear();
         self.local_id = None;
+        self.world.clear();
+        self.world.set_local_id(None);
         self.side = 0;
         self.pending_request = None;
         self.peer.clear();
@@ -748,51 +764,58 @@ impl ReloadedOnline {
         sent
     }
 
-    pub fn remote_overlays(&self, room_id: i32, assets: &Assets) -> Vec<RemoteOverlay> {
+    pub fn remote_overlays(&mut self, room_id: i32, assets: &Assets) -> Vec<RemoteOverlay> {
         let now = Instant::now();
-        self.remotes
+        let remotes: Vec<Remote> = self
+            .remotes
             .values()
             .filter(|remote| remote.visible && remote.room == room_id)
-            .filter_map(|remote| {
-                let mut top = remote.render_y - 28.0;
-                let mut any_visible = false;
-                for part in &remote.parts {
-                    if let Some(part_top) = self.part_top(assets, remote, part) {
-                        any_visible = true;
-                        if part_top < top {
-                            top = part_top;
-                        }
+            .cloned()
+            .collect();
+        let mut overlays = Vec::new();
+        for remote in remotes {
+            let mut top = remote.render_y - 28.0;
+            let mut any_visible = false;
+            for part in &remote.parts {
+                if let Some(part_top) = self.part_top(assets, &remote, part) {
+                    any_visible = true;
+                    if part_top < top {
+                        top = part_top;
                     }
                 }
-                if !any_visible {
-                    return None
-                }
-                let say = remote.say.as_ref().and_then(|(text, at)| {
-                    (now.saturating_duration_since(*at).as_millis() < say_time_ms(text)).then(|| text.clone())
-                });
-                let exclaim = remote.exclaim.and_then(|kind| {
-                    (now.saturating_duration_since(remote.exclaim_at).as_millis() < EXCLAIM_MS).then_some(kind)
-                });
-                Some(RemoteOverlay {
-                    name: remote.name.clone(),
-                    x: remote.render_x,
-                    y: remote.render_y,
-                    top,
-                    battle: remote.battle,
-                    say,
-                    exclaim,
-                })
-            })
-            .collect()
+            }
+            if !any_visible {
+                continue
+            }
+            let say = remote.say.as_ref().and_then(|(text, at)| {
+                (now.saturating_duration_since(*at).as_millis() < say_time_ms(text)).then(|| text.clone())
+            });
+            let exclaim = remote.exclaim.and_then(|kind| {
+                (now.saturating_duration_since(remote.exclaim_at).as_millis() < EXCLAIM_MS).then_some(kind)
+            });
+            overlays.push(RemoteOverlay {
+                name: remote.name.clone(),
+                x: remote.render_x,
+                y: remote.render_y,
+                top,
+                battle: remote.battle,
+                say,
+                exclaim,
+            });
+        }
+        overlays
     }
 
-    fn part_top(&self, assets: &Assets, remote: &Remote, part: &RemotePart) -> Option<f64> {
+    fn part_top(&mut self, assets: &Assets, remote: &Remote, part: &RemotePart) -> Option<f64> {
         let sprite = match part.kind {
             RemotePartKind::Player { sprite } => assets.sprites.get_asset(sprite)?,
-            RemotePartKind::Pokemon { pkmn, mira } => {
-                let path = self.pokemon_paths.get(&(pkmn, mira))?.as_ref()?;
-                let key = path.to_string_lossy().into_owned();
-                self.pokemon_sprites.get(&key)?.as_deref()?
+            RemotePartKind::Pokemon { pkmn, mira } => match self.pokemon_sprite_plan(pkmn, mira) {
+                PokemonSpritePlan::File(path) | PokemonSpritePlan::Mirrored(path) => {
+                    let key = path.to_string_lossy().into_owned();
+                    self.pokemon_sprites.get(&key)?.as_deref()?
+                },
+                PokemonSpritePlan::Placeholder { sprite, .. } => assets.sprites.get_asset(sprite)?,
+                PokemonSpritePlan::Missing => return None,
             },
         };
         let y = remote.render_y + part.dy;
@@ -996,17 +1019,31 @@ impl ReloadedOnline {
                 renderer.draw_sprite(atlas, x, y, part.xs, part.ys, angle, blend, alpha);
             },
             RemotePartKind::Pokemon { pkmn, mira } => {
-                let Some(path) = self.pokemon_sprite_path(pkmn, mira) else { return };
-                let key = path.to_string_lossy().into_owned();
-                if !self.pokemon_sprites.contains_key(&key) {
-                    let loaded = load_pokemon_sprite(renderer, &path).ok();
-                    self.pokemon_sprites.insert(key.clone(), loaded);
+                let plan = self.pokemon_sprite_plan(pkmn, mira);
+                match plan {
+                    PokemonSpritePlan::File(path) => {
+                        let Some(key) = self.loaded_pokemon_sprite(renderer, &path) else { return };
+                        let Some(sprite) = self.pokemon_sprites.get(&key).and_then(|sprite| sprite.as_deref()) else {
+                            return
+                        };
+                        let Some(atlas) = sprite.get_atlas_ref(part.frame) else { return };
+                        renderer.draw_sprite(atlas, x, y, part.xs, part.ys, 0.0, 0xffffff, 1.0);
+                    },
+                    PokemonSpritePlan::Mirrored(path) => {
+                        let Some(key) = self.loaded_pokemon_sprite(renderer, &path) else { return };
+                        let Some(sprite) = self.pokemon_sprites.get(&key).and_then(|sprite| sprite.as_deref()) else {
+                            return
+                        };
+                        let Some(atlas) = sprite.get_atlas_ref(part.frame) else { return };
+                        renderer.draw_sprite(atlas, x, y, -part.xs, part.ys, 0.0, 0xffffff, 1.0);
+                    },
+                    PokemonSpritePlan::Placeholder { sprite, .. } => {
+                        let Some(sprite) = assets.sprites.get_asset(sprite) else { return };
+                        let Some(atlas) = sprite.get_atlas_ref(part.frame) else { return };
+                        renderer.draw_sprite(atlas, x, y, part.xs, part.ys, 0.0, 0xffffff, 1.0);
+                    },
+                    PokemonSpritePlan::Missing => (),
                 }
-                let Some(sprite) = self.pokemon_sprites.get(&key).and_then(|sprite| sprite.as_deref()) else {
-                    return
-                };
-                let Some(atlas) = sprite.get_atlas_ref(part.frame) else { return };
-                renderer.draw_sprite(atlas, x, y, part.xs, part.ys, 0.0, 0xffffff, 1.0);
             },
         }
     }
@@ -1256,7 +1293,8 @@ impl ReloadedOnline {
 
     fn handle_roz_event(&mut self, event: RozEvent) {
         match event {
-            RozEvent::Welcome { version } => {
+            RozEvent::Welcome { version, id } => {
+                self.apply_local_id(Some(id));
                 self.status = format!("Zibelan conectado (protocolo {version})");
             },
             RozEvent::Wait => {
@@ -1280,8 +1318,11 @@ impl ReloadedOnline {
                 }
                 self.status = format!("Zibelan: combate contra {peer} (lado {side})");
             },
-            RozEvent::WorldJoined { side } => {
+            RozEvent::WorldJoined { side, id } => {
                 eprintln!("[online] WOK side={side}");
+                if let Some(id) = id {
+                    self.apply_local_id(Some(id));
+                }
                 self.side = side;
                 self.status = format!("Zibelan: mundo conectado (lado {side})");
             },
@@ -1328,48 +1369,23 @@ impl ReloadedOnline {
                 }
             },
             RozEvent::WorldPosition(position) => {
-                if Some(position.id) == self.local_id {
-                    return
-                }
-                let (parts, battle) = parse_world_parts(&position.parts);
-                let primary = parts.iter().find_map(|part| match part.kind {
-                    RemotePartKind::Player { sprite } => Some((sprite, part.frame, part.xs, part.ys)),
-                    RemotePartKind::Pokemon { .. } => None,
-                });
-                let (sprite, frame, xs, ys) = primary.unwrap_or((-1, 0, 1.0, 1.0));
-                let x = position.x;
-                let y = position.y;
-                let visible = position.parts != "-" && !parts.is_empty() && x > -500.0;
-                let bbox = [
-                    (x - 8.0).round() as i32,
-                    (x + 8.0).round() as i32,
-                    (y - 20.0).round() as i32,
-                    (y + 4.0).round() as i32,
-                ];
-                self.upsert_remote(
-                    position.id,
-                    position.name,
-                    position.room,
-                    x,
-                    y,
-                    sprite,
-                    frame,
-                    xs,
-                    ys,
-                    0.0,
-                    visible,
-                    bbox,
-                    -(y / 100.0),
-                    0xffffff,
-                    1.0,
-                    parts,
-                    battle,
-                );
+                let message = world::WpMessage {
+                    id: position.id,
+                    room: position.room,
+                    x: position.x,
+                    y: position.y,
+                    parts: position.decoded,
+                    parts_token: position.parts_token,
+                    name: position.name_bytes,
+                    raw_remainder: position.raw,
+                };
+                self.apply_wp_message(&message);
             },
-            RozEvent::WorldDelete { id, .. } => {
-                self.remotes.remove(&id);
-                self.pending_say.remove(&id);
-                self.pending_exclaim.remove(&id);
+            RozEvent::WorldSelfPosition(_) => {
+                // `WPOS` is client-to-server; a server echo carries no remote state.
+            },
+            RozEvent::WorldDelete { id, raw } => {
+                self.apply_wdel_message(&world::WdelMessage { id, raw_remainder: raw });
             },
             RozEvent::WorldRequest { id, kind, payload } => {
                 self.requests.push(IncomingRequest {
@@ -1406,16 +1422,24 @@ impl ReloadedOnline {
                 self.set_remote_exclaim(id, kind);
             },
             RozEvent::WorldList { entries, .. } => {
-                self.world_list = entries.into_iter().map(|entry| {
-                    let flags = if entry.flags.is_empty() { String::new() } else { format!(" ({})", entry.flags) };
-                    format!("{} - {}{}", entry.name, entry.place, flags)
-                }).collect();
+                self.world_list = entries
+                    .into_iter()
+                    .map(|entry| {
+                        world::wlist_display(&world::ListEntry {
+                            name: entry.name,
+                            place: entry.place,
+                            flags: entry.flags,
+                        })
+                    })
+                    .collect();
             },
             RozEvent::Malformed { line, reason } => {
                 eprintln!("[reloaded-online] linea Zibelan invalida ({reason}): {line}");
             },
             RozEvent::Disconnected { reason } => {
                 self.status = reason.clone();
+                self.apply_local_id(None);
+                self.world.clear();
                 self.remotes.clear();
                 self.connection = Some(Connection::Failed(reason.clone()));
                 self.fail_battle(reason);
@@ -1523,9 +1547,11 @@ impl ReloadedOnline {
                 }
             },
             "WLIST" => {
-                self.world_list = match parse_zibelan_list(payload) {
-                    list => list,
-                };
+                let mut line = b"WLIST ".to_vec();
+                line.extend_from_slice(payload.as_bytes());
+                self.world_list = world::parse_wlist(&line)
+                    .map(|list| list.entries.iter().map(world::wlist_display).collect())
+                    .unwrap_or_default();
             },
             _ => {
                 eprintln!("[reloaded-online] rival: {text}");
@@ -1584,13 +1610,80 @@ impl ReloadedOnline {
         }
     }
 
-    fn pokemon_sprite_path(&mut self, pkmn: i32, mira: i32) -> Option<PathBuf> {
-        if let Some(cached) = self.pokemon_paths.get(&(pkmn, mira)) {
-            return cached.clone()
+    fn apply_local_id(&mut self, id: Option<u64>) {
+        self.local_id = id;
+        self.world.set_local_id(id);
+        if let Some(id) = id {
+            self.world.apply_wdel(id);
+            self.remotes.remove(&id);
+            self.pending_say.remove(&id);
+            self.pending_exclaim.remove(&id);
         }
-        let resolved = resolve_pokemon_sprite_path(&self.program_directory, pkmn, mira);
-        self.pokemon_paths.insert((pkmn, mira), resolved.clone());
-        resolved
+    }
+
+    fn apply_wp_message(&mut self, message: &world::WpMessage) {
+        self.world.set_local_id(self.local_id);
+        if !self.world.apply_wp(message) {
+            return
+        }
+        let Some(remote) = self.world.get(message.id).cloned() else { return };
+        self.project_world_remote(&remote);
+    }
+
+    fn apply_wdel_message(&mut self, message: &world::WdelMessage) {
+        self.world.apply_wdel(message.id);
+        self.remotes.remove(&message.id);
+        self.pending_say.remove(&message.id);
+        self.pending_exclaim.remove(&message.id);
+    }
+
+    fn project_world_remote(&mut self, remote: &world::Remote) {
+        let projected = project_remote(remote);
+        self.upsert_remote(
+            projected.id,
+            projected.name,
+            projected.room,
+            projected.x,
+            projected.y,
+            projected.sprite,
+            projected.frame,
+            projected.xs,
+            projected.ys,
+            0.0,
+            projected.visible,
+            projected.bbox,
+            projected.depth,
+            0xffffff,
+            1.0,
+            projected.parts,
+            projected.battle,
+        );
+    }
+
+    fn pokemon_sprite_plan(&mut self, pkmn: i32, mira: i32) -> PokemonSpritePlan {
+        let species = i64::from(pkmn);
+        let slot = battle_slot_for_facing(i64::from(mira));
+        let key = (species, slot);
+        if let Some(plan) = self.pokemon_plans.get(&key) {
+            return plan.clone()
+        }
+        let plan = plan_battle_sprite(&self.program_directory, species, slot, self.battle_context);
+        if let PokemonSpritePlan::Placeholder { missing, .. } = &plan {
+            if self.pokemon_missing.insert(missing.clone(), ()).is_none() {
+                eprintln!("[online] falta sprite de companero: {missing}");
+            }
+        }
+        self.pokemon_plans.insert(key, plan.clone());
+        plan
+    }
+
+    fn loaded_pokemon_sprite(&mut self, renderer: &mut Renderer, path: &Path) -> Option<String> {
+        let key = path.to_string_lossy().into_owned();
+        if !self.pokemon_sprites.contains_key(&key) {
+            let loaded = load_pokemon_sprite(renderer, path).ok();
+            self.pokemon_sprites.insert(key.clone(), loaded);
+        }
+        Some(key)
     }
 
     pub fn local_say(&self) -> Option<&str> {
@@ -1708,72 +1801,122 @@ fn remote_bbox(remote: &Remote) -> Option<(i32, i32, i32, i32)> {
     Some((remote.bbox[0] + dx, remote.bbox[1] + dx, remote.bbox[2] + dy, remote.bbox[3] + dy))
 }
 
-fn parse_world_parts(parts: &str) -> (Vec<RemotePart>, bool) {
-    let mut parsed = Vec::new();
-    let mut battle = false;
-    if parts == "-" || parts.is_empty() {
-        return (parsed, battle)
-    }
-    for part in parts.split(';').take(10) {
-        let fields: Vec<&str> = part.split(',').collect();
-        match fields.first().copied() {
-            Some("S") if fields.len() == 7 => {
-                let Some(sprite) = parse_i32(fields[1]) else { continue };
-                if !(0..3857).contains(&sprite) {
-                    continue
-                }
-                let (Some(frame), Some(dx), Some(dy), Some(xs), Some(ys)) = (
-                    parse_i32(fields[2]),
-                    parse_f64(fields[3]),
-                    parse_f64(fields[4]),
-                    parse_f64(fields[5]),
-                    parse_f64(fields[6]),
-                ) else {
-                    continue
-                };
-                parsed.push(RemotePart {
-                    kind: RemotePartKind::Player { sprite },
-                    frame,
-                    dx,
-                    dy,
-                    xs,
-                    ys,
-                });
-            },
-            Some("P") if fields.len() == 8 => {
-                let (Some(pkmn), Some(mira), Some(frame), Some(dx), Some(dy), Some(xs), Some(ys)) = (
-                    parse_i32(fields[1]),
-                    parse_i32(fields[2]),
-                    parse_i32(fields[3]),
-                    parse_f64(fields[4]),
-                    parse_f64(fields[5]),
-                    parse_f64(fields[6]),
-                    parse_f64(fields[7]),
-                ) else {
-                    continue
-                };
-                parsed.push(RemotePart {
-                    kind: RemotePartKind::Pokemon { pkmn, mira },
-                    frame,
-                    dx,
-                    dy,
-                    xs,
-                    ys,
-                });
-            },
-            Some("B") => battle = true,
-            _ => (),
-        }
-    }
-    (parsed, battle)
+struct ProjectedRemote {
+    id: u64,
+    name: String,
+    room: i32,
+    x: f64,
+    y: f64,
+    sprite: i32,
+    frame: i32,
+    xs: f64,
+    ys: f64,
+    visible: bool,
+    bbox: [i32; 4],
+    depth: f64,
+    parts: Vec<RemotePart>,
+    battle: bool,
 }
 
-fn parse_i32(value: &str) -> Option<i32> {
-    value.parse::<i32>().ok().or_else(|| value.parse::<f64>().ok().map(|value| value.round() as i32))
+fn project_remote(remote: &world::Remote) -> ProjectedRemote {
+    let parts: Vec<RemotePart> = remote.parts.segments.iter().filter_map(project_part).collect();
+    let primary = remote.parts.primary_player();
+    let (sprite, frame, xs, ys) = primary
+        .map(|player| {
+            (
+                i32::from(player.sprite),
+                i32::try_from(player.frame).unwrap_or(0),
+                player.xs,
+                player.ys,
+            )
+        })
+        .unwrap_or((-1, 0, 1.0, 1.0));
+    let x = remote.x;
+    let y = remote.y;
+    ProjectedRemote {
+        id: remote.id,
+        name: String::from_utf8_lossy(&remote.name).into_owned(),
+        room: remote.room,
+        x,
+        y,
+        sprite,
+        frame,
+        xs,
+        ys,
+        visible: remote.is_protocol_visible(),
+        bbox: [
+            (x - 8.0).round() as i32,
+            (x + 8.0).round() as i32,
+            (y - 20.0).round() as i32,
+            (y + 4.0).round() as i32,
+        ],
+        depth: -(y / 100.0),
+        parts,
+        battle: remote.parts.battle,
+    }
 }
 
-fn parse_f64(value: &str) -> Option<f64> {
-    value.parse::<f64>().ok()
+fn project_part(part: &world::Part) -> Option<RemotePart> {
+    match part {
+        world::Part::Player(player) => Some(RemotePart {
+            kind: RemotePartKind::Player { sprite: i32::from(player.sprite) },
+            frame: i32::try_from(player.frame).ok()?,
+            dx: player.dx,
+            dy: player.dy,
+            xs: player.xs,
+            ys: player.ys,
+        }),
+        world::Part::Pokemon(pokemon) => Some(RemotePart {
+            kind: RemotePartKind::Pokemon {
+                pkmn: i32::try_from(pokemon.species).ok()?,
+                mira: i32::try_from(pokemon.facing).ok()?,
+            },
+            frame: i32::try_from(pokemon.frame).ok()?,
+            dx: pokemon.dx,
+            dy: pokemon.dy,
+            xs: pokemon.xs,
+            ys: pokemon.ys,
+        }),
+    }
+}
+
+fn battle_slot_for_facing(facing: i64) -> i32 {
+    if facing == 0 {
+        return 10
+    }
+    if facing == -1 {
+        return 11
+    }
+    let Ok(slot) = i32::try_from(facing) else { return 2 };
+    if world::battle_slot_label(slot).is_some() {
+        slot
+    } else {
+        2
+    }
+}
+
+fn plan_battle_sprite(
+    program_directory: &Path,
+    species: i64,
+    slot: i32,
+    context: world::BattleContext,
+) -> PokemonSpritePlan {
+    if species <= 0 {
+        return PokemonSpritePlan::Missing
+    }
+    let data_root = program_directory.join("data");
+    let exists = |relative: &str| data_root.join(relative).is_file();
+    match world::battle_sprite(species, slot, context, exists) {
+        Ok(world::BattleSprite::File(path)) => PokemonSpritePlan::File(data_root.join(path)),
+        Ok(world::BattleSprite::Mirrored { path, .. }) => {
+            PokemonSpritePlan::Mirrored(data_root.join(path))
+        },
+        Ok(world::BattleSprite::Placeholder { missing, sprite }) => PokemonSpritePlan::Placeholder {
+            sprite: i32::from(sprite),
+            missing,
+        },
+        Err(_) => PokemonSpritePlan::Missing,
+    }
 }
 
 fn part_depth(remote: &Remote, part: &RemotePart) -> f64 {
@@ -1785,54 +1928,6 @@ fn part_depth(remote: &Remote, part: &RemotePart) -> f64 {
 
 fn say_time_ms(text: &str) -> u128 {
     (SAY_BASE_MS + text.len() as u128 * SAY_PER_CHAR_MS).min(SAY_MAX_MS)
-}
-
-fn resolve_pokemon_sprite_path(program_directory: &Path, pkmn: i32, mira: i32) -> Option<PathBuf> {
-    let mut species = pkmn;
-    if species == 493 {
-        species = 700;
-    }
-    if species == 1493 {
-        species = 1700;
-    }
-    let directory = program_directory.join("data").join("pkmnbattle");
-    let filename = |direction: &str| directory.join(format!("P{species}_{direction}.gmspr"));
-    if !filename("2").is_file() {
-        return None
-    }
-    let mut direction = mira;
-    if direction == 0 {
-        direction = 10;
-    }
-    if direction == -1 {
-        direction = 11;
-    }
-    if !filename("1").is_file() {
-        if direction == 4 {
-            direction = 6;
-        }
-        if direction == 7 {
-            direction = 9;
-        }
-        if direction == 1 {
-            direction = 3;
-        }
-    }
-    if !matches!(direction, 1 | 2 | 3 | 4 | 6 | 7 | 8 | 9 | 10 | 11) {
-        direction = 2;
-    }
-    let named = match direction {
-        10 => "A".to_string(),
-        11 => "H".to_string(),
-        _ => direction.to_string(),
-    };
-    let path = filename(&named);
-    if path.is_file() {
-        Some(path)
-    } else {
-        let literal = filename(&direction.to_string());
-        literal.is_file().then_some(literal)
-    }
 }
 
 fn load_pokemon_sprite(renderer: &mut Renderer, path: &Path) -> Result<Box<asset::Sprite>, String> {
@@ -1969,19 +2064,6 @@ fn parse_zibelan_team(mut rest: &[u8]) -> Option<(BattleTeamMeta, Vec<u8>)> {
     ))
 }
 
-fn parse_zibelan_list(payload: &str) -> Vec<String> {
-    let mut parts = payload.split('\x1d');
-    let _total = parts.next().and_then(|value| value.trim().parse::<i32>().ok()).unwrap_or(0);
-    parts.take(250).filter_map(|item| {
-        if item.is_empty() { return None; }
-        let mut fields = item.split('\x1e');
-        let name = fields.next().unwrap_or("");
-        let place = fields.next().unwrap_or("");
-        let flags = fields.next().unwrap_or("");
-        if name.is_empty() { None } else { Some(format!("{name} - {place}{}", if flags.is_empty() { String::new() } else { format!(" ({flags})") })) }
-    }).collect()
-}
-
 #[cfg(test)]
 mod team_payload_tests {
     use super::*;
@@ -2010,14 +2092,46 @@ mod team_payload_tests {
 mod tests {
     use super::*;
 
+    fn apply_line(online: &mut ReloadedOnline, line: &str) -> world::WpMessage {
+        let message = world::parse_wp(line.as_bytes()).expect("valid WP");
+        online.apply_wp_message(&message);
+        message
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "opengmk-world-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("data").join("pkmnbattle")).unwrap();
+        root
+    }
+
+    fn touch(root: &Path, names: &[&str]) {
+        for name in names {
+            std::fs::write(root.join("data").join("pkmnbattle").join(format!("{name}.gmspr")), []).unwrap();
+        }
+    }
+
+    fn plan_file(plan: PokemonSpritePlan) -> String {
+        match plan {
+            PokemonSpritePlan::File(path) | PokemonSpritePlan::Mirrored(path) => {
+                path.file_name().unwrap().to_string_lossy().into_owned()
+            },
+            other => panic!("expected file plan, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn parses_player_pokemon_and_battle_parts() {
-        let (parts, battle) =
-            parse_world_parts("S,25,2,0,-10,1,-1;P,25,4,3,8,12,1,1;B;P,6,10,0,0,0,1,1");
-        assert!(battle);
-        assert_eq!(parts.len(), 3);
+    fn wp_projects_player_part() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 S,25,2,0,-10,1,-1 Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert_eq!(remote.name, "Ada");
+        assert_eq!(remote.parts.len(), 1);
         assert_eq!(
-            parts[0],
+            remote.parts[0],
             RemotePart {
                 kind: RemotePartKind::Player { sprite: 25 },
                 frame: 2,
@@ -2027,17 +2141,198 @@ mod tests {
                 ys: -1.0,
             }
         );
-        assert_eq!(parts[1].kind, RemotePartKind::Pokemon { pkmn: 25, mira: 4 });
-        assert_eq!(parts[2].kind, RemotePartKind::Pokemon { pkmn: 6, mira: 10 });
+        assert_eq!((remote.sprite, remote.frame, remote.xs, remote.ys), (25, 2, 1.0, -1.0));
     }
 
     #[test]
-    fn ignores_malformed_and_out_of_range_parts() {
-        let (parts, battle) = parse_world_parts("S,9999,0,0,0,1,1;P,25,2,0,0,0;Q,1,2;S,3,0,0,0,1,1");
-        assert!(!battle);
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].kind, RemotePartKind::Player { sprite: 3 });
-        assert!(parse_world_parts("-").0.is_empty());
+    fn wp_projects_companion_part() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 P,25,4,3,8,12,1,1 Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert_eq!(remote.parts.len(), 1);
+        assert_eq!(remote.parts[0].kind, RemotePartKind::Pokemon { pkmn: 25, mira: 4 });
+        assert_eq!(remote.parts[0].frame, 3);
+        assert_eq!((remote.parts[0].dx, remote.parts[0].dy), (8.0, 12.0));
+    }
+
+    #[test]
+    fn wp_battle_flag() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 S,25,0,0,0,1,1;P,25,4,3,8,12,1,1;B;X Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert!(remote.battle);
+        assert_eq!(remote.parts.len(), 2);
+    }
+
+    #[test]
+    fn wp_first_player_is_primary() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 S,25,2,0,0,1,1;S,30,4,1,1,2,2 Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert_eq!(remote.sprite, 25);
+        assert_eq!(remote.frame, 2);
+        assert_eq!(remote.parts.len(), 2);
+        assert_eq!(remote.parts[1].kind, RemotePartKind::Player { sprite: 30 });
+    }
+
+    #[test]
+    fn wp_pokemon_only_is_visible() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 P,25,4,3,8,12,1,1 Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert!(remote.visible);
+        assert_eq!((remote.sprite, remote.frame, remote.xs, remote.ys), (-1, 0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn wp_hidden_token_retains_record() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 - Ada");
+        let remote = online.remotes.get(&1).expect("remote retained");
+        assert!(!remote.visible);
+        assert!(remote.parts.is_empty());
+    }
+
+    #[test]
+    fn wp_hidden_x_retains_record() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 -500 200 S,25,0,0,0,1,1 Ada");
+        assert!(!online.remotes.get(&1).expect("remote").visible);
+        apply_line(&mut online, "WP 1 2 -499.5 200 S,25,0,0,0,1,1 Ada");
+        assert!(online.remotes.get(&1).expect("remote").visible);
+    }
+
+    #[test]
+    fn wp_malformed_leaves_previous() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 S,25,0,0,0,1,1 Ada");
+        assert!(world::parse_wp(b"WP 1 2 nope 200 S,25,0,0,0,1,1 Ada").is_err());
+        let remote = online.remotes.get(&1).expect("remote");
+        assert_eq!(remote.x, 100.0);
+        assert_eq!(remote.sprite, 25);
+    }
+
+    #[test]
+    fn wp_self_update_is_ignored() {
+        let mut online = ReloadedOnline::default();
+        online.apply_local_id(Some(5));
+        apply_line(&mut online, "WP 5 2 100 200 S,25,0,0,0,1,1 Ada");
+        assert!(!online.remotes.contains_key(&5));
+        assert!(online.world.is_empty());
+    }
+
+    #[test]
+    fn wdel_known_and_unknown() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 7 2 100 200 S,25,0,0,0,1,1 Ada");
+        let message = world::parse_wdel(b"WDEL 7").unwrap();
+        online.apply_wdel_message(&message);
+        assert!(!online.remotes.contains_key(&7));
+        let unknown = world::parse_wdel(b"WDEL 99").unwrap();
+        online.apply_wdel_message(&unknown);
+        assert!(!online.remotes.contains_key(&99));
+    }
+
+    #[test]
+    fn wdel_malformed_leaves_previous() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 7 2 100 200 S,25,0,0,0,1,1 Ada");
+        for line in [b"WDEL 7 9".as_slice(), b"WDEL -1", b"WDEL 18446744073709551616"] {
+            assert!(world::parse_wdel(line).is_err());
+        }
+        assert!(online.remotes.contains_key(&7));
+    }
+
+    #[test]
+    fn s_part_uses_gm_sprite_index() {
+        let mut online = ReloadedOnline::default();
+        apply_line(&mut online, "WP 1 2 100 200 S,0,0,0,0,1,1;S,3856,1,0,0,1,1 Ada");
+        let remote = online.remotes.get(&1).expect("remote");
+        assert_eq!(remote.parts[0].kind, RemotePartKind::Player { sprite: 0 });
+        assert_eq!(remote.parts[1].kind, RemotePartKind::Player { sprite: 3856 });
+        assert_eq!(remote.sprite, 0);
+    }
+
+    #[test]
+    fn p_species_493_maps_700() {
+        let root = temp_root("p493");
+        touch(&root, &["P700_A"]);
+        let plan = plan_battle_sprite(&root, 493, 10, world::BattleContext::default());
+        assert_eq!(plan_file(plan), "P700_A.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_species_1493_maps_1700() {
+        let root = temp_root("p1493");
+        touch(&root, &["P1700_H"]);
+        let plan = plan_battle_sprite(&root, 1493, 11, world::BattleContext::default());
+        assert_eq!(plan_file(plan), "P1700_H.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_facing_aliases() {
+        let root = temp_root("facing");
+        touch(&root, &["P25_2", "P25_A", "P25_H"]);
+        let context = world::BattleContext::default();
+        assert_eq!(plan_file(plan_battle_sprite(&root, 25, battle_slot_for_facing(0), context)), "P25_A.gmspr");
+        assert_eq!(plan_file(plan_battle_sprite(&root, 25, battle_slot_for_facing(-1), context)), "P25_H.gmspr");
+        assert_eq!(plan_file(plan_battle_sprite(&root, 25, battle_slot_for_facing(99), context)), "P25_2.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_missing_left_uses_mirrored() {
+        let root = temp_root("mirrored");
+        touch(&root, &["P25_3"]);
+        let plan = plan_battle_sprite(&root, 25, 1, world::BattleContext::default());
+        assert!(matches!(&plan, PokemonSpritePlan::Mirrored(_)));
+        assert_eq!(plan_file(plan), "P25_3.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_missing_sleep_uses_hurt() {
+        let root = temp_root("sleep");
+        touch(&root, &["P25_H"]);
+        let plan = plan_battle_sprite(&root, 25, 12, world::BattleContext::default());
+        assert_eq!(plan_file(plan), "P25_H.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_missing_required_uses_placeholder_8() {
+        let root = temp_root("placeholder");
+        let plan = plan_battle_sprite(&root, 25, 2, world::BattleContext::default());
+        assert!(matches!(&plan, PokemonSpritePlan::Placeholder { sprite: 8, .. }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_alt_missing_uses_base() {
+        let root = temp_root("alt");
+        touch(&root, &["P25_2"]);
+        let plan = plan_battle_sprite(&root, 25, 22, world::BattleContext::default());
+        assert_eq!(plan_file(plan), "P25_2.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_shiny_uses_shiny_id() {
+        let root = temp_root("shiny");
+        touch(&root, &["P1001_2"]);
+        let plan = plan_battle_sprite(&root, 1001, 2, world::BattleContext::default());
+        assert_eq!(plan_file(plan), "P1001_2.gmspr");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn p_remap_target_missing_placeholder() {
+        let root = temp_root("remapmissing");
+        let plan = plan_battle_sprite(&root, 493, 2, world::BattleContext::default());
+        assert!(matches!(&plan, PokemonSpritePlan::Placeholder { sprite: 8, .. }));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2045,23 +2340,5 @@ mod tests {
         assert_eq!(say_time_ms(""), 3000);
         assert_eq!(say_time_ms("12345"), 3300);
         assert_eq!(say_time_ms(&"x".repeat(200)), 9000);
-    }
-
-    #[test]
-    fn net_pokemon_sprite_uses_species_and_direction_rules() {
-        let root = std::env::temp_dir().join(format!("opengmk-visuals-sprite-{}", std::process::id()));
-        let battle = root.join("data").join("pkmnbattle");
-        std::fs::create_dir_all(&battle).unwrap();
-        for name in ["P700_2", "P700_A", "P700_H", "P1700_2", "P1700_3", "P1700_H", "P25_2", "P25_6", "P25_9"] {
-            std::fs::write(battle.join(format!("{name}.gmspr")), []).unwrap();
-        }
-
-        assert_eq!(resolve_pokemon_sprite_path(&root, 493, 10).unwrap().file_name().unwrap(), "P700_A.gmspr");
-        assert_eq!(resolve_pokemon_sprite_path(&root, 1493, -1).unwrap().file_name().unwrap(), "P1700_H.gmspr");
-        assert_eq!(resolve_pokemon_sprite_path(&root, 25, 4).unwrap().file_name().unwrap(), "P25_6.gmspr");
-        assert_eq!(resolve_pokemon_sprite_path(&root, 25, 9).unwrap().file_name().unwrap(), "P25_9.gmspr");
-        assert!(resolve_pokemon_sprite_path(&root, 999, 2).is_none());
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

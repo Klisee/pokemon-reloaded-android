@@ -27,10 +27,12 @@
 //!   inside `WREQ` are preserved as opaque data, not interpreted.
 //! - The real-server line limit, keepalive/timeout policy and reconnect behaviour
 //!   are unknown. A local safety limit of [`MAX_LINE`] bytes is enforced.
-//! - `WELCOME 3011` is treated as a protocol banner/version, not as a player id.
+//! - `WELCOME`/`WOK` values are exposed as both the legacy status value and the
+//!   connection identity used for self-suppression.
 //! - `WOK` and `START` both update `side`; whether they have different semantics
 //!   on the real server is unconfirmed.
 
+use reloaded_cleanroom::world;
 use std::{
     collections::VecDeque,
     fmt,
@@ -125,6 +127,12 @@ pub struct WorldPosition {
     pub y: f64,
     pub parts: String,
     pub name: String,
+    /// Name bytes exactly as received, before any lossy display conversion.
+    pub name_bytes: Vec<u8>,
+    /// Parsed parts, owned by the clean-room world module.
+    pub decoded: world::Parts,
+    /// Original parts token bytes.
+    pub parts_token: Vec<u8>,
     /// Original bytes after the `WP` command, including its leading space.
     ///
     /// `ROZ.dll` queues `WP` as `WP\x1f` + this exact remainder, so keeping it lets
@@ -144,14 +152,23 @@ pub struct WorldListEntry {
 /// Events produced by the reader thread.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RozEvent {
-    /// `WELCOME <version>` banner (for example `WELCOME 3011`).
-    Welcome { version: u32 },
+    /// `WELCOME <id>` greeting; the numeric value is the connection identity.
+    Welcome {
+        /// Legacy protocol-banner value shown by the host (the same number).
+        version: u32,
+        /// Connection identity used to suppress self updates.
+        id: u64,
+    },
     /// `WAIT`.
     Wait,
     /// `START <side> <peer>`.
     Start { side: i32, peer: String },
-    /// `WOK <side>`.
-    WorldJoined { side: i32 },
+    /// `WOK <id>`. The host still exposes it as the session side.
+    WorldJoined {
+        side: i32,
+        /// Connection identity when the value is a non-negative integer.
+        id: Option<u64>,
+    },
     /// `FULL` (`world = false`) or `WFULL` (`world = true`).
     Full { world: bool },
     /// `PEER_LEFT`.
@@ -164,6 +181,8 @@ pub enum RozEvent {
     Checksum { epoch: i32, frame: i32, checksum: i64 },
     /// `WP ...`.
     WorldPosition(WorldPosition),
+    /// Incoming `WPOS ...` (normally client-to-server); parsed for completeness.
+    WorldSelfPosition(world::WposMessage),
     /// `WDEL <id>`.
     WorldDelete {
         id: u64,
@@ -646,53 +665,29 @@ fn reader_loop(
     side: Arc<AtomicI32>,
     peer: Arc<Mutex<String>>,
 ) {
-    let mut buffer = Vec::with_capacity(4096);
-    let mut discarding = false;
+    let mut buffer = world::LineBuffer::new();
     let mut chunk = [0u8; 4096];
 
     let reason = loop {
         match stream.read(&mut chunk) {
             Ok(0) => break "el servidor cerró la conexión".to_string(),
             Ok(read) => {
-                for &byte in &chunk[..read] {
-                    if discarding {
-                        if byte == b'\n' {
-                            discarding = false;
-                        }
-                        continue;
-                    }
-                    if byte == b'\n' {
-                        let mut line = std::mem::take(&mut buffer);
-                        if line.last() == Some(&b'\r') {
-                            line.pop();
-                        }
-                        if line.len() > MAX_LINE {
-                            events.push(RozEvent::Malformed {
-                                line: String::new(),
-                                reason: format!("línea supera {MAX_LINE} bytes"),
-                            });
-                        } else if !line.is_empty() {
+                for event in buffer.feed(&chunk[..read]) {
+                    match event {
+                        world::LineEvent::Line(line) => {
+                            if line.is_empty() {
+                                continue;
+                            }
+                            if dispatch_world_line(&line, &events) {
+                                continue;
+                            }
                             let text = String::from_utf8_lossy(&line);
-                            // Find the separator in the original bytes (ASCII spaces
-                            // survive lossy decoding) so a malformed non-UTF-8 line
-                            // can never make this slice panic. The remainder is kept
-                            // verbatim for `WP`/`WDEL` byte preservation.
-                            let raw_rest = match line.iter().position(|&byte| byte == b' ') {
-                                Some(index) => &line[index..],
-                                None => &[],
-                            };
-                            handle_line(&text, raw_rest, &events, &status, &side, &peer);
+                            handle_line(&text, &events, &status, &side, &peer);
                         }
-                        buffer = Vec::with_capacity(4096);
-                    } else if buffer.len() >= MAX_LINE {
-                        buffer.clear();
-                        discarding = true;
-                        events.push(RozEvent::Malformed {
+                        world::LineEvent::Overlong => events.push(RozEvent::Malformed {
                             line: String::new(),
-                            reason: format!("línea supera {MAX_LINE} bytes"),
-                        });
-                    } else {
-                        buffer.push(byte);
+                            reason: format!("línea supera {} bytes", world::MAX_LINE_BYTES),
+                        }),
                     }
                 }
             }
@@ -706,9 +701,71 @@ fn reader_loop(
     events.close();
 }
 
+fn dispatch_world_line(line: &[u8], events: &EventQueue) -> bool {
+    let command = match line.iter().position(|&byte| byte == b' ') {
+        Some(index) => &line[..index],
+        None => line,
+    };
+    match command {
+        b"WP" => {
+            match world::parse_wp(line) {
+                Ok(message) => events.push(RozEvent::WorldPosition(WorldPosition {
+                    id: message.id,
+                    room: message.room,
+                    x: message.x,
+                    y: message.y,
+                    parts: String::from_utf8_lossy(&message.parts_token).into_owned(),
+                    name: String::from_utf8_lossy(&message.name).into_owned(),
+                    name_bytes: message.name,
+                    decoded: message.parts,
+                    parts_token: message.parts_token,
+                    raw: message.raw_remainder,
+                })),
+                Err(error) => push_malformed(events, &String::from_utf8_lossy(line), format!("{error:?}")),
+            }
+            true
+        },
+        b"WDEL" => {
+            match world::parse_wdel(line) {
+                Ok(message) => events.push(RozEvent::WorldDelete {
+                    id: message.id,
+                    raw: message.raw_remainder,
+                }),
+                Err(error) => push_malformed(events, &String::from_utf8_lossy(line), format!("{error:?}")),
+            }
+            true
+        },
+        b"WPOS" => {
+            match world::parse_wpos(line) {
+                Ok(message) => events.push(RozEvent::WorldSelfPosition(message)),
+                Err(error) => push_malformed(events, &String::from_utf8_lossy(line), format!("{error:?}")),
+            }
+            true
+        },
+        b"WLIST" => {
+            match world::parse_wlist(line) {
+                Ok(list) => events.push(RozEvent::WorldList {
+                    total: list.total,
+                    entries: list
+                        .entries
+                        .into_iter()
+                        .map(|entry| WorldListEntry {
+                            name: entry.name,
+                            place: entry.place,
+                            flags: entry.flags,
+                        })
+                        .collect(),
+                }),
+                Err(error) => push_malformed(events, &String::from_utf8_lossy(line), format!("{error:?}")),
+            }
+            true
+        },
+        _ => false,
+    }
+}
+
 fn handle_line(
     line: &str,
-    raw_rest: &[u8],
     events: &EventQueue,
     status: &AtomicU8,
     side: &AtomicI32,
@@ -721,8 +778,9 @@ fn handle_line(
 
     match command {
         "WELCOME" => {
-            let version = rest.trim().parse::<u32>().unwrap_or(0);
-            events.push(RozEvent::Welcome { version });
+            let id = rest.trim().parse::<u64>().unwrap_or(0);
+            let version = u32::try_from(id).unwrap_or(u32::MAX);
+            events.push(RozEvent::Welcome { version, id });
         }
         "WAIT" => {
             status.store(RozStatus::Waiting.as_u8(), Ordering::SeqCst);
@@ -745,7 +803,10 @@ fn handle_line(
             Ok(side_value) => {
                 side.store(side_value, Ordering::SeqCst);
                 status.store(RozStatus::WorldJoined.as_u8(), Ordering::SeqCst);
-                events.push(RozEvent::WorldJoined { side: side_value });
+                events.push(RozEvent::WorldJoined {
+                    side: side_value,
+                    id: u64::try_from(side_value).ok(),
+                });
             }
             Err(_) => push_malformed(events, line, "WOK sin side válido"),
         },
@@ -802,14 +863,6 @@ fn handle_line(
                 _ => push_malformed(events, line, "SUM con enteros inválidos"),
             }
         }
-        "WP" => match parse_world_position(rest, raw_rest) {
-            Ok(position) => events.push(RozEvent::WorldPosition(position)),
-            Err(reason) => push_malformed(events, line, reason),
-        },
-        "WDEL" => match rest.trim().parse::<u64>() {
-            Ok(id) => events.push(RozEvent::WorldDelete { id, raw: raw_rest.to_vec() }),
-            Err(_) => push_malformed(events, line, "WDEL sin id válido"),
-        },
         "WREQ" => {
             let (id_text, remainder) = split_first(rest);
             let (kind, payload) = split_first(remainder);
@@ -856,28 +909,10 @@ fn handle_line(
                 _ => push_malformed(events, line, "WEXC requiere id y número"),
             }
         }
-        "WLIST" => events.push(parse_world_list(rest)),
         _ => {
             // Unknown commands are ignored on purpose.
         }
     }
-}
-
-fn parse_world_list(rest: &str) -> RozEvent {
-    let mut parts = rest.split('\x1d');
-    let total = parts.next().and_then(|value| value.trim().parse::<i32>().ok()).unwrap_or(0);
-    let mut entries = Vec::new();
-    for item in parts.take(250) {
-        if item.is_empty() { continue; }
-        let mut fields = item.split('\x1e');
-        let name = fields.next().unwrap_or("").to_string();
-        let place = fields.next().unwrap_or("").to_string();
-        let flags = fields.next().unwrap_or("").to_string();
-        if !name.is_empty() {
-            entries.push(WorldListEntry { name, place, flags });
-        }
-    }
-    RozEvent::WorldList { total, entries }
 }
 
 fn split_first(value: &str) -> (&str, &str) {
@@ -889,47 +924,6 @@ fn split_first(value: &str) -> (&str, &str) {
 
 fn push_malformed(events: &EventQueue, line: &str, reason: impl Into<String>) {
     events.push(RozEvent::Malformed { line: line.to_string(), reason: reason.into() });
-}
-
-fn parse_world_position(rest: &str, raw_rest: &[u8]) -> Result<WorldPosition, String> {
-    // The reference parser only documents `WP` as opaque data, but tolerating
-    // repeated spaces between the numeric fields costs nothing and keeps the
-    // player name (which may contain spaces) intact.
-    let mut input = rest;
-    let id = take_field(&mut input)
-        .parse::<u64>()
-        .map_err(|_| "WP con id inválido".to_string())?;
-    let room = take_field(&mut input)
-        .parse::<i32>()
-        .map_err(|_| "WP con room inválido".to_string())?;
-    let x = take_field(&mut input)
-        .parse::<f64>()
-        .map_err(|_| "WP con x inválido".to_string())?;
-    let y = take_field(&mut input)
-        .parse::<f64>()
-        .map_err(|_| "WP con y inválido".to_string())?;
-    let parts = take_field(&mut input).to_string();
-    if parts.is_empty() {
-        return Err("WP sin parts".to_string());
-    }
-    let name = input.trim_start_matches(' ').to_string();
-    Ok(WorldPosition { id, room, x, y, parts, name, raw: raw_rest.to_vec() })
-}
-
-fn take_field<'a>(input: &mut &'a str) -> &'a str {
-    *input = input.trim_start_matches(' ');
-    match input.find(' ') {
-        Some(index) => {
-            let field = &input[..index];
-            *input = &input[index + 1..];
-            field
-        },
-        None => {
-            let field = *input;
-            *input = "";
-            field
-        },
-    }
 }
 
 /// Encode bytes as lowercase hex, matching `ROZ.dll`'s encoder.
@@ -1107,7 +1101,7 @@ mod tests {
         });
 
         let client = connect(addr);
-        assert_eq!(next_event(&client), RozEvent::WorldJoined { side: 1 });
+        assert_eq!(next_event(&client), RozEvent::WorldJoined { side: 1, id: Some(1) });
         assert_eq!(next_event(&client), RozEvent::Full { world: true });
         assert_eq!(client.status(), RozStatus::Full);
         let _ = release_tx.send(());
@@ -1205,6 +1199,9 @@ mod tests {
                 y: 240.0,
                 parts: "S,3,2,0,0,1,1".to_string(),
                 name: "Juan Perez".to_string(),
+                name_bytes: b"Juan Perez".to_vec(),
+                decoded: world::parse_parts(b"S,3,2,0,0,1,1"),
+                parts_token: b"S,3,2,0,0,1,1".to_vec(),
                 raw: b" 9 5 120 240 S,3,2,0,0,1,1 Juan Perez".to_vec(),
             })
         );
@@ -1233,9 +1230,44 @@ mod tests {
                 y: -3.0,
                 parts: "A,1".to_string(),
                 name: "Nombre  Con Espacios".to_string(),
+                name_bytes: b"Nombre  Con Espacios".to_vec(),
+                decoded: world::parse_parts(b"A,1"),
+                parts_token: b"A,1".to_vec(),
                 raw: b"  10  2  1.5  -3  A,1  Nombre  Con Espacios".to_vec(),
             })
         );
+    }
+
+    #[test]
+    fn parses_wpos_and_wlist_with_cleanroom_parsers() {
+        let addr = spawn_mock(|mut stream| {
+            stream
+                .write_all(b"WPOS 5 100.5 200 S,1,2,0,0,1,1\nWLIST 2\x1dAda\x1eRoute 1\x1eGM\x1dBob\x1eRoute 2\n")
+                .expect("write");
+            stream.flush().expect("flush");
+        });
+
+        let client = connect(addr);
+        match next_event(&client) {
+            RozEvent::WorldSelfPosition(message) => {
+                assert_eq!(message.room, 5);
+                assert_eq!(message.x, 100.5);
+                assert_eq!(message.parts_token.as_deref(), Some(b"S,1,2,0,0,1,1".as_slice()));
+                assert_eq!(message.parts.segments.len(), 1);
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
+        match next_event(&client) {
+            RozEvent::WorldList { total, entries } => {
+                assert_eq!(total, 2);
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].name, "Ada");
+                assert_eq!(entries[0].place, "Route 1");
+                assert_eq!(entries[0].flags, "GM");
+                assert_eq!(entries[1].name, "Bob");
+            },
+            other => panic!("evento inesperado: {other:?}"),
+        }
     }
 
     #[test]
@@ -1252,6 +1284,7 @@ mod tests {
             RozEvent::WorldPosition(position) => {
                 assert_eq!(position.id, 1);
                 assert_eq!(position.parts, "P");
+                assert_eq!(position.name_bytes, b"Nombre\xff\x80".to_vec());
                 assert_eq!(position.raw, b" 1 2 3 4 P Nombre\xff\x80".to_vec());
             },
             other => panic!("evento inesperado: {other:?}"),
@@ -1446,7 +1479,7 @@ mod tests {
         });
 
         let client = connect(addr);
-        assert_eq!(next_event(&client), RozEvent::Welcome { version: 3011 });
+        assert_eq!(next_event(&client), RozEvent::Welcome { version: 3011, id: 3011 });
         assert_eq!(next_event(&client), RozEvent::Wait);
     }
 
