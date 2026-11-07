@@ -10,6 +10,8 @@ pub mod model;
 pub mod movement;
 mod online_snapshot;
 mod team_file;
+mod team_adapter;
+mod team_codec_clean;
 mod trade;
 pub mod particle;
 pub mod pathfinding;
@@ -3370,7 +3372,13 @@ impl Game {
             mons,
             version: team_file::CURRENT_VERSION,
         };
-        let data = file.encode();
+        let data = match file.encode() {
+            Ok(data) => data,
+            Err(error) => {
+                eprintln!("[battle] equipo local rechazado: {error}");
+                return None;
+            }
+        };
         let sprite = if prota_index == 10 { char2 as i32 } else { prota_index + 1000 };
         Some(BattleTeamExport {
             data,
