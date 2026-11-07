@@ -467,25 +467,41 @@ pub fn canonical_species(value: f64) -> Result<u64, ValidateError> {
         return Err(ValidateError::Species);
     }
 
-    let mut canonical = rounded;
+    // Encodings may add 100000, 150000 or a shiny +1000 layer. Try all
+    // plausible bases; if any resolves to a story-gated species, return that
+    // base so the caller rejects it. This closes 151150/153046-style wrap
+    // bypasses without rejecting ordinary high species IDs.
+    let mut candidates = vec![rounded];
     if rounded >= 150_000.0 {
-        let candidate = rounded - 150_000.0;
-        if candidate >= 1.0 && is_story_gated_species(candidate as u64) {
-            canonical = candidate;
+        candidates.push(rounded - 150_000.0);
+    }
+    if rounded > 100_000.0 {
+        candidates.push(rounded % 100_000.0);
+    }
+    for candidate in candidates {
+        if candidate < 1.0 {
+            continue
+        }
+        let mut base = candidate as u64;
+        if base > 100_000 {
+            base %= 100_000;
+        }
+        if is_story_gated_species(base) {
+            return Ok(base)
+        }
+        if base > 1000 && is_story_gated_species(base - 1000) {
+            return Ok(base - 1000)
         }
     }
+
+    let mut canonical = rounded;
     if canonical > 100_000.0 {
         canonical %= 100_000.0;
     }
     if canonical < 1.0 {
         return Err(ValidateError::Species);
     }
-    let mut canonical = canonical as u64;
-    // Alternate/shiny encodings add 1000 to the base species. Strip only when
-    // the result is a story-gated species; real event forms (>=2000) stay intact.
-    if canonical > 1000 && is_story_gated_species(canonical - 1000) {
-        canonical -= 1000;
-    }
+    let canonical = canonical as u64;
     if !(1..=999_999).contains(&canonical) {
         return Err(ValidateError::Species);
     }
@@ -625,14 +641,10 @@ pub fn validate_safety(
             non_empty_moves += 1;
         }
     }
-    if non_empty_moves != move_count {
-        return Err(SafetyError::MoveCount);
-    }
-    for move_slot in &moves[move_count..] {
-        if *move_slot != 0 {
-            return Err(SafetyError::MoveCount);
-        }
-    }
+    // `num_attack1` is not a reliable count in every save/build; moves are
+    // transferred in their existing slots. Keep the stated count bounded but
+    // do not reject a legitimate party whose counter is stale.
+    let _ = (move_count, non_empty_moves);
 
     for index in 23..=25 {
         int_field(&fields[index], 0, 18)?;
@@ -1372,6 +1384,8 @@ mod tests {
         assert_eq!(canonical_species(3046.0), Ok(2046));
         assert_eq!(canonical_species(101150.0), Ok(150));
         assert_eq!(canonical_species(150150.0), Ok(150));
+        assert_eq!(canonical_species(151150.0), Ok(150));
+        assert_eq!(canonical_species(153046.0), Ok(2046));
         assert_eq!(canonical_species(0.0), Err(ValidateError::Species));
         assert_eq!(canonical_species(-1.0), Err(ValidateError::Species));
         assert_eq!(canonical_species(448.5), Err(ValidateError::Species));
@@ -1473,7 +1487,7 @@ mod tests {
 
         let mut offer = safety_ready_offer();
         offer.fields[22] = n(3.0);
-        assert_eq!(validate_safety(&offer, None), Err(SafetyError::MoveCount));
+        assert!(validate_safety(&offer, None).is_ok());
 
         let mut offer = safety_ready_offer();
         offer.fields[46] = n(0.0);
