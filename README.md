@@ -1,3 +1,7 @@
+# MODO DE MANTENIMIENTO
+
+Esta aplicación dejara de actualizarse de forma constante y solo lo hará para solucionar bugs concretos o específicos, la aplicación en algún punto de finales de año dejara de recibir soporte de forma completa, este no es el fin, sino el inicio de un proyecto multiplataforma para Windows, Linux, macOS, Android y iOS de nombre **Reloaded OpenGMK** de paso anuncio que el código de Pokémon Reloaded Android queda totalmente limpio de cualquier derivado de scripts GML, pronto habrá mas noticias de **Reloaded OpenGMK**
+
 # Pokémon Reloaded en Android
 
 [![Licencia GPL-2.0](https://img.shields.io/badge/Licencia-GPL--2.0-515050?style=for-the-badge&logo=gnu&logoColor=000000&labelColor=FFFFFF)](LICENSE)
