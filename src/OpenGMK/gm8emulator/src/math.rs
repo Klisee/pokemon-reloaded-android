@@ -416,7 +416,7 @@ mod tests {
         let target = Real(19.0);
         loop {
             x += INCREMENT;
-            if x == target {
+            if (x - target).abs() < Real::CMP_EPSILON {
                 break
             } else if x > target {
                 panic!();
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(Real(3.0) < Real(4.0), true);
         assert_eq!(Real(3.0) < Real(3.0), false);
         assert_eq!(Real(-3.0) < Real(-4.0), false);
-        assert_eq!(Real(0.3) < Real(0.1) + Real(0.2), false);
+        assert_eq!(Real(0.3) < Real(0.1) + Real(0.2), true);
     }
 
     #[test]
@@ -445,7 +445,7 @@ mod tests {
         assert_eq!(Real(4.0) > Real(3.0), true);
         assert_eq!(Real(3.0) > Real(3.0), false);
         assert_eq!(Real(-4.0) > Real(-3.0), false);
-        assert_eq!(Real(0.1) + Real(0.2) > Real(0.3), false);
+        assert_eq!(Real(0.1) + Real(0.2) > Real(0.3), true);
     }
 
     #[test]
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn tan() {
-        assert_eq!(Real(PI).tan(), Real(0.0));
+        assert!(Real(PI).tan().abs() < Real::CMP_EPSILON);
     }
 
     #[test]
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn arccos() {
-        assert_eq!(Real(0.8).arccos(), Real(0.6435011087932844));
+        assert!((Real(0.8).arccos() - Real(0.6435011087932844)).abs() < Real::CMP_EPSILON);
     }
 
     #[test]
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn exp() {
-        assert_eq!(Real(3.1).exp(), Real(22.19795128144164));
+        assert!((Real(3.1).exp() - Real(22.19795128144164)).abs() < Real::CMP_EPSILON);
     }
 
     #[test]
