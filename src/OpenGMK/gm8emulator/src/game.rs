@@ -4337,7 +4337,7 @@ impl Game {
                         Ok(offer) => {
                             eprintln!("[trade] oferta remota label={} fields={}", offer.label, offer.values.len());
                             if let Err(error) = trade::validate_offer(&offer) {
-                                eprintln!("[trade] oferta remota bloqueada: {error}");
+                                eprintln!("[trade] oferta remota bloqueada: {error}; campos={:?}", &offer.values[..offer.values.len().min(16)]);
                                 self.reloaded_online.send_peer_message(
                                     crate::reloaded_online::PeerMessageKind::No,
                                     &[],
