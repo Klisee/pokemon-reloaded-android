@@ -141,7 +141,7 @@ impl Value {
     /// GML-like comparison, fails if self and other are different types.
     pub fn almost_equals(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Real(a), Self::Real(b)) => *a == *b,
+            (Self::Real(a), Self::Real(b)) => (*a - *b).abs() < Real::CMP_EPSILON,
             (Self::Str(a), Self::Str(b)) => a.as_ref() == b.as_ref(),
             _ => false,
         }
@@ -581,6 +581,15 @@ mod tests {
         let c = Value::Str("Hello, ".to_string().into());
         let d = Value::Str("world!".to_string().into());
         assert!((c.add(d).unwrap()).almost_equals(&Value::Str("Hello, world!".to_string().into())));
+    }
+
+    #[test]
+    fn almost_equals_matches_near_equal_reals_for_switch() {
+        let input = Value::Real(Real::from(0.1)).add(Value::Real(Real::from(0.2))).unwrap();
+        let case = Value::Real(Real::from(0.3));
+        assert!(case.almost_equals(&input));
+        assert!(!case.almost_equals(&Value::Real(Real::from(0.3 + 1e-12))));
+        assert!(!case.almost_equals(&Value::Str("0.3".to_string().into())));
     }
 
     #[test]
