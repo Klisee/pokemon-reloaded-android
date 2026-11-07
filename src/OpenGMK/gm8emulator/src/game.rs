@@ -13,6 +13,10 @@ mod team_file;
 mod team_adapter;
 mod team_codec_clean;
 mod trade;
+#[allow(dead_code)]
+mod trade_adapter;
+#[allow(dead_code)]
+mod trade_codec;
 pub mod particle;
 pub mod pathfinding;
 pub mod platform;
@@ -4435,18 +4439,16 @@ impl Game {
                                 self.cancel_trade(&error);
                                 return
                             }
-                            let mut payload = offer.label.as_bytes().to_vec();
-                            payload.push(0x1e);
-                            match trade::encode(&offer) {
-                                Ok(packed) => {
-                                    payload.extend_from_slice(&packed);
-                                    eprintln!("[trade] oferta local slot={slot} label={} bytes={}", offer.label, packed.len());
+                            let payload = match trade::encode_message(&offer) {
+                                Ok(payload) => {
+                                    eprintln!("[trade] oferta local slot={slot} label={} bytes={}", offer.label, payload.len());
+                                    payload
                                 },
                                 Err(error) => {
                                     self.cancel_trade(&format!("No se pudo preparar la oferta: {error}"));
                                     return
                                 },
-                            }
+                            };
                             if !self.reloaded_online.send_peer_message(
                                 crate::reloaded_online::PeerMessageKind::Offer,
                                 &payload,
