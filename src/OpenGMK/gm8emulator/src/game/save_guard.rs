@@ -2,15 +2,20 @@
 
 use crate::compat::f3r;
 use reloaded_cleanroom::save::{RollbackReceipt, SaveError, SnapshotId, SnapshotRecord};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SAVE_EXTENSIONS: [&str; 3] = f3r::save::EXTENSIONS;
+const MAX_TEMP_ATTEMPTS: u32 = 10_000;
 
 static ONLINE_SAVE_GUARD: AtomicBool = AtomicBool::new(false);
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(test)]
+pub(crate) static GUARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// While an online battle is active, writes to the current save slot are
 /// redirected to `<name>.online` instead of touching the real save. The game
@@ -136,24 +141,58 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Raw atomic write used by the save adapter itself.
 pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temporary = temporary_path(path);
+    let temporary = prepare_file_atomic(path, bytes)?;
+    commit_prepared_file(&temporary, path)
+}
 
-    let result = (|| {
-        let mut file = File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
+/// Writes `bytes` to a unique temporary beside `path` and syncs it. The
+/// destination is untouched until [`commit_prepared_file`] renames it.
+pub(crate) fn prepare_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    let mut last_error = None;
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let temporary = unique_temporary_path(path);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&temporary) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue
+            },
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            file.write_all(bytes)?;
+            file.flush()?;
+            file.sync_all()
+        })();
         drop(file);
-        replace_file(&temporary, path)
-    })();
+        match result {
+            Ok(()) => return Ok(temporary),
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(error)
+            },
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::new(ErrorKind::AlreadyExists, "could not create a unique temp file")))
+}
 
-    match result {
+/// Renames a file prepared by [`prepare_file_atomic`] into place and syncs the
+/// parent directory. On failure the prepared file is removed.
+pub(crate) fn commit_prepared_file(temporary: &Path, path: &Path) -> io::Result<()> {
+    match replace_file(temporary, path) {
         Ok(()) => {
             sync_parent_dir(path);
             Ok(())
         },
         Err(error) => {
-            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(temporary);
             Err(error)
         },
     }
@@ -161,7 +200,7 @@ pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Copies `src` to `dst` atomically.
 pub(crate) fn atomic_copy(src: &Path, dst: &Path) -> io::Result<()> {
-    let temporary = temporary_path(dst);
+    let temporary = unique_temporary_path(dst);
 
     let result = (|| {
         let mut input = File::open(src)?;
@@ -200,10 +239,14 @@ fn create_unique_dir(parent: &Path, stem: &str) -> io::Result<PathBuf> {
     Err(io::Error::new(ErrorKind::AlreadyExists, "could not create a unique backup directory"))
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(f3r::save::TEMP_SUFFIX);
-    PathBuf::from(name)
+fn unique_temporary_path(path: &Path) -> PathBuf {
+    let counter = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let file_name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+    parent_dir(path).join(format!(
+        "{file_name}{}{}-{counter}",
+        f3r::save::TEMP_SUFFIX,
+        std::process::id()
+    ))
 }
 
 fn parent_dir(path: &Path) -> &Path {
@@ -304,6 +347,7 @@ mod tests {
 
     #[test]
     fn online_guard_redirects_save_writes_and_cleanup() {
+        let _guard = GUARD_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         set_online_save_guard(true);
         let savc = native_path(&slot_name(1, f3r::save::EXT_SAVC));
         let nfo = native_path(&slot_name(1, f3r::save::EXT_NFO));
@@ -333,6 +377,51 @@ mod tests {
 
         set_online_save_guard(false);
         assert_eq!(redirect_online_write(&savc), None);
+    }
+
+    #[test]
+    fn online_guard_redirects_save_mutations() {
+        let _guard = GUARD_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let temp = TestDir::new("online-mutations");
+        let partidas = temp.path().join(f3r::save::ROOT).join(f3r::save::PARTIDAS);
+        fs::create_dir_all(&partidas).expect("create partidas");
+        let live = partidas.join(slot_name(5, f3r::save::EXT_SAVC));
+        let overlay = partidas.join(format!(
+            "{}{}",
+            slot_name(5, f3r::save::EXT_SAVC),
+            f3r::save::ONLINE_SUFFIX
+        ));
+        write_fixture(&live, b"real");
+        write_fixture(&overlay, b"overlay");
+
+        set_online_save_guard(true);
+        crate::gml::file::delete(live.to_str().unwrap()).unwrap();
+        assert!(!overlay.exists());
+        assert_eq!(fs::read(&live).unwrap(), b"real");
+
+        write_fixture(&overlay, b"second");
+        let nfo = partidas.join(slot_name(5, f3r::save::EXT_NFO));
+        let nfo_overlay = partidas.join(format!(
+            "{}{}",
+            slot_name(5, f3r::save::EXT_NFO),
+            f3r::save::ONLINE_SUFFIX
+        ));
+        crate::gml::file::copy(live.to_str().unwrap(), nfo.to_str().unwrap()).unwrap();
+        assert!(!nfo.exists());
+        assert_eq!(fs::read(&nfo_overlay).unwrap(), b"second");
+
+        let data = partidas.join(slot_name(5, f3r::save::EXT_DATA));
+        let data_overlay = partidas.join(format!(
+            "{}{}",
+            slot_name(5, f3r::save::EXT_DATA),
+            f3r::save::ONLINE_SUFFIX
+        ));
+        crate::gml::file::rename(nfo.to_str().unwrap(), data.to_str().unwrap()).unwrap();
+        assert!(!nfo_overlay.exists());
+        assert!(!data.exists());
+        assert_eq!(fs::read(&data_overlay).unwrap(), b"second");
+        assert_eq!(fs::read(&live).unwrap(), b"real");
+        set_online_save_guard(false);
     }
 
     #[test]
