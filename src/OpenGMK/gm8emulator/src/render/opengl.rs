@@ -6,6 +6,8 @@ use crate::{
     },
     types::Colour,
 };
+#[cfg(target_os = "android")]
+use crate::compat::f3r;
 use ramen::{connection::Connection, window::Window};
 use rect_packer::DensePacker;
 use std::{any::Any, f64::consts::PI, ffi::{CStr, CString}, mem::{offset_of, size_of}, ptr};
@@ -1355,7 +1357,7 @@ unsafe fn create_party_texture(gl: &gl::Gl) -> GLuint {
 /// Pokémon keep the offset the game stores, which is also what picks their folder.
 #[cfg(target_os = "android")]
 unsafe fn upload_party(gl: &gl::Gl, texture: GLuint, species: [i32; crate::touch_controls::PICKER_SLOTS]) {
-    let dir = crate::android_main::storage_dir().join("game/data");
+    let dir = crate::android_main::storage_dir().join("game").join(f3r::save::ROOT);
     let cell = PARTY_CELL as usize;
     let cells = crate::touch_controls::PICKER_SLOTS;
     let stride = cell * cells;
@@ -1365,8 +1367,13 @@ unsafe fn upload_party(gl: &gl::Gl, texture: GLuint, species: [i32; crate::touch
             continue
         }
         let shiny = (1000..=2000).contains(&value) || (3000..=4000).contains(&value);
-        let folder = if shiny { "pkmn_shiny" } else { "pkmn" };
-        let Ok(image) = image::open(format!("{}/{}/{}.gif", dir.display(), folder, value)) else {
+        let folder = if shiny {
+            f3r::world::SHINY_OVERWORLD_SPRITE_DIR
+        } else {
+            f3r::world::OVERWORLD_SPRITE_DIR
+        };
+        let Ok(image) = image::open(format!("{}/{}/{}.{}", dir.display(), folder, value, f3r::world::SPRITE_EXT))
+        else {
             continue
         };
         let image = image.to_rgba8();

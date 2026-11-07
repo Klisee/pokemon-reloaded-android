@@ -6,6 +6,7 @@ use gm8exe::asset::Asset;
 
 use crate::{
     action, asset,
+    compat::f3r,
     game::{
         draw, external, gm_save::GMSave, model, particle, pathfinding, platform, replay, surface::Surface,
         transition::UserTransition, view::View, Game, GameClock, GetAsset, PlayType, SceneChange, Version,
@@ -7224,11 +7225,11 @@ impl Game {
             Some(Value::Str(text)) => text.to_string().to_ascii_lowercase(),
             _ => String::new(),
         };
-        if !filter.contains(".team") {
+        if !filter.contains(&format!(".{}", f3r::save::TEAM_EXT.to_ascii_lowercase())) {
             return Ok("".into())
         }
         let program_directory = self.program_directory.to_string();
-        let dir = std::path::Path::new(&program_directory).join("data").join("equipos");
+        let dir = std::path::Path::new(&program_directory).join(f3r::save::ROOT).join(f3r::save::TEAM_DIR);
         let mut teams: Vec<_> = std::fs::read_dir(dir)
             .ok()
             .into_iter()
@@ -7238,7 +7239,7 @@ impl Game {
             .filter(|path| {
                 path.extension()
                     .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("team"))
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case(f3r::save::TEAM_EXT))
             })
             .collect();
         teams.sort();

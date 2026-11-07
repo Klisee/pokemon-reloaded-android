@@ -5,6 +5,7 @@
 //! `.savc`, `.nfo`, and `.data` companions) to opaque save images and keeps the
 //! live files at their canonical paths.
 
+use crate::compat::f3r;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
@@ -20,9 +21,9 @@ use reloaded_cleanroom::save::{
 };
 
 pub(crate) const HOST_FORMAT: FormatId = FormatId(*b"RELOADD1");
-pub(crate) const SAVC: &str = "savc";
-pub(crate) const NFO: &str = "nfo";
-pub(crate) const DATA: &str = "data";
+pub(crate) const SAVC: &str = f3r::save::EXT_SAVC;
+pub(crate) const NFO: &str = f3r::save::EXT_NFO;
+pub(crate) const DATA: &str = f3r::save::EXT_DATA;
 
 const LIVE_PARTS: [&str; 3] = [SAVC, NFO, DATA];
 const BACKUP_DIR: &str = ".reloaded-save";
@@ -39,20 +40,24 @@ pub(crate) struct HostSavePath {
 
 fn part_name(extension: &str) -> Option<&'static str> {
     match extension {
-        "savc" => Some(SAVC),
-        "nfo" => Some(NFO),
-        "data" => Some(DATA),
+        f3r::save::EXT_SAVC => Some(SAVC),
+        f3r::save::EXT_NFO => Some(NFO),
+        f3r::save::EXT_DATA => Some(DATA),
         _ => None,
     }
 }
 
 fn part_extension(name: &str) -> Option<&'static str> {
     match name {
-        SAVC => Some("savc"),
-        NFO => Some("nfo"),
-        DATA => Some("data"),
+        SAVC => Some(f3r::save::EXT_SAVC),
+        NFO => Some(f3r::save::EXT_NFO),
+        DATA => Some(f3r::save::EXT_DATA),
         _ => None,
     }
+}
+
+fn save_root(program_dir: &Path) -> PathBuf {
+    program_dir.join(f3r::save::ROOT).join(f3r::save::PARTIDAS)
 }
 
 fn name_is(parent: &Path, expected: &str) -> bool {
@@ -65,17 +70,17 @@ pub(crate) fn parse_save_path(path: &Path) -> Option<HostSavePath> {
     let file_name = path.file_name()?.to_str()?;
     let (stem, extension) = file_name.rsplit_once('.')?;
     let part = part_name(&extension.to_ascii_lowercase())?;
-    let slot_text = stem.strip_prefix("reloaded")?;
+    let slot_text = stem.strip_prefix(f3r::save::SLOT_PREFIX)?;
     if slot_text.is_empty() || !slot_text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let slot = slot_text.parse::<u16>().ok()?;
     let partidas = path.parent()?;
-    if !name_is(partidas, "partidas") {
+    if !name_is(partidas, f3r::save::PARTIDAS) {
         return None;
     }
     let data = partidas.parent()?;
-    if !name_is(data, "data") {
+    if !name_is(data, f3r::save::ROOT) {
         return None;
     }
     let program_dir = data.parent()?.to_path_buf();
@@ -112,10 +117,10 @@ fn clean_save_temps(root: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("reloaded") {
+        if !name.starts_with(f3r::save::SLOT_PREFIX) {
             continue
         }
-        let Some((_, suffix)) = name.split_once(".tmp") else { continue };
+        let Some((_, suffix)) = name.split_once(f3r::save::TEMP_SUFFIX) else { continue };
         if !suffix.is_empty() && !suffix.starts_with('-') {
             continue
         }
@@ -204,7 +209,7 @@ impl HostSaveBackend {
 
     pub(crate) fn live_path(&self, slot: SaveSlot, part: &str) -> Option<PathBuf> {
         let extension = part_extension(part)?;
-        Some(self.root.join(format!("reloaded{}.{}", slot.0, extension)))
+        Some(self.root.join(f3r::save::slot_file_name(i32::from(slot.0), extension)))
     }
 
     fn revision(&self, slot: SaveSlot) -> Revision {
@@ -355,14 +360,14 @@ impl SaveJournal {
     fn apply(&self, root: &Path) -> Result<(), SaveError> {
         for (part, temporary) in &self.writes {
             let extension = part_extension(part).ok_or_else(|| SaveError::rejected("unknown save part"))?;
-            let destination = root.join(format!("reloaded{}.{}", self.slot, extension));
+            let destination = root.join(f3r::save::slot_file_name(i32::from(self.slot), extension));
             if fs::symlink_metadata(temporary).is_ok() {
                 super::save_guard::commit_prepared_file(temporary, &destination)?;
             }
         }
         for part in &self.removes {
             let extension = part_extension(part).ok_or_else(|| SaveError::rejected("unknown save part"))?;
-            let destination = root.join(format!("reloaded{}.{}", self.slot, extension));
+            let destination = root.join(f3r::save::slot_file_name(i32::from(self.slot), extension));
             match fs::remove_file(&destination) {
                 Ok(()) => super::save_guard::sync_parent_dir(&destination),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {},
@@ -394,8 +399,8 @@ fn valid_journal_name(name: &str) -> bool {
         && name != ".."
         && !name.contains('/')
         && !name.contains('\\')
-        && name.starts_with("reloaded")
-        && name.contains(".tmp")
+        && name.starts_with(f3r::save::SLOT_PREFIX)
+        && name.contains(f3r::save::TEMP_SUFFIX)
 }
 
 fn parse_journal(root: &Path, path: &Path, text: &str) -> Option<SaveJournal> {
@@ -663,7 +668,7 @@ pub(crate) struct HostSaveService {
 
 impl HostSaveService {
     fn open_with_config(program_dir: &Path, config: SaveHookConfig) -> Result<Self, SaveError> {
-        let root = program_dir.join("data").join("partidas");
+        let root = save_root(program_dir);
         let backend = Arc::new(HostSaveBackend::open(&root)?);
         let hooks = SaveHooks::new(backend.clone(), config);
         Ok(HostSaveService { backend, hooks, save_lock: Mutex::new(()) })
@@ -910,7 +915,7 @@ fn finish_save(path: &Path, bytes: &[u8], result: Result<(), SaveError>) -> io::
 
 fn save_part_checked(path: &Path, bytes: &[u8]) -> Option<Result<(), SaveError>> {
     let parsed = parse_save_path(path)?;
-    if !parsed.program_dir.join("data").join("partidas").is_dir() {
+    if !save_root(&parsed.program_dir).is_dir() {
         return None
     }
     Some(
@@ -1044,7 +1049,7 @@ pub(crate) fn save_part_atomic(path: &Path, bytes: &[u8]) -> Option<io::Result<(
 }
 
 fn service_for_parsed(parsed: &HostSavePath) -> Option<Arc<HostSaveService>> {
-    if !parsed.program_dir.join("data").join("partidas").is_dir() {
+    if !save_root(&parsed.program_dir).is_dir() {
         return None
     }
     service_for(&parsed.program_dir).ok()
@@ -1230,7 +1235,7 @@ mod tests {
                 stamp,
                 NEXT.fetch_add(1, Ordering::SeqCst)
             ));
-            fs::create_dir_all(path.join("data").join("partidas")).unwrap();
+            fs::create_dir_all(save_root(&path)).unwrap();
             TempDir(path)
         }
 
@@ -1254,7 +1259,7 @@ mod tests {
     }
 
     fn live(dir: &TempDir, slot: u16, extension: &str) -> PathBuf {
-        dir.path().join("data").join("partidas").join(format!("reloaded{slot}.{extension}"))
+        save_root(dir.path()).join(f3r::save::slot_file_name(i32::from(slot), extension))
     }
 
     #[test]
@@ -1263,7 +1268,7 @@ mod tests {
         let service = service(&dir);
         let slot = SaveSlot(4);
         let first = service.save_part(slot, SAVC, b"first", SaveTrigger::Manual).unwrap();
-        assert_eq!(fs::read(live(&dir, 4, "savc")).unwrap(), b"first");
+        assert_eq!(fs::read(live(&dir, 4, f3r::save::EXT_SAVC)).unwrap(), b"first");
 
         let first_revision = first.commit.expect("commit").current;
         let mut target = None;
@@ -1276,11 +1281,11 @@ mod tests {
         let target = target.expect("snapshot of the first save");
 
         service.save_part(slot, SAVC, b"second", SaveTrigger::Manual).unwrap();
-        assert_eq!(fs::read(live(&dir, 4, "savc")).unwrap(), b"second");
+        assert_eq!(fs::read(live(&dir, 4, f3r::save::EXT_SAVC)).unwrap(), b"second");
 
         let receipt = service.rollback(slot, target, first_revision + 1, "host test").unwrap();
         assert_eq!(receipt.previous, first_revision + 1);
-        assert_eq!(fs::read(live(&dir, 4, "savc")).unwrap(), b"first");
+        assert_eq!(fs::read(live(&dir, 4, f3r::save::EXT_SAVC)).unwrap(), b"first");
     }
 
     #[test]
@@ -1306,9 +1311,9 @@ mod tests {
         service.save_part(slot, DATA, b"data-two", SaveTrigger::Manual).unwrap();
 
         service.rollback(slot, target.id, revision + 3, "companions").unwrap();
-        assert_eq!(fs::read(live(&dir, 2, "savc")).unwrap(), b"savc-one");
-        assert_eq!(fs::read(live(&dir, 2, "nfo")).unwrap(), b"nfo-one");
-        assert_eq!(fs::read(live(&dir, 2, "data")).unwrap(), b"data-one");
+        assert_eq!(fs::read(live(&dir, 2, f3r::save::EXT_SAVC)).unwrap(), b"savc-one");
+        assert_eq!(fs::read(live(&dir, 2, f3r::save::EXT_NFO)).unwrap(), b"nfo-one");
+        assert_eq!(fs::read(live(&dir, 2, f3r::save::EXT_DATA)).unwrap(), b"data-one");
     }
 
     #[test]
@@ -1318,37 +1323,47 @@ mod tests {
         service.save_part(SaveSlot(1), SAVC, b"payload", SaveTrigger::Manual).unwrap();
         let snapshots = service.snapshots(SaveSlot(1)).unwrap();
         assert!(!snapshots.is_empty());
-        let root = dir.path().join("data").join("partidas");
+        let root = save_root(dir.path());
         assert!(root.join(BACKUP_DIR).join("backups").exists());
-        assert!(!live(&dir, 1, "savc").starts_with(root.join(BACKUP_DIR)));
+        assert!(!live(&dir, 1, f3r::save::EXT_SAVC).starts_with(root.join(BACKUP_DIR)));
     }
 
     #[test]
     fn save_path_parser_accepts_only_live_slot_parts() {
         let dir = TempDir::new();
-        let parsed = parse_save_path(&live(&dir, 7, "savc")).expect("savc path");
+        let parsed = parse_save_path(&live(&dir, 7, f3r::save::EXT_SAVC)).expect("savc path");
         assert_eq!(parsed.slot, SaveSlot(7));
         assert_eq!(parsed.part, SAVC);
-        assert!(parse_save_path(&live(&dir, 7, "savc.online")).is_none());
+        let online = PathBuf::from(format!(
+            "{}{}",
+            live(&dir, 7, f3r::save::EXT_SAVC).display(),
+            f3r::save::ONLINE_SUFFIX
+        ));
+        assert!(parse_save_path(&online).is_none());
         assert!(parse_save_path(&live(&dir, 7, "txt")).is_none());
-        assert!(parse_save_path(&dir.path().join("reloaded7.savc")).is_none());
-        assert!(parse_save_path(&dir.path().join("data").join("partidas").join("other7.savc")).is_none());
+        assert!(parse_save_path(&dir.path().join(f3r::save::slot_file_name(7, f3r::save::EXT_SAVC))).is_none());
+        assert!(parse_save_path(&save_root(dir.path()).join(format!("other7.{}", f3r::save::EXT_SAVC))).is_none());
     }
 
     #[test]
     fn save_guard_atomic_write_keeps_the_canonical_bytes() {
         let dir = TempDir::new();
-        let path = live(&dir, 3, "savc");
+        let path = live(&dir, 3, f3r::save::EXT_SAVC);
         super::super::save_guard::atomic_write(&path, b"one").unwrap();
         super::super::save_guard::atomic_write(&path, b"two").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"two");
-        assert!(!dir.path().join("data").join("partidas").join("reloaded3.savc.tmp").exists());
+        let temp = save_root(dir.path()).join(format!(
+            "{}{}",
+            f3r::save::slot_file_name(3, f3r::save::EXT_SAVC),
+            f3r::save::TEMP_SUFFIX
+        ));
+        assert!(!temp.exists());
     }
 
     #[test]
     fn save_online_baseline_is_captured_without_touching_the_slot() {
         let dir = TempDir::new();
-        let path = live(&dir, 5, "savc");
+        let path = live(&dir, 5, f3r::save::EXT_SAVC);
         fs::write(&path, b"before-online").unwrap();
         let snapshot = begin_online_session(dir.path(), 5).unwrap().expect("baseline snapshot");
         assert_eq!(fs::read(&path).unwrap(), b"before-online");
@@ -1370,14 +1385,14 @@ mod tests {
             .expect("baseline");
         let receipt = service.rollback(slot, baseline.id, 1, "empty baseline").unwrap();
         assert_eq!(receipt.previous, 1);
-        assert!(!live(&dir, 6, "savc").exists());
+        assert!(!live(&dir, 6, f3r::save::EXT_SAVC).exists());
     }
 
     #[test]
     fn staged_text_write_commits_through_the_hooks() {
         let dir = TempDir::new();
         let service = service(&dir);
-        let path = live(&dir, 9, "nfo");
+        let path = live(&dir, 9, f3r::save::EXT_NFO);
         let mut handle =
             crate::gml::file::TextHandle::open(path.to_str().unwrap(), crate::gml::file::AccessMode::Write)
                 .unwrap();
@@ -1395,7 +1410,7 @@ mod tests {
     #[test]
     fn staged_text_append_keeps_the_existing_prefix_until_flush() {
         let dir = TempDir::new();
-        let path = live(&dir, 10, "nfo");
+        let path = live(&dir, 10, f3r::save::EXT_NFO);
         fs::write(&path, b"old").unwrap();
         let mut handle =
             crate::gml::file::TextHandle::open(path.to_str().unwrap(), crate::gml::file::AccessMode::Special)
@@ -1411,7 +1426,7 @@ mod tests {
     #[test]
     fn staged_binary_read_write_preserves_untouched_bytes() {
         let dir = TempDir::new();
-        let path = live(&dir, 11, "data");
+        let path = live(&dir, 11, f3r::save::EXT_DATA);
         fs::write(&path, b"abc").unwrap();
         let mut handle =
             crate::gml::file::BinaryHandle::open(path.to_str().unwrap(), crate::gml::file::AccessMode::Special)
@@ -1430,7 +1445,7 @@ mod tests {
         let dir = TempDir::new();
         let service = service(&dir);
         service.save_part(SaveSlot(12), SAVC, b"payload", SaveTrigger::Manual).unwrap();
-        let path = live(&dir, 12, "savc");
+        let path = live(&dir, 12, f3r::save::EXT_SAVC);
         let loaded = load_part_atomic(&path, SAVC).unwrap().unwrap().unwrap();
         assert_eq!(&loaded[..], b"payload");
         assert!(load_part_atomic(&path, NFO).is_none());
@@ -1448,7 +1463,7 @@ mod tests {
         let receipt =
             rollback_slot(dir.path(), 13, record.snapshot.id, "failed save").unwrap().expect("rollback");
         assert_eq!(receipt.previous, record.snapshot.revision + 1);
-        assert_eq!(fs::read(live(&dir, 13, "savc")).unwrap(), b"one");
+        assert_eq!(fs::read(live(&dir, 13, f3r::save::EXT_SAVC)).unwrap(), b"one");
     }
 
     #[test]
@@ -1461,7 +1476,7 @@ mod tests {
     #[test]
     fn revisions_survive_restart_and_sidecar_loss() {
         let dir = TempDir::new();
-        let root = dir.path().join("data").join("partidas");
+        let root = save_root(dir.path());
         let slot = SaveSlot(15);
         {
             let first_service = service(&dir);
@@ -1483,7 +1498,7 @@ mod tests {
         assert_eq!(image.revision, 2);
         let third = recovered.save_part(slot, SAVC, b"three", SaveTrigger::Manual).unwrap();
         assert_eq!(third.commit.expect("third commit").current, 3);
-        assert_eq!(fs::read(live(&dir, 15, "savc")).unwrap(), b"three");
+        assert_eq!(fs::read(live(&dir, 15, f3r::save::EXT_SAVC)).unwrap(), b"three");
         drop(recovered);
 
         fs::write(root.join(BACKUP_DIR).join("revisions"), b"15 1\n").unwrap();
@@ -1500,11 +1515,11 @@ mod tests {
         fs::create_dir_all(nested.join("inner")).unwrap();
         fs::write(nested.join("inner").join("partial"), b"x").unwrap();
         fs::write(staging.join(".tmp-part-file"), b"y").unwrap();
-        let stale = dir
-            .path()
-            .join("data")
-            .join("partidas")
-            .join("reloaded14.savc.tmp-999-1");
+        let stale = save_root(dir.path()).join(format!(
+            "{}{}-999-1",
+            f3r::save::slot_file_name(14, f3r::save::EXT_SAVC),
+            f3r::save::TEMP_SUFFIX
+        ));
         fs::write(&stale, b"z").unwrap();
         drop(first_service);
 
@@ -1518,7 +1533,7 @@ mod tests {
     #[test]
     fn interrupted_multi_part_commit_is_completed_on_reopen() {
         let dir = TempDir::new();
-        let root = dir.path().join("data").join("partidas");
+        let root = save_root(dir.path());
         let backend = HostSaveBackend::open(&root).unwrap();
         let slot = SaveSlot(16);
         let world = backend.world();
@@ -1553,15 +1568,15 @@ mod tests {
         assert_eq!(&image.parts[SAVC][..], b"new-savc");
         assert_eq!(&image.parts[NFO][..], b"new-nfo");
         assert!(!image.parts.contains_key(DATA));
-        assert_eq!(fs::read(live(&dir, 16, "savc")).unwrap(), b"new-savc");
-        assert!(!live(&dir, 16, "data").exists());
+        assert_eq!(fs::read(live(&dir, 16, f3r::save::EXT_SAVC)).unwrap(), b"new-savc");
+        assert!(!live(&dir, 16, f3r::save::EXT_DATA).exists());
         assert!(!journal_path(&root, 16).exists());
     }
 
     #[test]
     fn backup_failure_falls_back_to_a_direct_write() {
         let dir = TempDir::new();
-        let path = live(&dir, 17, "savc");
+        let path = live(&dir, 17, f3r::save::EXT_SAVC);
         let service = HostSaveService::open_with_config(
             dir.path(),
             SaveHookConfig { max_total_backup_bytes: 1, min_free_bytes: 0, ..SaveHookConfig::default() },
@@ -1592,9 +1607,9 @@ mod tests {
         service.save_part(slot, NFO, b"nfo", SaveTrigger::Manual).unwrap();
         let before = service.load(slot).unwrap().expect("slot").revision;
 
-        let savc = live(&dir, 18, "savc");
-        let nfo = live(&dir, 18, "nfo");
-        let data = live(&dir, 18, "data");
+        let savc = live(&dir, 18, f3r::save::EXT_SAVC);
+        let nfo = live(&dir, 18, f3r::save::EXT_NFO);
+        let data = live(&dir, 18, f3r::save::EXT_DATA);
         crate::gml::file::copy(savc.to_str().unwrap(), nfo.to_str().unwrap()).unwrap();
         assert_eq!(fs::read(&nfo).unwrap(), b"savc");
         let after_copy = service.load(slot).unwrap().expect("slot");
@@ -1632,12 +1647,13 @@ mod tests {
         service.save_part(slot, NFO, b"nfo", SaveTrigger::Manual).unwrap();
         let before = service.load(slot).unwrap().expect("slot").revision;
 
-        let savc = live(&dir, 20, "savc");
-        let backup = dir
-            .path()
-            .join("data")
-            .join("partidas")
-            .join("reloaded20_bk.savc");
+        let savc = live(&dir, 20, f3r::save::EXT_SAVC);
+        let backup = save_root(dir.path()).join(format!(
+            "{}{}_bk.{}",
+            f3r::save::SLOT_PREFIX,
+            20,
+            f3r::save::EXT_SAVC
+        ));
         crate::gml::file::rename(savc.to_str().unwrap(), backup.to_str().unwrap()).unwrap();
         assert!(!savc.exists());
         assert_eq!(fs::read(&backup).unwrap(), b"slot-bytes");
@@ -1660,7 +1676,7 @@ mod tests {
         let slot = SaveSlot(19);
         let source = dir.path().join("incoming.bin");
         fs::write(&source, b"incoming").unwrap();
-        let target = live(&dir, 19, "savc");
+        let target = live(&dir, 19, f3r::save::EXT_SAVC);
         crate::gml::file::copy(source.to_str().unwrap(), target.to_str().unwrap()).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"incoming");
         let image = service.load(slot).unwrap().expect("slot");
