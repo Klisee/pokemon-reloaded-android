@@ -2099,6 +2099,66 @@ mod team_payload_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    struct MockWorldTransport {
+        lines: Option<mpsc::Sender<Vec<u8>>>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockWorldTransport {
+        fn send(&self, bytes: &[u8]) {
+            self.lines
+                .as_ref()
+                .expect("mock transport is open")
+                .send(bytes.to_vec())
+                .expect("mock transport line");
+        }
+    }
+
+    impl Drop for MockWorldTransport {
+        fn drop(&mut self) {
+            self.lines.take();
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn mock_world_transport() -> (ReloadedOnline, MockWorldTransport) {
+        use std::io::Write as _;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind mock world transport");
+        let addr = listener.local_addr().expect("mock world transport address");
+        let (lines, lines_rx) = mpsc::channel::<Vec<u8>>();
+        let thread = thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else { return };
+            while let Ok(bytes) = lines_rx.recv() {
+                if stream.write_all(&bytes).and_then(|_| stream.flush()).is_err() {
+                    break
+                }
+            }
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+        let client = RozClient::connect_with_timeout(&addr.to_string(), Duration::from_secs(2))
+            .expect("connect mock world transport");
+        let mut online = ReloadedOnline::default();
+        online.connection = Some(Connection::Ready(Backend::Zibelan(client)));
+        online.connection_mode = Some(OnlineMode::ZibelanWorld);
+        (online, MockWorldTransport { lines: Some(lines), thread: Some(thread) })
+    }
+
+    fn pump_world(online: &mut ReloadedOnline, mut done: impl FnMut(&ReloadedOnline) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            online.poll_events();
+            if done(online) {
+                return
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for mock world transport");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     fn apply_line(online: &mut ReloadedOnline, line: &str) -> world::WpMessage {
         let message = world::parse_wp(line.as_bytes()).expect("valid WP");
@@ -2134,6 +2194,38 @@ mod tests {
                 path.file_name().unwrap().to_string_lossy().into_owned()
             },
             other => panic!("expected file plan, got {other:?}"),
+        }
+    }
+
+    fn test_assets_with_one_sprite() -> Assets {
+        Assets {
+            backgrounds: Vec::new(),
+            fonts: Vec::new(),
+            objects: Vec::new(),
+            paths: Vec::new(),
+            rooms: Vec::new(),
+            scripts: Vec::new(),
+            sounds: Vec::new(),
+            sprites: vec![Some(Box::new(asset::Sprite {
+                name: "test".into(),
+                frames: vec![asset::sprite::Frame {
+                    width: 1,
+                    height: 1,
+                    atlas_ref: crate::render::atlas::AtlasRef(0),
+                }],
+                colliders: Vec::new(),
+                width: 1,
+                height: 1,
+                origin_x: 0,
+                origin_y: 0,
+                per_frame_colliders: false,
+                bbox_left: 0,
+                bbox_right: 1,
+                bbox_top: 0,
+                bbox_bottom: 1,
+            }))],
+            timelines: Vec::new(),
+            triggers: Vec::new(),
         }
     }
 
@@ -2430,5 +2522,199 @@ mod tests {
         assert_eq!(queued.len(), 64);
         assert_eq!(queued.first().unwrap(), b"offer-2");
         assert_eq!(queued.last().unwrap(), b"offer-65");
+    }
+
+    #[test]
+    fn mock_transport_applies_wp_and_wdel_to_cleanroom_state() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WP 7 2 100.5 -200.25 S,25,2,0,-10,1,-1 Ada\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&7));
+
+        let remote = online.remotes.get(&7).expect("remote projected");
+        assert_eq!(remote.name, "Ada");
+        assert_eq!(remote.room, 2);
+        assert_eq!((remote.x, remote.y), (100.5, -200.25));
+        assert_eq!((remote.sprite, remote.frame), (25, 2));
+        assert_eq!(remote.parts.len(), 1);
+        let state = online.world.get(7).expect("cleanroom remote");
+        assert_eq!(state.room, 2);
+        assert_eq!(state.name, b"Ada");
+
+        transport.send(b"WDEL 7\r\n");
+        pump_world(&mut online, |online| {
+            !online.remotes.contains_key(&7) && online.world.get(7).is_none()
+        });
+    }
+
+    #[test]
+    fn mock_transport_wpos_echo_does_not_touch_remote_state() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WP 7 2 10 20 S,25,2,0,0,1,1 Ada\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&7));
+
+        transport.send(b"WPOS 3 999 999 S,30,5,1,2,3,2\n");
+        transport.send(b"WP 8 2 30 40 S,26,1,0,0,1,1 Bob\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&8));
+
+        assert_eq!(online.remotes.len(), 2);
+        let remote = online.remotes.get(&7).expect("remote untouched");
+        assert_eq!((remote.x, remote.y, remote.sprite), (10.0, 20.0, 25));
+        assert!(!online.remotes.values().any(|remote| remote.room == 3));
+        assert!(online.world.get(8).is_some());
+    }
+
+    #[test]
+    fn mock_transport_wlist_updates_display_and_ignores_malformed() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WLIST 2\x1dAda\x1eRoute 1\x1eGM\x1dBob\x1eRoute 2\n");
+        pump_world(&mut online, |online| online.world_list.len() == 2);
+        assert_eq!(online.world_list, ["Ada - Route 1 (GM)", "Bob - Route 2"]);
+        let previous = online.world_list.clone();
+
+        transport.send(b"WLIST 1\x00\n");
+        transport.send(b"WP 9 2 1 2 S,1,0,0,0,1,1 sentinel\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&9));
+        assert_eq!(online.world_list, previous);
+    }
+
+    #[test]
+    fn mock_transport_self_updates_are_suppressed_after_wok() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WOK 42\n");
+        pump_world(&mut online, |online| {
+            online.local_id() == Some(42) && online.world.local_id() == Some(42)
+        });
+
+        transport.send(b"WP 42 2 100 200 S,25,0,0,0,1,1 Self\n");
+        transport.send(b"WP 100 2 100 200 S,26,0,0,0,1,1 Other\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&100));
+
+        assert!(!online.remotes.contains_key(&42));
+        assert!(online.world.get(42).is_none());
+        assert_eq!(online.remotes.len(), 1);
+    }
+
+    #[test]
+    fn mock_transport_room_filter_selects_host_draw_candidates() {
+        let (mut online, transport) = mock_world_transport();
+        for line in [
+            b"WP 1 2 10 20 S,25,0,0,0,1,1 A\n".as_slice(),
+            b"WP 2 3 10 20 S,26,0,0,0,1,1 B\n",
+            b"WP 3 2 -500 20 S,27,0,0,0,1,1 C\n",
+            b"WP 4 2 10 20 - D\n",
+            b"WP 5 2 10 20 P,25,4,3,8,12,1,1 E\n",
+        ] {
+            transport.send(line);
+        }
+        pump_world(&mut online, |online| online.remotes.len() == 5);
+
+        let mut room_two: Vec<u64> =
+            online.part_candidates(2, None).into_iter().map(|(id, _, _)| id).collect();
+        room_two.sort_unstable();
+        assert_eq!(room_two, [1, 5]);
+        let mut room_three: Vec<u64> =
+            online.part_candidates(3, None).into_iter().map(|(id, _, _)| id).collect();
+        room_three.sort_unstable();
+        assert_eq!(room_three, [2]);
+        assert!(online.part_candidates(9, None).is_empty());
+        assert!(!online.remotes.get(&3).expect("hidden retained").visible);
+        assert!(!online.remotes.get(&4).expect("token hidden retained").visible);
+    }
+
+    #[test]
+    fn mock_transport_overlays_filter_room_and_hidden_remotes() {
+        let (mut online, transport) = mock_world_transport();
+        for line in [
+            b"WP 1 2 10 20 S,0,0,0,0,1,1 Visible\n".as_slice(),
+            b"WP 2 3 10 20 S,0,0,0,0,1,1 Other\n",
+            b"WP 3 2 -500 20 S,0,0,0,0,1,1 Hidden\n",
+            b"WP 4 2 10 20 - NoToken\n",
+        ] {
+            transport.send(line);
+        }
+        pump_world(&mut online, |online| online.remotes.len() == 4);
+
+        let assets = test_assets_with_one_sprite();
+        let overlays = online.remote_overlays(2, &assets);
+        assert_eq!(overlays.len(), 1);
+        assert_eq!(overlays[0].name, "Visible");
+        let other = online.remote_overlays(3, &assets);
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].name, "Other");
+        assert!(online.remote_overlays(9, &assets).is_empty());
+    }
+
+    #[test]
+    fn mock_transport_hidden_remote_is_retained_until_delete() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WP 7 2 100 200 S,25,0,0,0,1,1 Ada\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&7));
+
+        transport.send(b"WP 7 2 -500 200 S,25,0,0,0,1,1 Ada\n");
+        pump_world(&mut online, |online| {
+            online.remotes.get(&7).map(|remote| !remote.visible).unwrap_or(false)
+        });
+        assert_eq!(online.world.get(7).expect("hidden record").x, -500.0);
+
+        transport.send(b"WP 7 2 -499.5 200 S,25,0,0,0,1,1 Ada\n");
+        pump_world(&mut online, |online| {
+            online.remotes.get(&7).map(|remote| remote.visible).unwrap_or(false)
+        });
+
+        transport.send(b"WDEL 7\n");
+        pump_world(&mut online, |online| {
+            !online.remotes.contains_key(&7) && online.world.get(7).is_none()
+        });
+    }
+
+    #[test]
+    fn mock_transport_malformed_lines_leave_previous_state_intact() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WP 7 2 100 200 S,25,0,0,0,1,1 Ada\n");
+        transport.send(b"WLIST 1\x1dAda\x1eRoute 1\x1eGM\n");
+        pump_world(&mut online, |online| {
+            online.remotes.contains_key(&7) && online.world_list.len() == 1
+        });
+        let before_state = online.world.get(7).cloned().expect("cleanroom remote");
+        let before_list = online.world_list.clone();
+
+        for line in [
+            b"WP 7 2 nope 200 S,25,0,0,0,1,1 Ada\n".as_slice(),
+            b"WDEL 7 extra\n",
+            b"WPOS 2 1 2 S,1,0,0,0,1,1 extra\n",
+            b"WLIST 1\x00\n",
+        ] {
+            transport.send(line);
+        }
+        transport.send(b"WP 9 2 1 2 S,1,0,0,0,1,1 sentinel\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&9));
+
+        let remote = online.remotes.get(&7).expect("previous remote kept");
+        assert_eq!((remote.x, remote.y, remote.sprite), (100.0, 200.0, 25));
+        assert_eq!(online.world.get(7), Some(&before_state));
+        assert_eq!(online.world_list, before_list);
+        assert_eq!(online.remotes.len(), 2);
+    }
+
+    #[test]
+    fn mock_transport_pokemon_part_uses_cleanroom_sprite_mapping() {
+        let root = temp_root("transport_sprite");
+        touch(&root, &["P700_1", "P700_4", "P25_1", "P25_4"]);
+        let (mut online, transport) = mock_world_transport();
+        online.program_directory = root.clone();
+
+        transport.send(b"WP 1 2 100 200 P,493,4,3,8,12,1,1 Ada\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&1));
+
+        let part = &online.remotes.get(&1).expect("remote projected").parts[0];
+        assert_eq!(part.kind, RemotePartKind::Pokemon { pkmn: 493, mira: 4 });
+        assert_eq!(plan_file(online.pokemon_sprite_plan(493, 4)), "P700_4.gmspr");
+        assert_eq!(plan_file(online.pokemon_sprite_plan(25, 4)), "P25_4.gmspr");
+        assert!(matches!(
+            online.pokemon_sprite_plan(25, 5),
+            PokemonSpritePlan::Placeholder { sprite: 8, .. }
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
