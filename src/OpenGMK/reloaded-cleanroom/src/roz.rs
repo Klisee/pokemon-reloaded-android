@@ -1,7 +1,8 @@
 //! Clean-room codec for the ROZ/Zibelan line protocol.
 //!
 //! This module implements only the wire behaviour described in
-//! `cleanroom/spec/roz-protocol.md`: LF framing, the client handshake and
+//! `cleanroom/spec/roz-protocol.md` and the Zibelan/ROZ section of
+//! `cleanroom/spec/compatibility.md`: LF framing, the client handshake and
 //! commands, typed server commands, the state blob, hex `MSG` framing, and the
 //! `MSG` payload subcommands. It has no socket, thread, emulator, or game-asset
 //! dependency.
@@ -160,9 +161,11 @@ pub struct StateBlob {
 /// One semicolon-separated segment of a [`StateBlob`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateSegment {
-    /// `S`, the main state segment; at least six numeric fields.
+    /// `S`, the main state segment; at least six numeric fields, the last
+    /// four of which are real-valued.
     Main { fields: Vec<Vec<u8>> },
-    /// `P`, the additional state segment; at least seven numeric fields.
+    /// `P`, the additional state segment; at least seven numeric fields, the
+    /// last four of which are real-valued.
     Pokemon { fields: Vec<Vec<u8>> },
     /// `B`, a marker without fields.
     Battle,
@@ -176,6 +179,11 @@ impl StateBlob {
     /// The `-` no-state placeholder.
     pub fn none() -> Self {
         Self { raw: b"-".to_vec(), segments: vec![StateSegment::None] }
+    }
+
+    /// An absent state token, used when `WPOS` carries no parts field.
+    pub fn empty() -> Self {
+        Self { raw: Vec::new(), segments: Vec::new() }
     }
 
     /// Parse and validate a state token without normalising it.
@@ -211,8 +219,16 @@ impl StateBlob {
                     if fields.len() < required {
                         return Err(ProtocolError::MalformedState);
                     }
-                    for field in &fields[..required] {
+                    // `S` is sprite, frame, dx, dy, xscale, yscale; `P` is
+                    // species, direction, frame, dx, dy, xscale, yscale. Only
+                    // the leading identity/frame fields are integers: the
+                    // position and scale fields are real-valued.
+                    let integer_fields = if tag == b'S' { 2 } else { 3 };
+                    for field in &fields[..integer_fields] {
                         parse_i64(field)?;
+                    }
+                    for field in &fields[integer_fields..required] {
+                        parse_real(field)?;
                     }
                     if tag == b'S' {
                         segments.push(StateSegment::Main { fields });
@@ -247,6 +263,10 @@ impl StateBlob {
     pub fn is_none(&self) -> bool {
         self.raw == b"-"
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
 }
 
 /// The payload of a client `WPOS` line.
@@ -273,6 +293,8 @@ pub struct PeerPosition {
 /// Commands a client may write.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientCommand {
+    /// `HELLO <name>`
+    Hello { name: Vec<u8> },
     /// `WJOIN <name>`
     Join { name: Vec<u8> },
     /// `WVER <version>`
@@ -291,6 +313,12 @@ pub enum ClientCommand {
     Cancel { id: Option<u64> },
     /// `WSAY <text>`
     Say { text: Vec<u8> },
+    /// `WLIST`
+    WorldList,
+    /// `IN <epoch> <frame> <mask>`
+    Input { epoch: i32, frame: i32, mask: i32 },
+    /// `SUM <epoch> <frame> <checksum>`
+    Checksum { epoch: i32, frame: i32, checksum: i64 },
     /// `WEND`
     End,
     /// `BYE`
@@ -304,6 +332,11 @@ impl ClientCommand {
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
         let mut line = Vec::new();
         match self {
+            Self::Hello { name } => {
+                check_text(name)?;
+                line.extend_from_slice(b"HELLO ");
+                line.extend_from_slice(name);
+            },
             Self::Join { name } => {
                 check_text(name)?;
                 line.extend_from_slice(b"WJOIN ");
@@ -325,8 +358,10 @@ impl ClientCommand {
                 push_i32(&mut line, position.x);
                 line.push(b' ');
                 push_i32(&mut line, position.y);
-                line.push(b' ');
-                line.extend_from_slice(position.state.as_bytes());
+                if !position.state.is_empty() {
+                    line.push(b' ');
+                    line.extend_from_slice(position.state.as_bytes());
+                }
             },
             Self::Request { target, kind, info } => {
                 check_token(kind)?;
@@ -355,6 +390,23 @@ impl ClientCommand {
                 check_text(text)?;
                 line.extend_from_slice(b"WSAY ");
                 line.extend_from_slice(text);
+            },
+            Self::WorldList => line.extend_from_slice(b"WLIST"),
+            Self::Input { epoch, frame, mask } => {
+                line.extend_from_slice(b"IN ");
+                push_i32(&mut line, *epoch);
+                line.push(b' ');
+                push_i32(&mut line, *frame);
+                line.push(b' ');
+                push_i32(&mut line, *mask);
+            },
+            Self::Checksum { epoch, frame, checksum } => {
+                line.extend_from_slice(b"SUM ");
+                push_i32(&mut line, *epoch);
+                line.push(b' ');
+                push_i32(&mut line, *frame);
+                line.push(b' ');
+                line.extend_from_slice(checksum.to_string().as_bytes());
             },
             Self::End => line.extend_from_slice(b"WEND"),
             Self::Bye => line.extend_from_slice(b"BYE"),
@@ -406,6 +458,10 @@ pub enum ServerEvent {
     Answer { id: u64, answer: i32 },
     /// Relayed `WCANCEL` or `WCANCEL <id>`.
     Cancel { id: Option<u64> },
+    /// `IN <epoch> <frame> <mask>`.
+    Input { epoch: i32, frame: i32, mask: i32 },
+    /// `SUM <epoch> <frame> <checksum>`.
+    Checksum { epoch: i32, frame: i32, checksum: i64 },
     /// `MSG <hex>`; the decoded bytes are returned uninterpreted.
     Message { payload: Vec<u8> },
 }
@@ -493,6 +549,22 @@ pub fn parse_server_line(line: &[u8]) -> Result<Option<ServerEvent>, ProtocolErr
             None => ServerEvent::Cancel { id: None },
             Some(rest) if rest.is_empty() => ServerEvent::Cancel { id: None },
             Some(rest) => ServerEvent::Cancel { id: Some(parse_u64(exact_fields(rest, 1)?[0])?) },
+        },
+        b"IN" => {
+            let fields = exact_fields(required_args(args)?, 3)?;
+            ServerEvent::Input {
+                epoch: parse_i32(fields[0])?,
+                frame: parse_i32(fields[1])?,
+                mask: parse_i32(fields[2])?,
+            }
+        },
+        b"SUM" => {
+            let fields = exact_fields(required_args(args)?, 3)?;
+            ServerEvent::Checksum {
+                epoch: parse_i32(fields[0])?,
+                frame: parse_i32(fields[1])?,
+                checksum: parse_i64(fields[2])?,
+            }
         },
         b"MSG" => ServerEvent::Message { payload: decode_hex(required_args(args)?)? },
         _ => return Ok(None),
@@ -677,6 +749,60 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, ProtocolError> {
 fn parse_i32(bytes: &[u8]) -> Result<i32, ProtocolError> {
     let value = parse_i64(bytes)?;
     i32::try_from(value).map_err(|_| ProtocolError::MalformedNumber)
+}
+
+/// Parse a finite decimal real. It accepts an optional sign, a decimal point
+/// and an exponent, so both observed integers and fractional scales such as
+/// `1.5` or `-0.25` validate without being rewritten.
+fn parse_real(bytes: &[u8]) -> Result<f64, ProtocolError> {
+    if bytes.is_empty() {
+        return Err(ProtocolError::MalformedNumber);
+    }
+
+    let mut index = 0;
+    if matches!(bytes[0], b'+' | b'-') {
+        index += 1;
+    }
+    let integer_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == integer_start {
+        return Err(ProtocolError::MalformedNumber);
+    }
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let fraction_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == fraction_start {
+            return Err(ProtocolError::MalformedNumber);
+        }
+    }
+    if index < bytes.len() && matches!(bytes[index], b'e' | b'E') {
+        index += 1;
+        if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+            index += 1;
+        }
+        let exponent_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == exponent_start {
+            return Err(ProtocolError::MalformedNumber);
+        }
+    }
+    if index != bytes.len() {
+        return Err(ProtocolError::MalformedNumber);
+    }
+
+    let text = std::str::from_utf8(bytes).map_err(|_| ProtocolError::MalformedNumber)?;
+    let value: f64 = text.parse().map_err(|_| ProtocolError::MalformedNumber)?;
+    if !value.is_finite() {
+        return Err(ProtocolError::MalformedNumber);
+    }
+    Ok(value)
 }
 
 fn required_args(args: Option<&[u8]>) -> Result<&[u8], ProtocolError> {
@@ -864,6 +990,21 @@ mod tests {
     }
 
     #[test]
+    fn client_hello_input_checksum_and_world_list_encode() {
+        assert_eq!(client(ClientCommand::Hello { name: b"Ana".to_vec() }), b"HELLO Ana\n");
+        assert_eq!(client(ClientCommand::Input { epoch: 7, frame: 42, mask: -305_419_896 }), b"IN 7 42 -305419896\n");
+        assert_eq!(
+            client(ClientCommand::Checksum { epoch: 7, frame: 42, checksum: -12_345_678_901 }),
+            b"SUM 7 42 -12345678901\n"
+        );
+        assert_eq!(client(ClientCommand::WorldList), b"WLIST\n");
+        assert_eq!(
+            ClientCommand::Hello { name: b"bad\nname".to_vec() }.encode(),
+            Err(ProtocolError::EmbeddedControl)
+        );
+    }
+
+    #[test]
     fn client_position_preserves_state() {
         let state = StateBlob::parse(b"S,452,1,0,0,-1,1;P,25,6,1,15,7,1,1;B").unwrap();
         assert_eq!(
@@ -873,10 +1014,38 @@ mod tests {
     }
 
     #[test]
+    fn client_position_preserves_fractional_scale_state() {
+        let token = b"S,25,2,0,0,1.5,-0.75;P,25,4,3,8.5,-12.25,1.5,0.5";
+        let state = StateBlob::parse(token).unwrap();
+        assert_eq!(state.as_bytes(), token);
+        assert_eq!(
+            client(ClientCommand::Position(SelfPosition { room: 26, x: 0, y: 0, state })),
+            b"WPOS 26 0 0 S,25,2,0,0,1.5,-0.75;P,25,4,3,8.5,-12.25,1.5,0.5\n"
+        );
+    }
+
+    #[test]
+    fn state_blob_accepts_real_values_but_keeps_integer_identity_fields() {
+        assert!(StateBlob::parse(b"S,25,2,+0.5,-1.25,1e3,0.75").is_ok());
+        assert!(StateBlob::parse(b"P,25,4,3,8.5,-12.25,1.5,0.5").is_ok());
+        assert_eq!(StateBlob::parse(b"S,25,2,0,0,nope,1"), Err(ProtocolError::MalformedNumber));
+        assert_eq!(StateBlob::parse(b"P,25,4,3.5,8,12,1,1"), Err(ProtocolError::MalformedNumber));
+        assert_eq!(StateBlob::parse(b"S,25.5,2,0,0,1,1"), Err(ProtocolError::MalformedNumber));
+    }
+
+    #[test]
     fn client_position_none_state() {
         assert_eq!(
             client(ClientCommand::Position(SelfPosition { room: 26, x: 0, y: 0, state: StateBlob::none() })),
             b"WPOS 26 0 0 -\n"
+        );
+    }
+
+    #[test]
+    fn client_position_empty_state_omits_trailing_space() {
+        assert_eq!(
+            client(ClientCommand::Position(SelfPosition { room: 26, x: 0, y: 0, state: StateBlob::empty() })),
+            b"WPOS 26 0 0\n"
         );
     }
 
@@ -989,8 +1158,26 @@ mod tests {
             ServerEvent::Request { id: 7, kind: b"X".to_vec(), info: b"payload with spaces".to_vec() }
         );
         assert_eq!(server("WANS 9 0"), ServerEvent::Answer { id: 9, answer: 0 });
+        assert_eq!(server("WANS 9 -1"), ServerEvent::Answer { id: 9, answer: -1 });
         assert_eq!(server("WCANCEL"), ServerEvent::Cancel { id: None });
         assert_eq!(server("WCANCEL 9"), ServerEvent::Cancel { id: Some(9) });
+    }
+
+    #[test]
+    fn server_input_and_checksum_parse() {
+        assert_eq!(server("IN 7 42 -305419896"), ServerEvent::Input { epoch: 7, frame: 42, mask: -305_419_896 });
+        assert_eq!(
+            server("SUM 7 42 305419896"),
+            ServerEvent::Checksum { epoch: 7, frame: 42, checksum: 305_419_896 }
+        );
+        assert_eq!(
+            server("SUM -1 -2 -9223372036854775808"),
+            ServerEvent::Checksum { epoch: -1, frame: -2, checksum: i64::MIN }
+        );
+        assert_eq!(parse_server_line(b"IN 1 2"), Err(ProtocolError::MissingField));
+        assert_eq!(parse_server_line(b"SUM 1 2"), Err(ProtocolError::MissingField));
+        assert_eq!(parse_server_line(b"IN 1 2 3 4"), Err(ProtocolError::ExtraField));
+        assert_eq!(parse_server_line(b"SUM 1 nope 3"), Err(ProtocolError::MalformedNumber));
     }
 
     #[test]
