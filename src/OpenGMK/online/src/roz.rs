@@ -1,4 +1,4 @@
-//! Clean-room client for the Zibelan/ROZ line protocol.
+//! Client for the Zibelan/ROZ line protocol.
 //!
 //! Transport is plain TCP with one UTF-8/ASCII line per command, terminated by `\n`.
 //! Incoming lines may end in `\r\n`; the trailing `\r` is stripped. There is no TLS,
@@ -6,37 +6,24 @@
 //!
 //! Client -> server commands implemented here:
 //! `HELLO`, `JOIN`, `MSG`, `IN`, `WJOIN`, `WPOS`, `WSYNC`, `WREQ`, `WANS`,
-//! `WCANCEL`, `WEND`, `BYE`.
+//! `WCANCEL`, `WSAY`, `WLIST`, `WEND`, `BYE`.
 //!
 //! Server -> client commands: `WELCOME`, `WAIT`, `START`, `WOK`, `FULL`, `WFULL`,
-//! `PEER_LEFT`, `MSG` (hex), `IN`, `WP`, `WDEL`, `WREQ`, `WANS`, `WCANCEL`.
+//! `PEER_LEFT`, `MSG` (hex), `IN`, `SUM`, `WP`, `WDEL`, `WLIST`, `WREQ`, `WANS`,
+//! `WCANCEL`, `WSAY`, `WEXC`.
 //!
 //! `MSG` framing:
 //! - Server -> client `MSG` carries lowercase hex and is decoded here.
-//! - Client -> server `MSG` carries lowercase hex too. This is confirmed by the
-//!   static analysis of `ROZ.dll` (`net_send` and `net_send_file` both call the
-//!   hex encoder before `MSG `; see `01-static.md` §5.3/§5.7). [`RozClient::send`]
-//!   and [`RozClient::send_message_bytes`] therefore hex-encode their payload.
+//! - Client -> server `MSG` carries lowercase hex too, so CR/LF, NUL and non-UTF-8
+//!   bytes cannot break the line framing. [`RozClient::send`] and
+//!   [`RozClient::send_message_bytes`] hex-encode their payload.
 //!   [`RozClient::send_raw_line`] remains the raw escape hatch used by `net_line`.
 //!
-//! TODOs (not confirmed by a real capture):
-//! - The native 60 FPS module (`roz_net.rs` inside the OpenGMK executable) has not
-//!   been compared against `ROZ.dll` at runtime, so its framing is still unverified.
-//!   A real client/server capture should confirm the hex decision above.
-//! - The exact `WREQ`/`WANS`/`WCANCEL` payload layout and the meaning of `0x1E`
-//!   inside `WREQ` are preserved as opaque data, not interpreted.
-//! - The real-server line limit, keepalive/timeout policy and reconnect behaviour
-//!   are unknown. A local safety limit of [`MAX_LINE`] bytes is enforced.
-//! - `WELCOME`/`WOK` values are exposed as both the legacy status value and the
-//!   connection identity used for self-suppression.
-//! - `WOK` and `START` both update `side`; whether they have different semantics
-//!   on the real server is unconfirmed.
-//!
-//! Wire encoding and parsing for the commands covered by the spec go through
-//! [`reloaded_cleanroom::roz`] behind [`adapter`]. Commands outside that codec
-//! (`HELLO`, `JOIN`, `IN`, `SUM`, `WEXC`, `WLIST`) and inputs the codec cannot
-//! represent keep the legacy encoder so the public [`RozClient`] surface behaves
-//! exactly as before.
+//! Wire encoding and parsing go through [`reloaded_cleanroom::roz`] and
+//! [`reloaded_cleanroom::world`]. `JOIN`, `WEXC` and raw server `WSAY` are the
+//! only command forms still handled locally because the clean-room codec does
+//! not define them. `WREQ`/`WANS`/`WCANCEL` payloads remain opaque, as the
+//! specification requires.
 
 use reloaded_cleanroom::{
     roz::{ClientCommand, ServerEvent},
@@ -57,57 +44,55 @@ use std::{
 
 /// Adapter over the clean-room ROZ codec.
 ///
-/// The codec is strict, while `RozClient` historically tolerated loose spacing,
-/// non-canonical numbers and opaque parts tokens. Each helper returns `None`
-/// when the codec cannot reproduce the legacy wire form, so the caller can use
-/// the old encoder instead of changing behaviour.
+/// The codec owns framing, command encoding and server parsing. These helpers
+/// only map host-facing strings to the typed codec model and apply the
+/// compatibility rule that outgoing CR/LF become spaces.
 mod adapter {
-    use reloaded_cleanroom::roz::{self as codec, ClientCommand, ServerEvent, StateBlob};
+    use reloaded_cleanroom::roz::{self as codec, ClientCommand, ProtocolError, ServerEvent, StateBlob};
 
     pub(super) use codec::{LineBuffer, LineEvent};
 
-    pub(super) fn encode_command(command: &ClientCommand) -> Option<Vec<u8>> {
-        command.encode().ok().map(|mut line| {
+    pub(super) fn encode_command(command: &ClientCommand) -> Result<Vec<u8>, ProtocolError> {
+        command.encode().map(|mut line| {
             line.pop();
             line
         })
     }
 
-    pub(super) fn parse_server_line(line: &[u8]) -> Option<ServerEvent> {
-        codec::parse_server_line(line).ok().flatten()
+    pub(super) fn parse_server_line(line: &[u8]) -> Result<Option<ServerEvent>, ProtocolError> {
+        codec::parse_server_line(line)
     }
 
-    pub(super) fn position(room: &str, x: &str, y: &str, parts: &str) -> Option<Vec<u8>> {
-        let room = canonical_i32(room)?;
-        let x = canonical_i32(x)?;
-        let y = canonical_i32(y)?;
-        let state = StateBlob::parse(parts.as_bytes()).ok()?;
+    pub(super) fn position(room: &str, x: &str, y: &str, parts: &str) -> Result<Vec<u8>, String> {
+        let room = parse_i32(room, "room")?;
+        let x = parse_i32(x, "x")?;
+        let y = parse_i32(y, "y")?;
+        let state = if parts.is_empty() {
+            StateBlob::empty()
+        } else {
+            StateBlob::parse(parts.as_bytes()).map_err(|error| format!("parts inválidos: {error}"))?
+        };
         encode_command(&ClientCommand::Position(codec::SelfPosition { room, x, y, state }))
+            .map_err(|error| format!("WPOS inválido: {error}"))
     }
 
-    pub(super) fn request(target: &str, kind: &str, info: &str) -> Option<Vec<u8>> {
-        let target = canonical_u64(target)?;
-        encode_command(&ClientCommand::Request {
-            target,
-            kind: kind.as_bytes().to_vec(),
-            info: info.as_bytes().to_vec(),
-        })
+    pub(super) fn sanitize_bytes(bytes: &[u8]) -> Vec<u8> {
+        bytes
+            .iter()
+            .map(|&byte| if byte == b'\r' || byte == b'\n' { b' ' } else { byte })
+            .collect()
     }
 
-    pub(super) fn response(request: &str, answer: &str) -> Option<Vec<u8>> {
-        let request = canonical_u64(request)?;
-        let answer = canonical_i32(answer)?;
-        encode_command(&ClientCommand::Answer { request, answer })
+    pub(super) fn parse_u64(text: &str, field: &str) -> Result<u64, String> {
+        text.parse::<u64>().map_err(|_| format!("{field} inválido: {text}"))
     }
 
-    fn canonical_u64(text: &str) -> Option<u64> {
-        let value = text.parse::<u64>().ok()?;
-        (value.to_string() == text).then_some(value)
+    pub(super) fn parse_i32(text: &str, field: &str) -> Result<i32, String> {
+        text.parse::<i32>().map_err(|_| format!("{field} inválido: {text}"))
     }
 
-    fn canonical_i32(text: &str) -> Option<i32> {
-        let value = text.parse::<i32>().ok()?;
-        (value.to_string() == text).then_some(value)
+    pub(super) fn parse_i64(text: &str, field: &str) -> Result<i64, String> {
+        text.parse::<i64>().map_err(|_| format!("{field} inválido: {text}"))
     }
 }
 
@@ -121,7 +106,7 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_EVENT_CAPACITY: usize = 256;
 
 /// Bound for a single `send_line`/`flush`, so a stuck peer cannot block the game
-/// thread forever. `ROZ.dll` does not document its own send timeout.
+/// thread forever. The public server does not document its own send timeout.
 pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Connection/session state, mirroring the values observed in `net_status`.
@@ -200,9 +185,8 @@ pub struct WorldPosition {
     pub parts_token: Vec<u8>,
     /// Original bytes after the `WP` command, including its leading space.
     ///
-    /// `ROZ.dll` queues `WP` as `WP\x1f` + this exact remainder, so keeping it lets
-    /// `net_recv` preserve the server's spacing and non-UTF-8 name bytes instead of
-    /// re-formatting numbers.
+    /// Keeping the exact remainder preserves the server's spacing and non-UTF-8
+    /// name bytes instead of re-formatting numbers.
     pub raw: Vec<u8>,
 }
 
@@ -219,7 +203,7 @@ pub struct WorldListEntry {
 pub enum RozEvent {
     /// `WELCOME <id>` greeting; the numeric value is the connection identity.
     Welcome {
-        /// Legacy protocol-banner value shown by the host (the same number).
+        /// Protocol-banner value expected by the host (the same number).
         version: u32,
         /// Connection identity used to suppress self updates.
         id: u64,
@@ -460,10 +444,8 @@ impl RozClient {
 
     /// Send `HELLO <name>` from raw GML bytes.
     pub fn hello_bytes(&self, name: &[u8]) -> Result<(), String> {
-        let mut line = Vec::with_capacity(6 + name.len());
-        line.extend_from_slice(b"HELLO ");
-        line.extend_from_slice(name);
-        self.send_line_bytes(&line)
+        let name = adapter::sanitize_bytes(name);
+        self.send_command(ClientCommand::Hello { name })
     }
 
     /// Send `JOIN <room>`.
@@ -481,26 +463,21 @@ impl RozClient {
 
     /// Send `WJOIN <name>`.
     pub fn world_join(&self, name: &str) -> Result<(), String> {
-        let command = ClientCommand::Join { name: name.as_bytes().to_vec() };
-        self.send_encoded_or(adapter::encode_command(&command), || {
-            self.send_line(&format!("WJOIN {name}"))
-        })
+        let name = adapter::sanitize_bytes(name.as_bytes());
+        self.send_command(ClientCommand::Join { name })
     }
 
     /// Send `MSG <hex>` for a UTF-8/text payload.
     ///
-    /// The reference `ROZ.dll` hex-encodes the payload (lowercase) before sending
-    /// `MSG`, so this does the same. Hex keeps CR/LF and non-UTF-8 bytes from
-    /// breaking the line framing.
+    /// Hex keeps CR/LF and non-UTF-8 bytes from breaking the line framing.
     pub fn send(&self, payload: &str) -> Result<(), String> {
         self.send_message_bytes(payload.as_bytes())
     }
 
     /// Send `MSG <hex>` for a raw byte payload.
     ///
-    /// Used by `net_send`/`net_send_file` so GML strings are preserved byte for
-    /// byte. The line is rejected locally when the hex form would exceed
-    /// [`MAX_LINE`].
+    /// Binary and text payloads are preserved byte for byte. The line is
+    /// rejected locally when the hex form would exceed [`MAX_LINE`].
     pub fn send_message_bytes(&self, payload: &[u8]) -> Result<(), String> {
         let encoded_len = payload
             .len()
@@ -513,13 +490,7 @@ impl RozClient {
                 encoded_len
             ));
         }
-        let command = ClientCommand::Message { payload: payload.to_vec() };
-        self.send_encoded_or(adapter::encode_command(&command), || {
-            let mut line = Vec::with_capacity(encoded_len);
-            line.extend_from_slice(b"MSG ");
-            encode_hex_into(payload, &mut line);
-            self.send_line_bytes(&line)
-        })
+        self.send_command(ClientCommand::Message { payload: payload.to_vec() })
     }
 
     /// Send an arbitrary protocol line, without adding a command prefix.
@@ -545,7 +516,10 @@ impl RozClient {
         F: fmt::Display,
         M: fmt::Display,
     {
-        self.send_line(&format!("IN {epoch} {frame} {mask}"))
+        let epoch = adapter::parse_i32(&epoch.to_string(), "epoch")?;
+        let frame = adapter::parse_i32(&frame.to_string(), "frame")?;
+        let mask = adapter::parse_i32(&mask.to_string(), "mask")?;
+        self.send_command(ClientCommand::Input { epoch, frame, mask })
     }
 
     /// Send `SUM <epoch> <frame> <checksum>`.
@@ -555,7 +529,10 @@ impl RozClient {
         F: fmt::Display,
         C: fmt::Display,
     {
-        self.send_line(&format!("SUM {epoch} {frame} {checksum}"))
+        let epoch = adapter::parse_i32(&epoch.to_string(), "epoch")?;
+        let frame = adapter::parse_i32(&frame.to_string(), "frame")?;
+        let checksum = adapter::parse_i64(&checksum.to_string(), "checksum")?;
+        self.send_command(ClientCommand::Checksum { epoch, frame, checksum })
     }
 
     /// Send `WPOS <room> <x> <y> <parts>`.
@@ -574,21 +551,13 @@ impl RozClient {
         let room = room.to_string();
         let x = x.to_string();
         let y = y.to_string();
-        self.send_encoded_or(adapter::position(&room, &x, &y, parts), || {
-            let mut line = format!("WPOS {room} {x} {y}");
-            if !parts.is_empty() {
-                line.push(' ');
-                line.push_str(parts);
-            }
-            self.send_line(&line)
-        })
+        let line = adapter::position(&room, &x, &y, parts)?;
+        self.send_line_bytes(&line)
     }
 
     /// Send `WSYNC`.
     pub fn world_sync(&self) -> Result<(), String> {
-        self.send_encoded_or(adapter::encode_command(&ClientCommand::Sync), || {
-            self.send_line("WSYNC")
-        })
+        self.send_command(ClientCommand::Sync)
     }
 
     /// Send `WREQ <target> <kind> <info>`.
@@ -596,12 +565,10 @@ impl RozClient {
     where
         T: fmt::Display,
     {
-        let target = target.to_string();
-        self.send_encoded_or(adapter::request(&target, kind, info), || {
-            let mut line = format!("WREQ {target} {kind} ");
-            line.push_str(info);
-            self.send_line(&line)
-        })
+        let target = adapter::parse_u64(&target.to_string(), "target")?;
+        let kind = adapter::sanitize_bytes(kind.as_bytes());
+        let info = adapter::sanitize_bytes(info.as_bytes());
+        self.send_command(ClientCommand::Request { target, kind, info })
     }
 
     /// Send `WANS <request_id> <answer>`.
@@ -610,26 +577,20 @@ impl RozClient {
         T: fmt::Display,
         A: fmt::Display,
     {
-        let request_id = request_id.to_string();
-        let answer = answer.to_string();
-        self.send_encoded_or(adapter::response(&request_id, &answer), || {
-            self.send_line(&format!("WANS {request_id} {answer}"))
-        })
+        let request = adapter::parse_u64(&request_id.to_string(), "request_id")?;
+        let answer = adapter::parse_i32(&answer.to_string(), "answer")?;
+        self.send_command(ClientCommand::Answer { request, answer })
     }
 
     /// Send `WCANCEL`.
     pub fn cancel(&self) -> Result<(), String> {
-        self.send_encoded_or(adapter::encode_command(&ClientCommand::Cancel { id: None }), || {
-            self.send_line("WCANCEL")
-        })
+        self.send_command(ClientCommand::Cancel { id: None })
     }
 
     /// Send `WSAY <text>`.
     pub fn say(&self, text: &str) -> Result<(), String> {
-        let command = ClientCommand::Say { text: text.as_bytes().to_vec() };
-        self.send_encoded_or(adapter::encode_command(&command), || {
-            self.send_line(&format!("WSAY {text}"))
-        })
+        let text = adapter::sanitize_bytes(text.as_bytes());
+        self.send_command(ClientCommand::Say { text })
     }
 
     /// Send `WEXC <number>`.
@@ -639,12 +600,12 @@ impl RozClient {
 
     /// Request the online player list (`WLIST`).
     pub fn world_list(&self) -> Result<(), String> {
-        self.send_line("WLIST")
+        self.send_command(ClientCommand::WorldList)
     }
 
     /// Send `WEND`.
     pub fn end_world(&self) -> Result<(), String> {
-        self.send_encoded_or(adapter::encode_command(&ClientCommand::End), || self.send_line("WEND"))
+        self.send_command(ClientCommand::End)
     }
 
     /// Send `BYE`, shut the socket down and join the reader thread. Idempotent.
@@ -653,9 +614,7 @@ impl RozClient {
             return Ok(());
         }
 
-        let _ = self.send_encoded_or(adapter::encode_command(&ClientCommand::Bye), || {
-            self.send_line("BYE")
-        });
+        let _ = self.send_command(ClientCommand::Bye);
         {
             let stream = lock_unpoison(&self.writer);
             let _ = stream.shutdown(Shutdown::Both);
@@ -720,15 +679,10 @@ impl RozClient {
         self.peer_addr
     }
 
-    fn send_encoded_or(
-        &self,
-        encoded: Option<Vec<u8>>,
-        legacy: impl FnOnce() -> Result<(), String>,
-    ) -> Result<(), String> {
-        match encoded {
-            Some(line) => self.send_line_bytes(&line),
-            None => legacy(),
-        }
+    fn send_command(&self, command: ClientCommand) -> Result<(), String> {
+        let line =
+            adapter::encode_command(&command).map_err(|error| format!("comando ROZ inválido: {error}"))?;
+        self.send_line_bytes(&line)
     }
 
     fn send_line(&self, line: &str) -> Result<(), String> {
@@ -788,7 +742,7 @@ fn reader_loop(
                                 continue;
                             }
                             let text = String::from_utf8_lossy(&line);
-                            handle_line(&text, &events, &status, &side, &peer);
+                            handle_line(&text, &events);
                         }
                         adapter::LineEvent::Overlong => events.push(RozEvent::Malformed {
                             line: String::new(),
@@ -878,8 +832,12 @@ fn dispatch_codec_line(
     peer: &Mutex<String>,
 ) -> bool {
     let event = match adapter::parse_server_line(line) {
-        Some(event) => event,
-        None => return false,
+        Ok(Some(event)) => event,
+        Ok(None) => return false,
+        Err(error) => {
+            push_malformed(events, &String::from_utf8_lossy(line), error.to_string());
+            return true;
+        },
     };
 
     match event {
@@ -892,7 +850,7 @@ fn dispatch_codec_line(
             events.push(RozEvent::Wait);
         },
         ServerEvent::Start { side: side_value, peer: peer_bytes } => {
-            let peer_name = String::from_utf8_lossy(&peer_bytes).trim_start().to_string();
+            let peer_name = String::from_utf8_lossy(&peer_bytes).into_owned();
             side.store(side_value, Ordering::SeqCst);
             *lock_unpoison(peer) = peer_name.clone();
             status.store(RozStatus::Started.as_u8(), Ordering::SeqCst);
@@ -900,7 +858,8 @@ fn dispatch_codec_line(
         },
         ServerEvent::Ok { id } => {
             let Ok(side_value) = i32::try_from(id) else {
-                return false;
+                push_malformed(events, &String::from_utf8_lossy(line), "WOK fuera del rango i32");
+                return true;
             };
             side.store(side_value, Ordering::SeqCst);
             status.store(RozStatus::WorldJoined.as_u8(), Ordering::SeqCst);
@@ -921,12 +880,13 @@ fn dispatch_codec_line(
         },
         ServerEvent::Request { id, kind, info } => {
             if kind.is_empty() {
-                return false;
+                push_malformed(events, &String::from_utf8_lossy(line), "WREQ sin kind");
+                return true;
             }
             events.push(RozEvent::WorldRequest {
                 id,
                 kind: String::from_utf8_lossy(&kind).into_owned(),
-                payload: String::from_utf8_lossy(&info).trim_start().to_string(),
+                payload: String::from_utf8_lossy(&info).into_owned(),
             });
         },
         ServerEvent::Answer { id, answer } => {
@@ -934,6 +894,12 @@ fn dispatch_codec_line(
         },
         ServerEvent::Cancel { id } => {
             events.push(RozEvent::WorldCancel { id });
+        },
+        ServerEvent::Input { epoch, frame, mask } => {
+            events.push(RozEvent::Input { epoch, frame, mask });
+        },
+        ServerEvent::Checksum { epoch, frame, checksum } => {
+            events.push(RozEvent::Checksum { epoch, frame, checksum });
         },
         ServerEvent::Message { payload } => {
             events.push(RozEvent::Message(payload));
@@ -943,137 +909,13 @@ fn dispatch_codec_line(
     true
 }
 
-fn handle_line(
-    line: &str,
-    events: &EventQueue,
-    status: &AtomicU8,
-    side: &AtomicI32,
-    peer: &Mutex<String>,
-) {
+fn handle_line(line: &str, events: &EventQueue) {
     let (command, rest) = match line.split_once(' ') {
         Some((command, rest)) => (command, rest.trim_start()),
         None => (line, ""),
     };
 
     match command {
-        "WELCOME" => {
-            let id = rest.trim().parse::<u64>().unwrap_or(0);
-            let version = u32::try_from(id).unwrap_or(u32::MAX);
-            events.push(RozEvent::Welcome { version, id });
-        }
-        "WAIT" => {
-            status.store(RozStatus::Waiting.as_u8(), Ordering::SeqCst);
-            events.push(RozEvent::Wait);
-        }
-        "START" => {
-            let (side_text, peer_text) = split_first(rest);
-            match side_text.parse::<i32>() {
-                Ok(side_value) => {
-                    let peer_name = peer_text.trim_start().to_string();
-                    side.store(side_value, Ordering::SeqCst);
-                    *lock_unpoison(peer) = peer_name.clone();
-                    status.store(RozStatus::Started.as_u8(), Ordering::SeqCst);
-                    events.push(RozEvent::Start { side: side_value, peer: peer_name });
-                }
-                Err(_) => push_malformed(events, line, "START sin side válido"),
-            }
-        }
-        "WOK" => match rest.trim().parse::<i32>() {
-            Ok(side_value) => {
-                side.store(side_value, Ordering::SeqCst);
-                status.store(RozStatus::WorldJoined.as_u8(), Ordering::SeqCst);
-                events.push(RozEvent::WorldJoined {
-                    side: side_value,
-                    id: u64::try_from(side_value).ok(),
-                });
-            }
-            Err(_) => push_malformed(events, line, "WOK sin side válido"),
-        },
-        "FULL" => {
-            status.store(RozStatus::Full.as_u8(), Ordering::SeqCst);
-            events.push(RozEvent::Full { world: false });
-        }
-        "WFULL" => {
-            status.store(RozStatus::Full.as_u8(), Ordering::SeqCst);
-            events.push(RozEvent::Full { world: true });
-        }
-        "PEER_LEFT" => {
-            lock_unpoison(peer).clear();
-            status.store(RozStatus::PeerLeft.as_u8(), Ordering::SeqCst);
-            events.push(RozEvent::PeerLeft);
-        }
-        "MSG" => match decode_hex(rest) {
-            Ok(payload) => events.push(RozEvent::Message(payload)),
-            Err(reason) => push_malformed(events, line, reason),
-        },
-        "IN" => {
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            if fields.len() != 3 {
-                push_malformed(events, line, "IN requiere epoch, frame y mask");
-                return;
-            }
-            let parsed = (
-                fields[0].parse::<i32>(),
-                fields[1].parse::<i32>(),
-                fields[2].parse::<i32>(),
-            );
-            match parsed {
-                (Ok(epoch), Ok(frame), Ok(mask)) => {
-                    events.push(RozEvent::Input { epoch, frame, mask });
-                }
-                _ => push_malformed(events, line, "IN con enteros inválidos"),
-            }
-        }
-        "SUM" => {
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            if fields.len() != 3 {
-                push_malformed(events, line, "SUM requiere epoch, frame y checksum");
-                return;
-            }
-            let parsed = (
-                fields[0].parse::<i32>(),
-                fields[1].parse::<i32>(),
-                fields[2].parse::<i64>(),
-            );
-            match parsed {
-                (Ok(epoch), Ok(frame), Ok(checksum)) => {
-                    events.push(RozEvent::Checksum { epoch, frame, checksum });
-                }
-                _ => push_malformed(events, line, "SUM con enteros inválidos"),
-            }
-        }
-        "WREQ" => {
-            let (id_text, remainder) = split_first(rest);
-            let (kind, payload) = split_first(remainder);
-            match id_text.parse::<u64>() {
-                Ok(id) if !kind.is_empty() => {
-                    events.push(RozEvent::WorldRequest {
-                        id,
-                        kind: kind.to_string(),
-                        payload: payload.to_string(),
-                    });
-                }
-                _ => push_malformed(events, line, "WREQ requiere id y kind"),
-            }
-        }
-        "WANS" => {
-            let (id_text, answer_text) = split_first(rest);
-            match (id_text.parse::<u64>(), answer_text.trim().parse::<i32>()) {
-                (Ok(id), Ok(answer)) => events.push(RozEvent::WorldAnswer { id, answer }),
-                _ => push_malformed(events, line, "WANS requiere id y respuesta"),
-            }
-        }
-        "WCANCEL" => {
-            let id_text = rest.trim();
-            if id_text.is_empty() {
-                events.push(RozEvent::WorldCancel { id: None });
-            } else {
-                match id_text.parse::<u64>() {
-                    Ok(id) => events.push(RozEvent::WorldCancel { id: Some(id) }),
-                    Err(_) => push_malformed(events, line, "WCANCEL con id inválido"),
-                }
-            }
-        }
         "WSAY" => {
             let (id_text, text) = split_first(rest);
             match id_text.parse::<u64>() {
@@ -1105,44 +947,15 @@ fn push_malformed(events: &EventQueue, line: &str, reason: impl Into<String>) {
     events.push(RozEvent::Malformed { line: line.to_string(), reason: reason.into() });
 }
 
-/// Encode bytes as lowercase hex, matching `ROZ.dll`'s encoder.
+/// Encode bytes as lowercase hex.
 pub fn encode_hex(bytes: &[u8]) -> String {
-    let mut output = Vec::with_capacity(bytes.len() * 2);
-    encode_hex_into(bytes, &mut output);
-    String::from_utf8(output).expect("hex output is ASCII")
-}
-
-fn encode_hex_into(bytes: &[u8], output: &mut Vec<u8>) {
-    const TABLE: &[u8; 16] = b"0123456789abcdef";
-    for &byte in bytes {
-        output.push(TABLE[(byte >> 4) as usize]);
-        output.push(TABLE[(byte & 0x0f) as usize]);
-    }
+    reloaded_cleanroom::roz::encode_hex(bytes)
 }
 
 /// Decode a `MSG` hex payload. Invalid or odd-length input is an error, never a panic.
 /// Both lowercase and uppercase digits are accepted.
 pub fn decode_hex(text: &str) -> Result<Vec<u8>, String> {
-    let bytes = text.as_bytes();
-    if bytes.len() % 2 != 0 {
-        return Err("hex con longitud impar".to_string());
-    }
-    let mut output = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let high = hex_digit(pair[0]).ok_or_else(|| "hex con carácter inválido".to_string())?;
-        let low = hex_digit(pair[1]).ok_or_else(|| "hex con carácter inválido".to_string())?;
-        output.push((high << 4) | low);
-    }
-    Ok(output)
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    reloaded_cleanroom::roz::decode_hex(text.as_bytes()).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -1541,6 +1354,189 @@ mod tests {
     }
 
     #[test]
+    fn parses_cleanroom_control_events_and_msg() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream
+                .write_all(b"WREQ 4 F Juan\x1einfo\nWANS 4 -1\nSTART 2 Rival\nWOK 42\nMSG 4F4B1F\n")
+                .expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+
+        let client = connect(addr);
+        assert_eq!(
+            next_event(&client),
+            RozEvent::WorldRequest {
+                id: 4,
+                kind: "F".to_string(),
+                payload: "Juan\u{1e}info".to_string(),
+            }
+        );
+        assert_eq!(next_event(&client), RozEvent::WorldAnswer { id: 4, answer: -1 });
+        assert_eq!(
+            next_event(&client),
+            RozEvent::Start { side: 2, peer: "Rival".to_string() }
+        );
+        assert_eq!(client.peer(), "Rival");
+        assert_eq!(
+            next_event(&client),
+            RozEvent::WorldJoined { side: 42, id: Some(42) }
+        );
+        assert_eq!(next_event(&client), RozEvent::Message(b"OK\x1f".to_vec()));
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn malformed_cleanroom_lines_are_reported_and_reader_continues() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream
+                .write_all(b"WREQ\nWANS 4 nope\nSTART nope Rival\nWOK 4294967296\nMSG zz\nWAIT\n")
+                .expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+
+        let client = connect(addr);
+        let mut malformed = 0;
+        loop {
+            match next_event(&client) {
+                RozEvent::Malformed { .. } => malformed += 1,
+                RozEvent::Wait => break,
+                other => panic!("evento inesperado: {other:?}"),
+            }
+        }
+        assert_eq!(malformed, 5);
+        assert_eq!(client.status(), RozStatus::Waiting);
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn lossy_peer_and_request_payload_keep_spec_remainder() {
+        let addr = spawn_mock(|mut stream| {
+            stream
+                .write_all(b"START 2 Rival\xff Name\nWREQ 9 T  dos\n")
+                .expect("write");
+            stream.flush().expect("flush");
+        });
+
+        let client = connect(addr);
+        assert_eq!(
+            next_event(&client),
+            RozEvent::Start { side: 2, peer: "Rival\u{fffd} Name".to_string() }
+        );
+        assert_eq!(
+            next_event(&client),
+            RozEvent::WorldRequest { id: 9, kind: "T".to_string(), payload: " dos".to_string() }
+        );
+    }
+
+    #[test]
+    fn world_position_empty_and_none_parts_use_cleanroom_codec() {
+        let (tx, rx) = mpsc::channel();
+        let addr = spawn_mock(move |stream| {
+            let mut reader = BufReader::new(stream);
+            let lines = vec![read_line(&mut reader), read_line(&mut reader)];
+            tx.send(lines).expect("send lines");
+        });
+
+        let client = connect(addr);
+        client.world_position(5, 100, 200, "").expect("empty parts");
+        client.world_position(5, 100, 200, "-").expect("none parts");
+        assert!(client.world_position(5, 100, 200, "not a state").is_err());
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).expect("lines"),
+            vec!["WPOS 5 100 200".to_string(), "WPOS 5 100 200 -".to_string()]
+        );
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn sends_hello_input_checksum_and_world_list() {
+        let (tx, rx) = mpsc::channel();
+        let addr = spawn_mock(move |stream| {
+            let mut reader = BufReader::new(stream);
+            let lines = vec![
+                read_line(&mut reader),
+                read_line(&mut reader),
+                read_line(&mut reader),
+                read_line(&mut reader),
+            ];
+            tx.send(lines).expect("send lines");
+        });
+
+        let client = connect(addr);
+        client.hello("Ana").expect("hello");
+        client.input_send(-1, 2, -3).expect("input_send");
+        client.checksum_send(7, 42, -99).expect("checksum_send");
+        client.world_list().expect("world_list");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).expect("lines"),
+            vec![
+                "HELLO Ana".to_string(),
+                "IN -1 2 -3".to_string(),
+                "SUM 7 42 -99".to_string(),
+                "WLIST".to_string(),
+            ]
+        );
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn invalid_client_arguments_are_rejected_without_legacy_fallback() {
+        let addr = spawn_mock(|mut stream| {
+            let _ = stream.write_all(b"WAIT\n");
+            let _ = stream.flush();
+        });
+
+        let client = connect(addr);
+        assert!(client.request(1, "T T", "").is_err());
+        assert!(client.response(9, "yes").is_err());
+        assert!(client.input_send("x", 1, 1).is_err());
+        assert!(client.checksum_send(1, 1, "x").is_err());
+        assert!(client.world_position(1, 2, 3, "not a state").is_err());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn legacy_join_wexc_and_raw_wsay_still_work() {
+        let (tx, rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let lines = vec![read_line(&mut reader), read_line(&mut reader)];
+            tx.send(lines).expect("send lines");
+            stream
+                .write_all(b"WSAY 9 hola mundo\nWEXC 9 3\nWAIT\n")
+                .expect("write");
+            stream.flush().expect("flush");
+        });
+
+        let client = connect(addr);
+        client.join("sala\r\n1").expect("join");
+        client.exclaim(7).expect("exclaim");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).expect("lines"),
+            vec!["JOIN sala  1".to_string(), "WEXC 7".to_string()]
+        );
+        assert_eq!(
+            next_event(&client),
+            RozEvent::WorldSay { id: 9, text: "hola mundo".to_string() }
+        );
+        assert_eq!(
+            next_event(&client),
+            RozEvent::WorldExclaim { id: 9, kind: 3 }
+        );
+        assert_eq!(next_event(&client), RozEvent::Wait);
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
     fn sends_raw_message_bytes_and_raw_lines() {
         let (tx, rx) = mpsc::channel();
         let addr = spawn_mock(move |stream| {
@@ -1577,29 +1573,34 @@ mod tests {
     }
 
     #[test]
-    fn cleanroom_adapter_encodes_spec_commands_and_declines_legacy_forms() {
+    fn cleanroom_adapter_encodes_and_parses_spec_commands() {
+        assert_eq!(adapter::encode_command(&ClientCommand::Sync).unwrap(), b"WSYNC");
         assert_eq!(
-            adapter::encode_command(&ClientCommand::Sync).as_deref(),
-            Some(b"WSYNC".as_slice())
+            adapter::encode_command(&ClientCommand::Message { payload: b"OK\x1f".to_vec() }).unwrap(),
+            b"MSG 4f4b1f"
         );
         assert_eq!(
-            adapter::encode_command(&ClientCommand::Message { payload: b"OK\x1f".to_vec() })
-                .as_deref(),
-            Some(b"MSG 4f4b1f".as_slice())
+            adapter::position("5", "100", "200", "S,1,2,0,0,1,1").unwrap(),
+            b"WPOS 5 100 200 S,1,2,0,0,1,1"
         );
+        assert_eq!(adapter::position("5", "100", "200", "").unwrap(), b"WPOS 5 100 200");
         assert_eq!(
-            adapter::position("5", "100", "200", "S,1,2,0,0,1,1").as_deref(),
-            Some(b"WPOS 5 100 200 S,1,2,0,0,1,1".as_slice())
+            adapter::position("05", "100", "200", "S,1,2,0,0,1,1").unwrap(),
+            b"WPOS 5 100 200 S,1,2,0,0,1,1"
         );
-        assert!(adapter::position("5", "100", "200", "").is_none());
-        assert!(adapter::position("05", "100", "200", "S,1,2,0,0,1,1").is_none());
-    }
+        assert!(adapter::position("x", "100", "200", "S,1,2,0,0,1,1").is_err());
+        assert!(adapter::position("5", "100", "200", "not a state").is_err());
 
-    #[test]
-    fn cleanroom_adapter_parses_spec_events_and_leaves_legacy_lines_to_fallback() {
-        assert_eq!(adapter::parse_server_line(b"WOK 42"), Some(ServerEvent::Ok { id: 42 }));
-        assert_eq!(adapter::parse_server_line(b"IN 7 42 99"), None);
-        assert_eq!(adapter::parse_server_line(b"WOK -1"), None);
+        assert_eq!(
+            adapter::parse_server_line(b"WOK 42").unwrap(),
+            Some(ServerEvent::Ok { id: 42 })
+        );
+        assert_eq!(
+            adapter::parse_server_line(b"IN 7 42 99").unwrap(),
+            Some(ServerEvent::Input { epoch: 7, frame: 42, mask: 99 })
+        );
+        assert!(adapter::parse_server_line(b"WOK -1").is_err());
+        assert_eq!(adapter::parse_server_line(b"GET / HTTP/1.1").unwrap(), None);
     }
 
     #[test]
