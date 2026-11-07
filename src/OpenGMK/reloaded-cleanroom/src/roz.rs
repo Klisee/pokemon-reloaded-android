@@ -161,9 +161,11 @@ pub struct StateBlob {
 /// One semicolon-separated segment of a [`StateBlob`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateSegment {
-    /// `S`, the main state segment; at least six numeric fields.
+    /// `S`, the main state segment; at least six numeric fields, the last
+    /// four of which are real-valued.
     Main { fields: Vec<Vec<u8>> },
-    /// `P`, the additional state segment; at least seven numeric fields.
+    /// `P`, the additional state segment; at least seven numeric fields, the
+    /// last four of which are real-valued.
     Pokemon { fields: Vec<Vec<u8>> },
     /// `B`, a marker without fields.
     Battle,
@@ -217,8 +219,16 @@ impl StateBlob {
                     if fields.len() < required {
                         return Err(ProtocolError::MalformedState);
                     }
-                    for field in &fields[..required] {
+                    // `S` is sprite, frame, dx, dy, xscale, yscale; `P` is
+                    // species, direction, frame, dx, dy, xscale, yscale. Only
+                    // the leading identity/frame fields are integers: the
+                    // position and scale fields are real-valued.
+                    let integer_fields = if tag == b'S' { 2 } else { 3 };
+                    for field in &fields[..integer_fields] {
                         parse_i64(field)?;
+                    }
+                    for field in &fields[integer_fields..required] {
+                        parse_real(field)?;
                     }
                     if tag == b'S' {
                         segments.push(StateSegment::Main { fields });
@@ -741,6 +751,60 @@ fn parse_i32(bytes: &[u8]) -> Result<i32, ProtocolError> {
     i32::try_from(value).map_err(|_| ProtocolError::MalformedNumber)
 }
 
+/// Parse a finite decimal real. It accepts an optional sign, a decimal point
+/// and an exponent, so both observed integers and fractional scales such as
+/// `1.5` or `-0.25` validate without being rewritten.
+fn parse_real(bytes: &[u8]) -> Result<f64, ProtocolError> {
+    if bytes.is_empty() {
+        return Err(ProtocolError::MalformedNumber);
+    }
+
+    let mut index = 0;
+    if matches!(bytes[0], b'+' | b'-') {
+        index += 1;
+    }
+    let integer_start = index;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        index += 1;
+    }
+    if index == integer_start {
+        return Err(ProtocolError::MalformedNumber);
+    }
+    if index < bytes.len() && bytes[index] == b'.' {
+        index += 1;
+        let fraction_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == fraction_start {
+            return Err(ProtocolError::MalformedNumber);
+        }
+    }
+    if index < bytes.len() && matches!(bytes[index], b'e' | b'E') {
+        index += 1;
+        if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+            index += 1;
+        }
+        let exponent_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index == exponent_start {
+            return Err(ProtocolError::MalformedNumber);
+        }
+    }
+    if index != bytes.len() {
+        return Err(ProtocolError::MalformedNumber);
+    }
+
+    let text = std::str::from_utf8(bytes).map_err(|_| ProtocolError::MalformedNumber)?;
+    let value: f64 = text.parse().map_err(|_| ProtocolError::MalformedNumber)?;
+    if !value.is_finite() {
+        return Err(ProtocolError::MalformedNumber);
+    }
+    Ok(value)
+}
+
 fn required_args(args: Option<&[u8]>) -> Result<&[u8], ProtocolError> {
     args.filter(|args| !args.is_empty()).ok_or(ProtocolError::MissingField)
 }
@@ -947,6 +1011,26 @@ mod tests {
             client(ClientCommand::Position(SelfPosition { room: 26, x: 0, y: 0, state })),
             b"WPOS 26 0 0 S,452,1,0,0,-1,1;P,25,6,1,15,7,1,1;B\n"
         );
+    }
+
+    #[test]
+    fn client_position_preserves_fractional_scale_state() {
+        let token = b"S,25,2,0,0,1.5,-0.75;P,25,4,3,8.5,-12.25,1.5,0.5";
+        let state = StateBlob::parse(token).unwrap();
+        assert_eq!(state.as_bytes(), token);
+        assert_eq!(
+            client(ClientCommand::Position(SelfPosition { room: 26, x: 0, y: 0, state })),
+            b"WPOS 26 0 0 S,25,2,0,0,1.5,-0.75;P,25,4,3,8.5,-12.25,1.5,0.5\n"
+        );
+    }
+
+    #[test]
+    fn state_blob_accepts_real_values_but_keeps_integer_identity_fields() {
+        assert!(StateBlob::parse(b"S,25,2,+0.5,-1.25,1e3,0.75").is_ok());
+        assert!(StateBlob::parse(b"P,25,4,3,8.5,-12.25,1.5,0.5").is_ok());
+        assert_eq!(StateBlob::parse(b"S,25,2,0,0,nope,1"), Err(ProtocolError::MalformedNumber));
+        assert_eq!(StateBlob::parse(b"P,25,4,3.5,8,12,1,1"), Err(ProtocolError::MalformedNumber));
+        assert_eq!(StateBlob::parse(b"S,25.5,2,0,0,1,1"), Err(ProtocolError::MalformedNumber));
     }
 
     #[test]
