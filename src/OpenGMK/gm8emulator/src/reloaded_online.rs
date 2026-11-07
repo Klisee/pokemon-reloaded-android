@@ -2099,7 +2099,7 @@ mod team_payload_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener, TcpStream};
 
     struct MockWorldTransport {
         lines: Option<mpsc::Sender<Vec<u8>>>,
@@ -2146,6 +2146,84 @@ mod tests {
         online.connection = Some(Connection::Ready(Backend::Zibelan(client)));
         online.connection_mode = Some(OnlineMode::ZibelanWorld);
         (online, MockWorldTransport { lines: Some(lines), thread: Some(thread) })
+    }
+
+    struct MockDuplexTransport {
+        stream: TcpStream,
+        lines: mpsc::Receiver<Vec<u8>>,
+        reader: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockDuplexTransport {
+        fn send(&mut self, bytes: &[u8]) {
+            use std::io::Write as _;
+            self.stream
+                .write_all(bytes)
+                .and_then(|_| self.stream.flush())
+                .expect("mock duplex send");
+        }
+
+        fn next_line(&self) -> Vec<u8> {
+            self.lines
+                .recv_timeout(Duration::from_secs(2))
+                .expect("mock duplex line from client")
+        }
+    }
+
+    impl Drop for MockDuplexTransport {
+        fn drop(&mut self) {
+            let _ = self.stream.shutdown(Shutdown::Both);
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
+        }
+    }
+
+    fn mock_duplex_transport() -> (ReloadedOnline, MockDuplexTransport) {
+        use std::io::{BufRead, BufReader};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind mock duplex transport");
+        let addr = listener.local_addr().expect("mock duplex transport address");
+        let client = RozClient::connect_with_timeout(&addr.to_string(), Duration::from_secs(2))
+            .expect("connect mock duplex transport");
+        let (stream, _) = listener.accept().expect("accept mock duplex transport");
+        let reader_stream = stream.try_clone().expect("clone mock duplex transport");
+        let (line_tx, lines) = mpsc::channel::<Vec<u8>>();
+        let reader = thread::spawn(move || {
+            let mut reader = BufReader::new(reader_stream);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if line.last() == Some(&b'\n') {
+                            line.pop();
+                        }
+                        if line.last() == Some(&b'\r') {
+                            line.pop();
+                        }
+                        if line_tx.send(line.clone()).is_err() {
+                            break
+                        }
+                    },
+                }
+            }
+        });
+        let mut online = ReloadedOnline::default();
+        online.connection = Some(Connection::Ready(Backend::Zibelan(client)));
+        online.connection_mode = Some(OnlineMode::ZibelanWorld);
+        (online, MockDuplexTransport { stream, lines, reader: Some(reader) })
+    }
+
+    fn next_client_line(transport: &MockDuplexTransport) -> String {
+        String::from_utf8(transport.next_line()).expect("client protocol line is utf-8")
+    }
+
+    fn next_client_message(transport: &MockDuplexTransport) -> Vec<u8> {
+        let line = next_client_line(transport);
+        let payload = line.strip_prefix("MSG ").expect("MSG line");
+        hex::decode(payload).expect("hex payload")
     }
 
     fn pump_world(online: &mut ReloadedOnline, mut done: impl FnMut(&ReloadedOnline) -> bool) {
@@ -2694,6 +2772,135 @@ mod tests {
         assert_eq!(online.world.get(7), Some(&before_state));
         assert_eq!(online.world_list, before_list);
         assert_eq!(online.remotes.len(), 2);
+    }
+
+    #[test]
+    fn mock_transport_battle_start_sets_side_seed_and_status() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        transport.send(b"WELCOME 7\nSTART 1 Rival\n");
+        pump_world(&mut online, |online| {
+            online.local_id() == Some(7) && online.battle_side() == Some(1)
+        });
+
+        assert_eq!(online.battle_seed(42), 1_000_003);
+        online.set_battle_epoch(17);
+        assert_eq!(online.battle_seed(42), 17 * 1_000_003);
+        assert!(online.status().contains("lado 1"));
+    }
+
+    #[test]
+    fn mock_transport_battle_team_exchange_round_trips_meta_and_bytes() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        transport.send(b"WELCOME 7\nSTART 1 Rival\n");
+        pump_world(&mut online, |online| online.battle_side() == Some(1));
+        online.begin_battle();
+
+        let meta = BattleTeamMeta {
+            seed: 1_000_003,
+            fondo: 7,
+            modo: 1,
+            sala: f3r::room::BATTLE_AQUA,
+            delay: 3,
+        };
+        let data = b"Trainer\x1fteam\r\n\xffbytes\r\n".to_vec();
+        let expected = zibelan_team_payload(&data, &meta);
+        assert!(online.send_battle_team(42, &data, &meta));
+        assert_eq!(next_client_message(&transport), expected);
+
+        transport.send(format!("MSG {}\n", hex::encode(&expected)).as_bytes());
+        pump_world(&mut online, |online| !online.battle_teams.is_empty());
+        let team = online.take_battle_team().expect("incoming team");
+        assert_eq!(team.id, 42);
+        assert_eq!(team.meta.seed, meta.seed);
+        assert_eq!(team.meta.fondo, meta.fondo);
+        assert_eq!(team.meta.modo, meta.modo);
+        assert_eq!(team.meta.sala, meta.sala);
+        assert_eq!(team.meta.delay, meta.delay);
+        assert_eq!(team.data, data);
+        assert!(team.zibelan);
+    }
+
+    #[test]
+    fn mock_transport_battle_checksum_pairs_with_input_in_both_orders() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        assert!(online.send_battle_input(42, 0, 1, 1, 0));
+        assert_eq!(next_client_line(&transport), "IN 1 1 0");
+
+        transport.send(b"SUM 5 10 111\nIN 5 10 3\n");
+        pump_world(&mut online, |online| !online.battle_inputs.is_empty());
+        let input = online.take_battle_input().expect("input after checksum");
+        assert_eq!(
+            (input.id, input.mask, input.seq, input.frame, input.checksum),
+            (42, 3, 5, 10, 111)
+        );
+
+        transport.send(b"IN 5 11 4\nSUM 5 11 222\n");
+        pump_world(&mut online, |online| !online.battle_inputs.is_empty());
+        let input = online.take_battle_input().expect("input before checksum");
+        assert_eq!(
+            (input.id, input.mask, input.seq, input.frame, input.checksum),
+            (42, 4, 5, 11, 222)
+        );
+
+        online.set_battle_epoch(7);
+        assert!(online.send_battle_input(42, 5, 9, 29, 0xaaaa));
+        assert_eq!(next_client_line(&transport), "IN 7 29 5");
+        assert!(online.send_battle_input(42, 5, 10, 30, 0xbbbb));
+        assert_eq!(next_client_line(&transport), "IN 7 30 5");
+        assert_eq!(next_client_line(&transport), "SUM 7 30 48059");
+    }
+
+    #[test]
+    fn mock_transport_trade_offer_and_ok_round_trip() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        let payload = b"Fixture Nv. 50\x1er448.000000\x1d";
+        let offer = [b"OFFER\x1f".as_slice(), payload.as_slice()].concat();
+        let ok = b"OK\x1f".to_vec();
+
+        transport.send(
+            format!("MSG {}\nMSG {}\n", hex::encode(&offer), hex::encode(&ok)).as_bytes(),
+        );
+        pump_world(&mut online, |online| online.peer_messages.len() == 2);
+        let message = online.take_peer_message().expect("incoming offer");
+        assert_eq!(message.kind, PeerMessageKind::Offer);
+        assert_eq!(message.payload, payload);
+        let message = online.take_peer_message().expect("incoming ok");
+        assert_eq!(message.kind, PeerMessageKind::Ok);
+        assert!(message.payload.is_empty());
+
+        assert!(online.send_peer_message(PeerMessageKind::Offer, payload));
+        assert_eq!(next_client_message(&transport), offer);
+        assert!(online.send_peer_message(PeerMessageKind::Ok, &[]));
+        assert_eq!(next_client_message(&transport), b"OK\x1f".to_vec());
+        assert!(online.send_peer_message(PeerMessageKind::No, &[]));
+        assert_eq!(next_client_message(&transport), b"NO\x1f".to_vec());
+    }
+
+    #[test]
+    fn mock_transport_wp_wdel_round_trip_keeps_other_remotes() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        for chunk in [
+            b"WP 7 2 10".as_slice(),
+            b"0.5 -20.".as_slice(),
+            b"25 S,25,2,0,-10,1,-1 Ada\n".as_slice(),
+            b"WP 8 2 1 2 S,26,1,0,0,1,1 Bob\n".as_slice(),
+        ] {
+            transport.send(chunk);
+        }
+        pump_world(&mut online, |online| online.remotes.len() == 2);
+
+        let remote = online.remotes.get(&7).expect("remote projected");
+        assert_eq!(remote.name, "Ada");
+        assert_eq!((remote.x, remote.y), (100.5, -20.25));
+        assert_eq!(online.world.get(7).expect("cleanroom remote").x, 100.5);
+
+        transport.send(b"WDEL 7\n");
+        pump_world(&mut online, |online| {
+            !online.remotes.contains_key(&7) && online.world.get(7).is_none()
+        });
+        assert_eq!(online.remotes.len(), 1);
+        assert!(online.remotes.contains_key(&8));
+        assert!(online.world.get(8).is_some());
     }
 
     #[test]
