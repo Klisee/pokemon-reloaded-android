@@ -897,4 +897,71 @@ mod tests {
             Some(GmlValue::Str(gml::String::from(b"000123".as_slice())))
         );
     }
+
+    #[test]
+    fn offer_apply_save_round_trip_persists_the_party_slot() {
+        let captured = capture_with(&capture_host(), 0).unwrap();
+        let payload = encode_message(&captured).unwrap();
+        let remote = decode(&payload).unwrap();
+        assert_eq!(remote, captured);
+        assert_eq!(validate_offer(&remote), Ok(()));
+
+        let mut target = apply_host();
+        let before = target.globals.clone();
+        let mut saved = None;
+        let outcome = crate::game::trade::commit_transaction(
+            &mut target,
+            |host| apply_with(host, 1, &remote),
+            |host| {
+                saved = Some(host.globals.clone());
+                Ok(())
+            },
+            |host| {
+                host.globals = before.clone();
+                host.writes.clear();
+            },
+        );
+
+        assert_eq!(outcome, crate::game::trade::TradeCommit::Committed);
+        assert_eq!(target.trade_global_num(b"pkmn1", 1), 448.0);
+        let saved = saved.expect("save runs after apply");
+        assert_eq!(
+            saved.get(&(b"pkmn1".to_vec(), 1)),
+            Some(&GmlValue::Real(Real::from(448.0)))
+        );
+        assert_eq!(
+            saved.get(&(b"indexpkmn".to_vec(), 1)),
+            Some(&GmlValue::Real(Real::from(448.0)))
+        );
+        assert_eq!(
+            saved.get(&(
+                f3r::global::INFO.to_vec(),
+                f3r::format::PARTY_ARRAY_STRIDE + 5
+            )),
+            Some(&GmlValue::Str(gml::String::from(b"000123".as_slice())))
+        );
+    }
+
+    #[test]
+    fn offer_apply_save_failure_restores_the_previous_party() {
+        let mut target = apply_host();
+        let before = target.globals.clone();
+        let expected = before.clone();
+        let outcome = crate::game::trade::commit_transaction(
+            &mut target,
+            |host| apply_with(host, 1, &safety_ready_offer()),
+            |_| Err("GuardarPartida".into()),
+            |host| {
+                host.globals = before.clone();
+                host.writes.clear();
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            crate::game::trade::TradeCommit::SaveFailed("GuardarPartida".into())
+        );
+        assert_eq!(target.globals, expected);
+        assert!(target.writes.is_empty());
+    }
 }
