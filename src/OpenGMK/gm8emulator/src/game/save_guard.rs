@@ -1,6 +1,7 @@
 //! Backups and atomic writes for save files.
 
 use crate::compat::f3r;
+use reloaded_cleanroom::save::{RollbackReceipt, SaveError, SnapshotId, SnapshotRecord};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -106,6 +107,21 @@ pub(crate) fn backup_before_online(program_dir: &Path, slot: i32) -> io::Result<
     }
 
     Ok(Some(backup_dir))
+}
+
+/// Captures the live slot before a mutating save that must be rollback-able.
+pub(crate) fn capture_before_save(program_dir: &Path, slot: i32) -> Result<Option<SnapshotRecord>, SaveError> {
+    super::reloaded_save::capture_slot(program_dir, slot)
+}
+
+/// Restores the slot captured by [`capture_before_save`] after a failed save.
+pub(crate) fn rollback_after_failure(
+    program_dir: &Path,
+    slot: i32,
+    source: SnapshotId,
+    reason: &str,
+) -> Result<Option<RollbackReceipt>, SaveError> {
+    super::reloaded_save::rollback_slot(program_dir, slot, source, reason)
 }
 
 /// Writes `bytes` to `path` through a temporary file, syncs it and renames it

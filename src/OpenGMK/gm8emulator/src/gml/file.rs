@@ -10,14 +10,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum TextHandle {
     Read(BufReader<File>),
-    Write(BufWriter<File>),
+    Write(BufWriter<File>, Option<SaveStaging>),
 }
 #[derive(Debug)]
 pub enum BinaryHandle {
     Read(BufReader<File>),
-    Write(BufWriter<File>),
-    ReadWrite(File),
+    Write(BufWriter<File>, Option<SaveStaging>),
+    ReadWrite(File, Option<SaveStaging>),
 }
+
+type SaveStaging = crate::game::reloaded_save::StagedSave;
 
 #[derive(Clone, Copy, Debug)]
 pub enum AccessMode {
@@ -109,6 +111,26 @@ impl TextHandle {
         } else {
             path
         };
+        let staging = match mode {
+            AccessMode::Read => None,
+            AccessMode::Write => match crate::game::reloaded_save::begin_staged_write(
+                Path::new(path),
+                false,
+                true,
+            ) {
+                Some(result) => Some(result?),
+                None => None,
+            },
+            AccessMode::Special => match crate::game::reloaded_save::begin_staged_write(
+                Path::new(path),
+                true,
+                false,
+            ) {
+                Some(result) => Some(result?),
+                None => None,
+            },
+        };
+        let target = staging.as_ref().map(|staging| staging.path()).unwrap_or_else(|| Path::new(path));
         #[rustfmt::skip]
         let (read, write, append) = match mode {
             AccessMode::Read    => (true,  false, false),
@@ -122,11 +144,11 @@ impl TextHandle {
             .write(write)
             .append(append)
             .truncate(write && !append)
-            .open(path)?;
+            .open(target)?;
 
         Ok(match mode {
             AccessMode::Read => TextHandle::Read(BufReader::new(file)),
-            AccessMode::Write | AccessMode::Special => TextHandle::Write(BufWriter::new(file)),
+            AccessMode::Write | AccessMode::Special => TextHandle::Write(BufWriter::new(file), staging),
         })
     }
 
@@ -139,7 +161,7 @@ impl TextHandle {
 
     fn get_writer(&mut self) -> Result<&mut BufWriter<File>> {
         match self {
-            Self::Write(f) => Ok(f),
+            Self::Write(f, _) => Ok(f),
             _ => Err(Error::CantWrite),
         }
     }
@@ -166,16 +188,25 @@ impl TextHandle {
 
     pub fn write_real(&mut self, real: f64) -> Result<()> {
         let text = if real.fract() == 0.0 { format!(" {:.0}", real) } else { format!(" {:.6}", real) };
+        if let Self::Write(_, Some(staging)) = self {
+            staging.mark_dirty();
+        }
         self.get_writer()?.write_all(text.as_bytes())?;
         Ok(())
     }
 
     pub fn write_string(&mut self, text: &[u8]) -> Result<()> {
+        if let Self::Write(_, Some(staging)) = self {
+            staging.mark_dirty();
+        }
         self.get_writer()?.write_all(text)?;
         Ok(())
     }
 
     pub fn write_newline(&mut self) -> Result<()> {
+        if let Self::Write(_, Some(staging)) = self {
+            staging.mark_dirty();
+        }
         self.get_writer()?.write_all(b"\r\n")?;
         Ok(())
     }
@@ -205,7 +236,21 @@ impl TextHandle {
     pub fn flush(&mut self) -> Result<()> {
         match self {
             Self::Read(_) => Ok(()),
-            Self::Write(f) => f.flush().map_err(|e| e.into()),
+            Self::Write(file, staging) => {
+                file.flush()?;
+                if let Some(staging) = staging {
+                    staging.commit()?;
+                }
+                Ok(())
+            },
+        }
+    }
+}
+
+impl Drop for TextHandle {
+    fn drop(&mut self) {
+        if matches!(self, Self::Write(_, Some(_))) {
+            let _ = self.flush();
         }
     }
 }
@@ -223,11 +268,31 @@ impl BinaryHandle {
         } else {
             path
         };
-        let file = Self::_open(path, mode)?;
+        let staging = match mode {
+            AccessMode::Read => None,
+            AccessMode::Write => match crate::game::reloaded_save::begin_staged_write(
+                Path::new(path),
+                true,
+                false,
+            ) {
+                Some(result) => Some(result?),
+                None => None,
+            },
+            AccessMode::Special => match crate::game::reloaded_save::begin_staged_write(
+                Path::new(path),
+                true,
+                false,
+            ) {
+                Some(result) => Some(result?),
+                None => None,
+            },
+        };
+        let target = staging.as_ref().map(|staging| staging.path()).unwrap_or_else(|| Path::new(path));
+        let file = Self::_open(target, mode)?;
         match mode {
             AccessMode::Read => Ok(Self::Read(BufReader::new(file))),
-            AccessMode::Write => Ok(Self::Write(BufWriter::new(file))),
-            AccessMode::Special => Ok(Self::ReadWrite(file)),
+            AccessMode::Write => Ok(Self::Write(BufWriter::new(file), staging)),
+            AccessMode::Special => Ok(Self::ReadWrite(file, staging)),
         }
     }
 
@@ -240,7 +305,7 @@ impl BinaryHandle {
     // same name between testing and opening, and also would require an additional
     // function call every time. Instead, when a read-only or write-only mode was
     // requested for a file, we try first to create it and fail if it's exists.
-    fn _open(path: &str, mode: AccessMode) -> io::Result<File> {
+    fn _open(path: &Path, mode: AccessMode) -> io::Result<File> {
         let mut opts = OpenOptions::new();
 
         #[rustfmt::skip]
@@ -272,32 +337,42 @@ impl BinaryHandle {
     fn get_reader(&mut self) -> Result<&mut dyn Read> {
         match self {
             Self::Read(f) => Ok(f),
-            Self::Write(_) => Err(Error::CantRead),
-            Self::ReadWrite(f) => Ok(f),
+            Self::Write(_, _) => Err(Error::CantRead),
+            Self::ReadWrite(f, _) => Ok(f),
         }
     }
 
     fn get_writer(&mut self) -> Result<&mut dyn Write> {
         match self {
             Self::Read(_) => Err(Error::CantWrite),
-            Self::Write(f) => Ok(f),
-            Self::ReadWrite(f) => Ok(f),
+            Self::Write(f, _) => Ok(f),
+            Self::ReadWrite(f, _) => Ok(f),
         }
     }
 
     fn get_seeker(&mut self) -> &mut dyn Seek {
         match self {
             Self::Read(f) => f,
-            Self::Write(f) => f,
-            Self::ReadWrite(f) => f,
+            Self::Write(f, _) => f,
+            Self::ReadWrite(f, _) => f,
         }
     }
 
     pub fn clear(&mut self) -> Result<()> {
         let f = match self {
             Self::Read(_) => return Err(Error::CantWrite),
-            Self::Write(f) => f.get_mut(),
-            Self::ReadWrite(f) => f,
+            Self::Write(f, staging) => {
+                if let Some(staging) = staging {
+                    staging.mark_dirty();
+                }
+                f.get_mut()
+            },
+            Self::ReadWrite(f, staging) => {
+                if let Some(staging) = staging {
+                    staging.mark_dirty();
+                }
+                f
+            },
         };
         f.seek(SeekFrom::Start(0))?;
         f.set_len(0)?;
@@ -311,6 +386,9 @@ impl BinaryHandle {
     }
 
     pub fn write_byte(&mut self, byte: u8) -> Result<()> {
+        if let Self::Write(_, Some(staging)) | Self::ReadWrite(_, Some(staging)) = self {
+            staging.mark_dirty();
+        }
         self.get_writer()?.write_all(&[byte])?;
         Ok(())
     }
@@ -337,10 +415,29 @@ impl BinaryHandle {
     pub fn flush(&mut self) -> Result<()> {
         match self {
             Self::Read(_) => Ok(()),
-            Self::Write(f) => f.flush(),
-            Self::ReadWrite(f) => f.flush(),
+            Self::Write(file, staging) => {
+                file.flush()?;
+                if let Some(staging) = staging {
+                    staging.commit()?;
+                }
+                Ok(())
+            },
+            Self::ReadWrite(file, staging) => {
+                file.flush()?;
+                if let Some(staging) = staging {
+                    staging.commit()?;
+                }
+                Ok(())
+            },
         }
-        .map_err(|e| e.into())
+    }
+}
+
+impl Drop for BinaryHandle {
+    fn drop(&mut self) {
+        if matches!(self, Self::Write(_, Some(_)) | Self::ReadWrite(_, Some(_))) {
+            let _ = self.flush();
+        }
     }
 }
 

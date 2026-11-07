@@ -9,7 +9,7 @@ pub mod info_window;
 pub mod model;
 pub mod movement;
 mod online_snapshot;
-mod reloaded_save;
+pub(crate) mod reloaded_save;
 mod team_file;
 mod team_adapter;
 mod team_codec_clean;
@@ -2023,19 +2023,44 @@ impl Game {
         self.finish_online_battle_guard("carga de partida");
         self.input.keyboard_clear_all();
         self.input.mouse_clear_all();
-        let mut file = std::fs::File::open(path)
-            .map(std::io::BufReader::new)
-            .map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?;
-        let mut magnum = [0u8; 4];
-        file.read(&mut magnum).map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?;
-        if magnum != [0x1d, 0x02, 0x00, 0x00] {
-            return Err(Box::new(gml::Error::FunctionError(
-                "game_load".into(),
-                "tried to load wrong version of save file".into(),
-            )));
-        }
-        let save: GMSave = bincode::deserialize_from(file)
-            .map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?;
+        let staged = match reloaded_save::load_part_atomic(&path, reloaded_save::SAVC) {
+            Some(Ok(Some(bytes))) => Some(bytes),
+            Some(Ok(None)) => {
+                return Err(Box::new(gml::Error::FunctionError(
+                    "game_load".into(),
+                    format!("{}", std::io::Error::new(std::io::ErrorKind::NotFound, "save file not found")),
+                )))
+            },
+            Some(Err(error)) => {
+                return Err(Box::new(gml::Error::FunctionError("game_load".into(), error.to_string())))
+            },
+            None => None,
+        };
+        let magic = [0x1d, 0x02, 0x00, 0x00];
+        let save: GMSave = if let Some(bytes) = staged {
+            if bytes.len() < magic.len() || bytes[..magic.len()] != magic {
+                return Err(Box::new(gml::Error::FunctionError(
+                    "game_load".into(),
+                    "tried to load wrong version of save file".into(),
+                )))
+            }
+            bincode::deserialize(&bytes[magic.len()..])
+                .map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?
+        } else {
+            let mut file = std::fs::File::open(path)
+                .map(std::io::BufReader::new)
+                .map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?;
+            let mut magnum = [0u8; 4];
+            file.read(&mut magnum).map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?;
+            if magnum != magic {
+                return Err(Box::new(gml::Error::FunctionError(
+                    "game_load".into(),
+                    "tried to load wrong version of save file".into(),
+                )))
+            }
+            bincode::deserialize_from(file)
+                .map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?
+        };
         save.into_game(self).map_err(|e| gml::Error::FunctionError("game_load".into(), e))?;
         self.scene_change = None;
         Ok(Default::default())
@@ -4259,13 +4284,40 @@ impl Game {
         let Some(handle) = self.local_player_handle() else {
             return Err("no se encontro al jugador local".into())
         };
-        self.run_script_value(
-            handle,
-            f3r::script::GUARDAR_PARTIDA_NAME,
-            &[gml::Value::Real(Real::from(1.0))],
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        let slot = self.global_num(f3r::global::SLOT, 0) as i32;
+        let directory = std::path::PathBuf::from(self.program_directory.decode_utf8().into_owned());
+        let baseline = if slot > 0 {
+            match save_guard::capture_before_save(&directory, slot) {
+                Ok(record) => record,
+                Err(error) => {
+                    eprintln!("[trade] no se pudo capturar el guardado previo: {error}");
+                    None
+                },
+            }
+        } else {
+            None
+        };
+        let result = self
+            .run_script_value(
+                handle,
+                f3r::script::GUARDAR_PARTIDA_NAME,
+                &[gml::Value::Real(Real::from(1.0))],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        if let (Err(error), Some(record)) = (&result, baseline) {
+            match save_guard::rollback_after_failure(&directory, slot, record.snapshot.id, "trade save") {
+                Ok(Some(receipt)) => {
+                    eprintln!("[trade] guardado fallido revertido a la revision {}", receipt.current)
+                },
+                Ok(None) => {},
+                Err(rollback_error) => {
+                    eprintln!("[trade] no se pudo revertir el guardado: {rollback_error}")
+                },
+            }
+            eprintln!("[trade] no se pudo guardar: {error}");
+        }
+        result
     }
 
     fn trade_tick(&mut self) {

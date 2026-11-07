@@ -1310,7 +1310,10 @@ impl SaveBackend for FileBackend {
             let _ = fs::remove_file(&temp);
             return Err(SaveError::corrupt("write verification failed"));
         }
-        fs::rename(&temp, &target)?;
+        if let Err(error) = fs::rename(&temp, &target) {
+            let _ = fs::remove_file(&temp);
+            return Err(error.into());
+        }
         let _ = sync_dir(&dir);
         Ok(SaveCommit {
             slot,
@@ -2366,6 +2369,11 @@ impl SaveHooks {
         record.interceptor = interceptor;
         record.destination = slot_label(destination);
 
+        let previous_image = if target.mode == SaveMode::VerifyOnly {
+            None
+        } else {
+            self.backend.load(world, destination)?
+        };
         let commit = self.backend.commit(
             world,
             destination,
@@ -2442,6 +2450,26 @@ impl SaveHooks {
         }
         record.verification = Some(verification.clone());
         if !verification.valid {
+            if target.mode != SaveMode::VerifyOnly {
+                let restore_image = match previous_image {
+                    Some(mut previous) => {
+                        previous.revision = commit.current.max(previous.revision);
+                        previous
+                    },
+                    None => SaveImage::empty(image.format, image.schema, commit.current),
+                };
+                if let Err(error) = self.backend.commit(
+                    world,
+                    destination,
+                    &restore_image,
+                    CommitOptions { mode: SaveMode::Replace, allow_world_readable: self.config.allow_world_readable },
+                ) {
+                    record.warnings.push(format!(
+                        "pre-save image restore failed: {}",
+                        sanitize(&error.to_string())
+                    ));
+                }
+            }
             return Err(SaveError::corrupt("post-save verification failed"));
         }
 
@@ -2800,7 +2828,19 @@ impl SaveHooks {
             None => None,
         };
 
-        let restore = self.backend.restore(source, expected)?;
+        let restore = match self.backend.restore(source, expected) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if let Some(pre_rollback) = &pre_rollback {
+                    if let Ok(Some(current)) = self.backend.load(world, slot) {
+                        if current.revision != pre_rollback.snapshot.revision {
+                            let _ = self.backend.restore(pre_rollback.snapshot.id, current.revision);
+                        }
+                    }
+                }
+                return Err(error)
+            },
+        };
         let restored = self.backend.load(world, slot)?;
         let original = SaveImage::decode(&record.snapshot.body)?;
         let matches = match &restored {
