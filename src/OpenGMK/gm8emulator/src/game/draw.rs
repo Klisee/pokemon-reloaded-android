@@ -439,7 +439,11 @@ impl Game {
 
     fn draw_trade(&mut self) {
         let Some(session) = self.trade.as_ref() else { return };
-        let title = format!("Intercambio con {}", session.name);
+        let title = if session.is_gift() {
+            format!("Regalo con {}", session.name)
+        } else {
+            format!("Intercambio con {}", session.name)
+        };
         let (body, options, selected, option_start) = match session.phase {
             crate::game::trade::TradePhase::Pick => {
                 let slots = crate::game::trade::occupied_slots(self);
@@ -453,7 +457,11 @@ impl Game {
                 }
                 options.push("Cancelar".into());
                 (
-                    format!("Elige un Pokemon para ofrecer a {}.", session.name),
+                    if session.is_gift() {
+                        format!("Elige el Pokemon que quieres regalar a {}.", session.name)
+                    } else {
+                        format!("Elige un Pokemon para ofrecer a {}.", session.name)
+                    },
                     options,
                     Some(session.selection),
                     1,
@@ -469,7 +477,11 @@ impl Game {
                 let mine = session.local.as_ref().map(|offer| offer.label.clone()).unwrap_or_default();
                 let theirs = session.remote.as_ref().map(|offer| offer.label.clone()).unwrap_or_default();
                 (
-                    format!("Tu das a {mine} y {} te da a {theirs}.#Confirmas?", session.name),
+                    if session.is_gift_receiver() {
+                        format!("{} te regala a {theirs}.#Aceptas?", session.name)
+                    } else {
+                        format!("Tu das a {mine} y {} te da a {theirs}.#Confirmas?", session.name)
+                    },
                     vec!["Si".into(), "No".into()],
                     Some(session.selection.min(1)),
                     2,

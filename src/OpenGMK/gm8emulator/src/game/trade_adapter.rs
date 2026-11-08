@@ -412,6 +412,113 @@ pub fn occupied_slots(game: &Game) -> Vec<u8> {
         .collect()
 }
 
+pub fn is_empty_slot(game: &Game, slot: u8) -> bool {
+    is_empty_slot_with(game, slot)
+}
+
+fn is_empty_slot_with<H: TradeHost + ?Sized>(game: &H, slot: u8) -> bool {
+    usize::from(slot) < f3r::format::PARTY_SIZE
+        && game.trade_global_num(f3r::global::PKMN1, u32::from(slot)) <= 0.0
+}
+
+/// First free party slot, used as the destination of a received gift. A full
+/// party has no destination and the receiver must decline or abort the commit.
+pub fn first_empty_slot(game: &Game) -> Option<u8> {
+    first_empty_slot_with(game)
+}
+
+fn first_empty_slot_with<H: TradeHost + ?Sized>(game: &H) -> Option<u8> {
+    (0..f3r::format::PARTY_SIZE as u8).find(|slot| is_empty_slot_with(game, *slot))
+}
+
+/// True when `slot` still holds exactly the Pokemon captured in `expected`.
+/// Label text is display-only and is not compared.
+pub fn slot_matches(game: &Game, slot: u8, expected: &TradeOffer) -> Result<bool, String> {
+    slot_matches_with(game, slot, expected)
+}
+
+fn slot_matches_with<H: TradeHost + ?Sized>(
+    game: &H,
+    slot: u8,
+    expected: &TradeOffer,
+) -> Result<bool, String> {
+    if expected.values.len() != VALUE_COUNT {
+        return Err("intercambio invalido".into())
+    }
+    let current = capture_with(game, slot)?;
+    Ok(current.values == expected.values)
+}
+
+/// Revalidates the giver's source slot at commit time. The selected slot must
+/// still be occupied and hold the exact Pokemon that was offered; otherwise no
+/// party state is changed and the gift aborts.
+pub fn revalidate_source(game: &Game, slot: u8, expected: &TradeOffer) -> Result<(), String> {
+    revalidate_source_with(game, slot, expected)
+}
+
+fn revalidate_source_with<H: TradeHost + ?Sized>(
+    game: &H,
+    slot: u8,
+    expected: &TradeOffer,
+) -> Result<(), String> {
+    if usize::from(slot) >= f3r::format::PARTY_SIZE {
+        return Err("slot de intercambio invalido".into())
+    }
+    if !is_valid_slot_with(game, slot) {
+        return Err("el Pokemon ofrecido ya no esta en la ranura".into())
+    }
+    if !slot_matches_with(game, slot, expected)? {
+        return Err("el Pokemon de la ranura cambio".into())
+    }
+    Ok(())
+}
+
+/// Empties the whole party slot after a gift: every scalar (including the held
+/// item), the four moves and the info block, so the giver really loses the
+/// Pokemon and its held item.
+pub fn clear_slot(game: &mut Game, slot: u8) -> Result<(), String> {
+    clear_slot_with(game, slot)
+}
+
+fn clear_slot_with<H: TradeHost + ?Sized>(game: &mut H, slot: u8) -> Result<(), String> {
+    if usize::from(slot) >= f3r::format::PARTY_SIZE {
+        return Err("slot de intercambio invalido".into())
+    }
+    for name in FIELDS.iter() {
+        set_value(game, name, u32::from(slot), TradeValue::Real(0.0));
+    }
+    for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
+        set_value(
+            game,
+            f3r::global::ATTACK1,
+            u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + move_index,
+            TradeValue::Real(0.0),
+        );
+    }
+    for info_index in 0..f3r::format::INFO_FIELDS as u32 {
+        let value = if info_index == f3r::format::OT_INFO_FIELD as u32
+            || info_index == f3r::format::NICKNAME_INFO_FIELD as u32
+        {
+            TradeValue::Text(Vec::new())
+        } else {
+            TradeValue::Real(0.0)
+        };
+        set_value(
+            game,
+            f3r::global::INFO,
+            u32::from(slot) * f3r::format::PARTY_ARRAY_STRIDE + info_index,
+            value,
+        );
+    }
+    let count = (0..f3r::format::PARTY_SIZE as u8)
+        .filter(|slot| game.trade_global_num(f3r::global::PKMN1, u32::from(*slot)) > 0.0)
+        .count() as f64;
+    if game.trade_global_num(f3r::global::ACTUAL1, 0) >= count {
+        game.trade_set_global_num(f3r::global::ACTUAL1, 0, 0.0);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1017,5 +1124,104 @@ mod tests {
         );
         assert_eq!(target.globals, expected);
         assert!(target.writes.is_empty());
+    }
+
+    #[test]
+    fn gift_source_revalidation_rejects_a_changed_or_emptied_slot() {
+        let mut host = capture_host();
+        host.put_num(f3r::global::OBJPOKE1, 0, 42.0);
+        let offered = capture_with(&host, 0).unwrap();
+        assert_eq!(revalidate_source_with(&host, 0, &offered), Ok(()));
+
+        host.put_num(f3r::global::NIVEL1, 0, 51.0);
+        assert_eq!(
+            revalidate_source_with(&host, 0, &offered),
+            Err("el Pokemon de la ranura cambio".into())
+        );
+        assert!(!slot_matches_with(&host, 0, &offered).unwrap());
+
+        host.put_num(f3r::global::NIVEL1, 0, 50.0);
+        clear_slot_with(&mut host, 0).unwrap();
+        assert_eq!(
+            revalidate_source_with(&host, 0, &offered),
+            Err("el Pokemon ofrecido ya no esta en la ranura".into())
+        );
+    }
+
+    #[test]
+    fn gift_clear_slot_removes_the_pokemon_item_moves_and_info() {
+        let mut host = capture_host();
+        host.put_num(f3r::global::OBJPOKE1, 0, 42.0);
+        host.put_num(f3r::global::ACTUAL1, 0, 6.0);
+        let offered = capture_with(&host, 0).unwrap();
+
+        clear_slot_with(&mut host, 0).unwrap();
+
+        assert_eq!(host.trade_global_num(f3r::global::PKMN1, 0), 0.0);
+        assert_eq!(host.trade_global_num(f3r::global::OBJPOKE1, 0), 0.0);
+        assert_eq!(host.trade_global_num(f3r::global::NIVEL1, 0), 0.0);
+        assert_eq!(host.trade_global_num(f3r::global::PS_1, 0), 0.0);
+        assert_eq!(host.trade_global_num(f3r::global::ACTUAL1, 0), 0.0);
+        for move_index in 1..=f3r::format::MOVE_COUNT as u32 {
+            assert_eq!(
+                host.trade_global_num(f3r::global::ATTACK1, move_index),
+                0.0
+            );
+        }
+        for info_index in 0..f3r::format::INFO_FIELDS as u32 {
+            let expected = if info_index == f3r::format::OT_INFO_FIELD as u32
+                || info_index == f3r::format::NICKNAME_INFO_FIELD as u32
+            {
+                GmlValue::Str(gml::String::from(b"".as_slice()))
+            } else {
+                GmlValue::Real(Real::from(0.0))
+            };
+            assert_eq!(
+                host.trade_global_value(f3r::global::INFO, info_index),
+                Some(expected)
+            );
+        }
+        assert!(!is_valid_slot_with(&host, 0));
+        assert!(!slot_matches_with(&host, 0, &offered).unwrap_or(false));
+    }
+
+    #[test]
+    fn gift_destination_is_the_first_empty_slot() {
+        let mut host = capture_host();
+        assert!(!is_empty_slot_with(&host, 0));
+        assert_eq!(first_empty_slot_with(&host), Some(1));
+
+        for slot in 1..f3r::format::PARTY_SIZE as u8 {
+            host.put_num(f3r::global::PKMN1, u32::from(slot), 1.0);
+        }
+        assert_eq!(first_empty_slot_with(&host), None);
+        assert!(!is_empty_slot_with(&host, f3r::format::PARTY_SIZE as u8));
+    }
+
+    #[test]
+    fn gift_clear_save_failure_restores_the_source_slot() {
+        let mut host = capture_host();
+        host.put_num(f3r::global::OBJPOKE1, 0, 42.0);
+        let before = host.globals.clone();
+        let expected = before.clone();
+        let outcome = crate::game::trade::commit_transaction(
+            &mut host,
+            |host| clear_slot_with(host, 0),
+            |_| Err("GuardarPartida".into()),
+            |host| {
+                host.globals = before.clone();
+                host.writes.clear();
+                Ok(())
+            },
+        );
+
+        assert_eq!(
+            outcome,
+            crate::game::trade::TradeCommit::SaveFailed("GuardarPartida".into())
+        );
+        assert_eq!(host.globals, expected);
+        assert_eq!(host.trade_global_num(f3r::global::PKMN1, 0), 100_448.0);
+        assert_eq!(host.trade_global_num(f3r::global::OBJPOKE1, 0), 42.0);
+        assert!(host.writes.is_empty());
     }
 }

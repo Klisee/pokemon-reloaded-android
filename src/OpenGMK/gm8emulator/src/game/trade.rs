@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
 pub use super::trade_adapter::{
-    apply, capture, decode, encode, encode_message, is_valid_slot, occupied_slots,
-    validate_offer, TradeOffer, TradeValue, FIELD_COUNT, VALUE_COUNT,
+    apply, capture, clear_slot, decode, encode, encode_message, first_empty_slot, is_empty_slot,
+    is_valid_slot, occupied_slots, revalidate_source, slot_matches, validate_offer, TradeOffer,
+    TradeValue, FIELD_COUNT, VALUE_COUNT,
 };
 
 /// Maximum inactive time in a trade before the session is cancelled. The timer is
@@ -45,10 +46,34 @@ pub enum TradePhase {
     WaitingOk,
 }
 
+/// Direction of a session. A gift has one offer only: the giver sends it and the
+/// receiver confirms it without offering anything back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TradeKind {
+    Trade,
+    GiftGiver,
+    GiftReceiver,
+}
+
+impl TradeKind {
+    pub fn is_gift(self) -> bool {
+        self != Self::Trade
+    }
+
+    pub fn is_giver(self) -> bool {
+        self == Self::GiftGiver
+    }
+
+    pub fn is_receiver(self) -> bool {
+        self == Self::GiftReceiver
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TradeSession {
     pub peer: u64,
     pub name: String,
+    pub kind: TradeKind,
     pub phase: TradePhase,
     pub slot: Option<u8>,
     pub local: Option<TradeOffer>,
@@ -73,9 +98,34 @@ impl TradeSession {
     }
 
     pub fn new_at(peer: u64, name: String, now: Instant) -> Self {
+        Self::new_kind_at(peer, name, TradeKind::Trade, now)
+    }
+
+    pub fn new_gift_giver(peer: u64, name: String) -> Self {
+        Self::new_gift_giver_at(peer, name, Instant::now())
+    }
+
+    pub fn new_gift_giver_at(peer: u64, name: String, now: Instant) -> Self {
+        Self::new_kind_at(peer, name, TradeKind::GiftGiver, now)
+    }
+
+    pub fn new_gift_receiver(peer: u64, name: String) -> Self {
+        Self::new_gift_receiver_at(peer, name, Instant::now())
+    }
+
+    pub fn new_gift_receiver_at(peer: u64, name: String, now: Instant) -> Self {
+        let mut session = Self::new_kind_at(peer, name, TradeKind::GiftReceiver, now);
+        // The receiver never picks a Pokemon; it waits for the giver's sole offer.
+        session.phase = TradePhase::WaitingOffer;
+        session.message = format!("Esperando el regalo de {}...", session.name);
+        session
+    }
+
+    fn new_kind_at(peer: u64, name: String, kind: TradeKind, now: Instant) -> Self {
         Self {
             peer,
             name,
+            kind,
             phase: TradePhase::Pick,
             slot: None,
             local: None,
@@ -89,6 +139,19 @@ impl TradeSession {
             timeout: TRADE_TIMEOUT,
             last_activity: now,
         }
+    }
+
+    pub fn is_gift(&self) -> bool {
+        self.kind.is_gift()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_gift_giver(&self) -> bool {
+        self.kind.is_giver()
+    }
+
+    pub fn is_gift_receiver(&self) -> bool {
+        self.kind.is_receiver()
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {
@@ -115,13 +178,31 @@ impl TradeSession {
     }
 
     fn completion(&self) -> TradeAck {
-        if self.slot.is_none() || self.local.is_none() {
-            return TradeAck::Incomplete
-        }
-        if self.remote.is_none() {
-            // Both confirmations may arrive before the peer's offer. Keep waiting
-            // instead of cancelling a session that can still complete.
-            return TradeAck::Wait
+        match self.kind {
+            TradeKind::Trade => {
+                if self.slot.is_none() || self.local.is_none() {
+                    return TradeAck::Incomplete
+                }
+                if self.remote.is_none() {
+                    // Both confirmations may arrive before the peer's offer. Keep waiting
+                    // instead of cancelling a session that can still complete.
+                    return TradeAck::Wait
+                }
+            },
+            TradeKind::GiftGiver => {
+                // The giver never receives an offer; its own offer is also its
+                // confirmation. Only the receiver's `OK` is outstanding.
+                if self.slot.is_none() || self.local.is_none() {
+                    return TradeAck::Incomplete
+                }
+            },
+            TradeKind::GiftReceiver => {
+                // The receiver never sends an offer. The giver's offer carries the
+                // giver's confirmation, so only the local confirmation is missing.
+                if self.remote.is_none() {
+                    return TradeAck::Incomplete
+                }
+            },
         }
         if self.local_ok && self.remote_ok {
             TradeAck::Complete
@@ -141,12 +222,24 @@ impl TradeSession {
         offer: TradeOffer,
         now: Instant,
     ) -> TradeAck {
-        if self.closed || self.committed || self.local.is_some() || self.slot.is_some() {
+        if self.closed
+            || self.committed
+            || self.kind.is_receiver()
+            || self.local.is_some()
+            || self.slot.is_some()
+        {
             return TradeAck::Duplicate
         }
         self.slot = Some(slot);
         self.local = Some(offer);
         self.touch(now);
+        if self.kind.is_giver() {
+            // Sending the gift offer is also the giver's confirmation.
+            self.local_ok = true;
+            self.phase = TradePhase::WaitingOk;
+            self.message = format!("Esperando la confirmacion de {}...", self.name);
+            return self.completion()
+        }
         if self.remote.is_some() {
             self.phase = TradePhase::Confirm;
             self.selection = 0;
@@ -165,11 +258,20 @@ impl TradeSession {
     }
 
     pub fn bind_remote_offer_at(&mut self, offer: TradeOffer, now: Instant) -> TradeAck {
-        if self.closed || self.committed || self.remote.is_some() {
+        if self.closed || self.committed || self.kind.is_giver() || self.remote.is_some() {
             return TradeAck::Duplicate
         }
+        let label = offer.label.clone();
         self.remote = Some(offer);
         self.touch(now);
+        if self.kind.is_receiver() {
+            // The giver's sole offer is also the giver's confirmation.
+            self.remote_ok = true;
+            self.phase = TradePhase::Confirm;
+            self.selection = 0;
+            self.message = format!("{} te regala a {label}. Confirmas?", self.name);
+            return self.completion()
+        }
         match self.phase {
             TradePhase::WaitingOffer => {
                 self.phase = TradePhase::Confirm;
@@ -414,6 +516,90 @@ mod tests {
         assert_eq!(session.note_local_ok_at(now), TradeAck::Wait);
         assert_eq!(session.phase, TradePhase::WaitingOk);
         assert_eq!(session.note_remote_ok_at(now), TradeAck::Complete);
+    }
+
+    #[test]
+    fn gift_giver_offer_is_also_its_confirmation() {
+        let now = at(0);
+        let mut session = TradeSession::new_gift_giver_at(7, "Rival".into(), now);
+        assert!(session.is_gift());
+        assert!(session.is_gift_giver());
+        assert_eq!(
+            session.bind_local_offer_at(2, offer("gift"), now),
+            TradeAck::Wait
+        );
+        assert!(session.local_ok);
+        assert_eq!(session.phase, TradePhase::WaitingOk);
+        assert!(session.remote.is_none());
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Complete);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Duplicate);
+    }
+
+    #[test]
+    fn gift_giver_does_not_accept_a_remote_offer() {
+        let now = at(0);
+        let mut session = TradeSession::new_gift_giver_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_remote_offer_at(offer("remote"), now),
+            TradeAck::Duplicate
+        );
+        assert!(session.remote.is_none());
+    }
+
+    #[test]
+    fn gift_receiver_waits_for_the_givers_offer_then_confirms() {
+        let now = at(0);
+        let mut session = TradeSession::new_gift_receiver_at(7, "Rival".into(), now);
+        assert!(session.is_gift_receiver());
+        assert_eq!(session.phase, TradePhase::WaitingOffer);
+        assert_eq!(
+            session.bind_remote_offer_at(offer("regalo"), now),
+            TradeAck::Wait
+        );
+        assert!(session.remote_ok);
+        assert_eq!(session.phase, TradePhase::Confirm);
+        assert!(session.local.is_none());
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Complete);
+    }
+
+    #[test]
+    fn gift_receiver_cannot_send_an_offer() {
+        let now = at(0);
+        let mut session = TradeSession::new_gift_receiver_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_local_offer_at(2, offer("local"), now),
+            TradeAck::Duplicate
+        );
+        assert!(session.local.is_none());
+        assert!(session.slot.is_none());
+    }
+
+    #[test]
+    fn duplicate_gift_offer_keeps_the_first_one() {
+        let now = at(0);
+        let mut session = TradeSession::new_gift_receiver_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_remote_offer_at(offer("first"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(
+            session.bind_remote_offer_at(offer("second"), now),
+            TradeAck::Duplicate
+        );
+        assert_eq!(session.remote.as_ref().unwrap().label, "first");
+    }
+
+    #[test]
+    fn gift_receiver_no_closes_without_a_local_offer() {
+        let now = at(0);
+        let mut session = TradeSession::new_gift_receiver_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_remote_offer_at(offer("regalo"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(session.note_remote_no_at(now), TradeAck::Accepted);
+        assert!(session.closed);
+        assert!(!session.begin_commit());
     }
 
     #[test]
