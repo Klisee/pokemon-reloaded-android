@@ -4266,11 +4266,39 @@ impl Game {
             return
         }
         eprintln!("[trade] inicio peer={peer} name={name}");
+        self.start_session(trade::TradeSession::new(peer, name));
+    }
+
+    fn start_gift(&mut self, peer: u64, name: String, giver: bool) {
+        if self.battle_sync_active || self.battle_pending {
+            self.interaction_response = Some((
+                if giver {
+                    "No puedes regalar durante un combate.".into()
+                } else {
+                    "No puedes recibir un regalo durante un combate.".into()
+                },
+                false,
+            ));
+            return
+        }
+        eprintln!(
+            "[gift] inicio peer={peer} name={name} rol={}",
+            if giver { "giver" } else { "receiver" }
+        );
+        let session = if giver {
+            trade::TradeSession::new_gift_giver(peer, name)
+        } else {
+            trade::TradeSession::new_gift_receiver(peer, name)
+        };
+        self.start_session(session);
+    }
+
+    fn start_session(&mut self, session: trade::TradeSession) {
         // Do not adopt stale OK/NO controls queued before this session started.
-        // A queued OFFER may be the peer answering our accepted request.
+        // A queued OFFER/GIFT may be the peer answering our accepted request.
         self.reloaded_online.clear_peer_controls();
         self.reloaded_online.clear_peer_left();
-        self.trade = Some(trade::TradeSession::new(peer, name));
+        self.trade = Some(session);
         self.interaction_menu_open = false;
         self.interaction_request = None;
         self.interaction_response = None;
@@ -4303,12 +4331,36 @@ impl Game {
     }
 
     fn commit_trade_from_session(&mut self, session: &mut trade::TradeSession) -> bool {
-        let Some(slot) = session.slot else { return false };
-        let Some(remote) = session.remote.clone() else { return false };
-        if session.local.is_none() || !session.begin_commit() {
-            return false
+        match session.kind {
+            trade::TradeKind::Trade => {
+                let Some(slot) = session.slot else { return false };
+                let Some(remote) = session.remote.clone() else { return false };
+                if session.local.is_none() || !session.begin_commit() {
+                    return false
+                }
+                self.complete_trade(slot, &remote);
+            },
+            trade::TradeKind::GiftGiver => {
+                let Some(slot) = session.slot else { return false };
+                let Some(local) = session.local.clone() else { return false };
+                let peer_name = session.name.clone();
+                if !session.begin_commit() {
+                    return false
+                }
+                self.complete_gift_giver(slot, &local, &peer_name);
+            },
+            trade::TradeKind::GiftReceiver => {
+                let Some(remote) = session.remote.clone() else { return false };
+                if !session.begin_commit() {
+                    return false
+                }
+                let Some(slot) = trade::first_empty_slot(self) else {
+                    self.fail_gift_commit("Tu equipo esta lleno; no puedes recibir el regalo.");
+                    return true
+                };
+                self.complete_gift_receiver(slot, &remote);
+            },
         }
-        self.complete_trade(slot, &remote);
         true
     }
 
@@ -4321,7 +4373,11 @@ impl Game {
         self.reloaded_online.tick(&self.room, &self.assets);
         let Some(mut session) = self.trade.take() else { return };
         if !self.reloaded_online.is_ready() {
-            self.cancel_trade("La conexion online se perdio.");
+            self.cancel_trade(if session.is_gift() {
+                "Se perdio la conexion; el regalo no se completo."
+            } else {
+                "La conexion online se perdio."
+            });
             return
         }
         let peer_left = self.reloaded_online.take_peer_left();
@@ -4332,7 +4388,11 @@ impl Game {
             }
         }
         if peer_left || peer_id_left {
-            self.cancel_trade("El rival salio del intercambio.");
+            self.cancel_trade(if session.is_gift() {
+                "El rival salio del regalo."
+            } else {
+                "El rival salio del intercambio."
+            });
             return
         }
         let mut finished = false;
@@ -4340,6 +4400,11 @@ impl Game {
         while let Some(message) = self.reloaded_online.take_peer_message() {
             match message.kind {
                 crate::reloaded_online::PeerMessageKind::Offer => {
+                    if session.is_gift() {
+                        self.cancel_trade("El rival envio una oferta fuera del regalo.");
+                        finished = true;
+                        break
+                    }
                     match trade::decode(&message.payload) {
                         Ok(offer) => {
                             eprintln!("[trade] oferta remota label={} fields={}", offer.label, offer.values.len());
@@ -4397,8 +4462,14 @@ impl Game {
                                 eprintln!("[trade] NO recibido");
                             }
                             self.reloaded_online.end_session();
-                            self.interaction_response =
-                                Some(("El rival cancelo el intercambio.".into(), false));
+                            self.interaction_response = Some((
+                                if session.is_gift() {
+                                    "El rival rechazo o cancelo el regalo.".into()
+                                } else {
+                                    "El rival cancelo el intercambio.".into()
+                                },
+                                false,
+                            ));
                             finished = true;
                             break
                         },
@@ -4409,9 +4480,42 @@ impl Game {
                     }
                 },
                 crate::reloaded_online::PeerMessageKind::Gift => {
-                    self.cancel_trade("Los regalos todavia no estan disponibles.");
-                    finished = true;
-                    break
+                    if !session.is_gift_receiver() {
+                        self.cancel_trade("El rival envio un regalo fuera de lugar.");
+                        finished = true;
+                        break
+                    }
+                    match trade::decode(&message.payload) {
+                        Ok(offer) => {
+                            eprintln!("[gift] regalo remoto label={} fields={}", offer.label, offer.values.len());
+                            if let Err(error) = trade::validate_offer(&offer) {
+                                eprintln!("[gift] regalo remoto bloqueado: {error}");
+                                self.cancel_trade(&error);
+                                finished = true;
+                                break
+                            }
+                            match session.bind_remote_offer(offer) {
+                                trade::TradeAck::Duplicate => {
+                                    eprintln!("[gift] regalo remoto duplicado ignorado");
+                                },
+                                trade::TradeAck::Complete => {
+                                    ready_to_commit = true;
+                                },
+                                trade::TradeAck::Incomplete => {
+                                    self.cancel_trade("El regalo quedo incompleto.");
+                                    finished = true;
+                                    break
+                                },
+                                trade::TradeAck::Wait | trade::TradeAck::Accepted => {},
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("[gift] regalo invalido: {error}");
+                            self.cancel_trade("El regalo del rival no es valido.");
+                            finished = true;
+                            break
+                        },
+                    }
                 },
             }
         }
@@ -4420,12 +4524,20 @@ impl Game {
             // NO in the same poll must cancel instead of applying one side only.
             if ready_to_commit {
                 if !self.commit_trade_from_session(&mut session) {
-                    self.cancel_trade("El intercambio quedo incompleto.");
+                    self.cancel_trade(if session.is_gift() {
+                        "El regalo quedo incompleto."
+                    } else {
+                        "El intercambio quedo incompleto."
+                    });
                 }
                 return
             }
             if session.is_timed_out(Instant::now()) {
-                self.cancel_trade("El intercambio expiro.");
+                self.cancel_trade(if session.is_gift() {
+                    "La espera termino; el regalo no se completo."
+                } else {
+                    "El intercambio expiro."
+                });
                 return
             }
             self.trade = Some(session);
@@ -4486,10 +4598,123 @@ impl Game {
         }
     }
 
+    fn complete_gift_giver(
+        &mut self,
+        slot: u8,
+        local: &trade::TradeOffer,
+        peer_name: &str,
+    ) {
+        let snapshot = online_snapshot::OnlineSnapshot::capture(self);
+        let outcome = trade::commit_transaction(
+            self,
+            |game| {
+                // Revalidate the source slot immediately before the commit: the
+                // gift must abort if that slot no longer holds the offered Pokemon.
+                trade::revalidate_source(game, slot, local)?;
+                if let Some(handle) = game.local_player_handle() {
+                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK);
+                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK_2);
+                }
+                let result = trade::clear_slot(game, slot);
+                if result.is_ok() {
+                    if let Some(handle) = game.local_player_handle() {
+                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK);
+                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK_2);
+                        let _ = game.run_instance_script(handle, f3r::script::NET_TEAM_SPRITES);
+                    }
+                }
+                result
+            },
+            |game| game.save_trade(),
+            |game| snapshot.restore(game),
+        );
+        let success = format!(
+            "Regalo completado: {peer_name} recibio a {}.",
+            local.label
+        );
+        self.finish_gift_commit(outcome, success, format!("regalo entregado slot={slot}"));
+    }
+
+    fn complete_gift_receiver(&mut self, slot: u8, remote: &trade::TradeOffer) {
+        let snapshot = online_snapshot::OnlineSnapshot::capture(self);
+        let outcome = trade::commit_transaction(
+            self,
+            |game| {
+                trade::validate_offer(remote)?;
+                if !trade::is_empty_slot(game, slot) {
+                    return Err("la ranura de destino ya esta ocupada".into())
+                }
+                if let Some(handle) = game.local_player_handle() {
+                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK);
+                    let _ = game.run_instance_script(handle, f3r::script::GET_SECURITY_PK_2);
+                }
+                let result = trade::apply(game, slot, remote);
+                if result.is_ok() {
+                    if let Some(handle) = game.local_player_handle() {
+                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK);
+                        let _ = game.run_instance_script(handle, f3r::script::SECURITY_PK_2);
+                        let _ = game.run_instance_script(handle, f3r::script::NET_TEAM_SPRITES);
+                    }
+                }
+                result
+            },
+            |game| game.save_trade(),
+            |game| snapshot.restore(game),
+        );
+        let success = format!("Regalo completado: recibiste a {}.", remote.label);
+        self.finish_gift_commit(outcome, success, format!("regalo recibido slot={slot}"));
+    }
+
+    fn finish_gift_commit(
+        &mut self,
+        outcome: trade::TradeCommit,
+        success: String,
+        applied: String,
+    ) {
+        match outcome {
+            trade::TradeCommit::Committed => {
+                self.reloaded_online.end_session();
+                self.interaction_response = Some((success, true));
+                eprintln!("[gift] {applied}");
+            },
+            trade::TradeCommit::SaveFailed(error) => {
+                eprintln!("[gift] no se pudo guardar: {error}");
+                self.reloaded_online.send_peer_message(
+                    crate::reloaded_online::PeerMessageKind::No,
+                    &[],
+                );
+                self.reloaded_online.end_session();
+                self.interaction_response =
+                    Some(("No se pudo guardar el regalo.".into(), false));
+            },
+            trade::TradeCommit::ApplyFailed(error) => {
+                eprintln!("[gift] no se pudo aplicar: {error}");
+                self.reloaded_online.send_peer_message(
+                    crate::reloaded_online::PeerMessageKind::No,
+                    &[],
+                );
+                self.reloaded_online.end_session();
+                self.interaction_response =
+                    Some(("No se pudo completar el regalo; no se hizo ningun cambio.".into(), false));
+            },
+        }
+    }
+
+    fn fail_gift_commit(&mut self, message: &str) {
+        eprintln!("[gift] cancel: {message}");
+        self.reloaded_online.send_peer_message(crate::reloaded_online::PeerMessageKind::No, &[]);
+        self.reloaded_online.end_session();
+        self.interaction_response = Some((message.to_string(), false));
+    }
+
     fn trade_input(&mut self) {
         let Some(mut session) = self.trade.take() else { return };
         if self.battle_sync_active || self.battle_pending {
-            self.cancel_trade("El combate interrumpio el intercambio.");
+            self.cancel_trade(if session.is_gift() {
+                "El combate interrumpio el regalo."
+            } else {
+                "El combate interrumpio el intercambio."
+            });
             return
         }
         let mouse = self.input.mouse_check_button_pressed(1);
@@ -4498,7 +4723,11 @@ impl Game {
             trade::TradePhase::Pick => {
                 let slots = trade::occupied_slots(self);
                 if slots.is_empty() {
-                    self.cancel_trade("No tienes Pokemon para intercambiar.");
+                    self.cancel_trade(if session.is_gift() {
+                        "No tienes Pokemon para regalar."
+                    } else {
+                        "No tienes Pokemon para intercambiar."
+                    });
                     return
                 }
                 let option_count = slots.len() + 1;
@@ -4522,12 +4751,20 @@ impl Game {
                     }
                 }
                 if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
-                    self.cancel_trade("Has cancelado el intercambio.");
+                    self.cancel_trade(if session.is_gift() {
+                        "Has cancelado el regalo."
+                    } else {
+                        "Has cancelado el intercambio."
+                    });
                     return
                 }
                 if activate {
                     if session.selection >= slots.len() {
-                        self.cancel_trade("Has cancelado el intercambio.");
+                        self.cancel_trade(if session.is_gift() {
+                            "Has cancelado el regalo."
+                        } else {
+                            "Has cancelado el intercambio."
+                        });
                         return
                     }
                     let slot = slots[session.selection];
@@ -4539,7 +4776,9 @@ impl Game {
                             }
                             let payload = match trade::encode_message(&offer) {
                                 Ok(payload) => {
-                                    eprintln!("[trade] oferta local slot={slot} label={} bytes={}", offer.label, payload.len());
+                                    eprintln!("[{}] oferta local slot={slot} label={} bytes={}",
+                                        if session.is_gift() { "gift" } else { "trade" },
+                                        offer.label, payload.len());
                                     payload
                                 },
                                 Err(error) => {
@@ -4547,16 +4786,36 @@ impl Game {
                                     return
                                 },
                             };
-                            if !self.reloaded_online.send_peer_message(
-                                crate::reloaded_online::PeerMessageKind::Offer,
-                                &payload,
-                            ) {
-                                self.cancel_trade("No se pudo enviar la oferta.");
+                            let message_kind = if session.is_gift() {
+                                crate::reloaded_online::PeerMessageKind::Gift
+                            } else {
+                                crate::reloaded_online::PeerMessageKind::Offer
+                            };
+                            if !self.reloaded_online.send_peer_message(message_kind, &payload) {
+                                self.cancel_trade(if session.is_gift() {
+                                    "No se pudo enviar el regalo."
+                                } else {
+                                    "No se pudo enviar la oferta."
+                                });
                                 return
                             }
-                            if session.bind_local_offer(slot, offer) == trade::TradeAck::Duplicate {
-                                self.cancel_trade("El intercambio quedo incompleto.");
-                                return
+                            match session.bind_local_offer(slot, offer) {
+                                trade::TradeAck::Duplicate => {
+                                    self.cancel_trade(if session.is_gift() {
+                                        "El regalo quedo incompleto."
+                                    } else {
+                                        "El intercambio quedo incompleto."
+                                    });
+                                    return
+                                },
+                                trade::TradeAck::Complete => {
+                                    eprintln!("[gift] confirmacion y oferta cruzadas; aplicando");
+                                    if !self.commit_trade_from_session(&mut session) {
+                                        self.cancel_trade("El regalo quedo incompleto.");
+                                    }
+                                    return
+                                },
+                                _ => {},
                             }
                         },
                         Err(error) => {
@@ -4604,7 +4863,11 @@ impl Game {
                     }
                 }
                 if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
-                    self.cancel_trade("Has cancelado el intercambio.");
+                    self.cancel_trade(if session.is_gift() {
+                        "Has rechazado el regalo."
+                    } else {
+                        "Has cancelado el intercambio."
+                    });
                     return
                 }
                 if activate {
@@ -4615,29 +4878,48 @@ impl Game {
                         ) {
                             match session.note_local_ok() {
                                 trade::TradeAck::Complete => {
-                                    eprintln!("[trade] OK cruzado; aplicando intercambio");
+                                    eprintln!("[{}] OK cruzado; aplicando",
+                                        if session.is_gift() { "gift" } else { "trade" });
                                     if !self.commit_trade_from_session(&mut session) {
-                                        self.cancel_trade("El intercambio quedo incompleto.");
+                                        self.cancel_trade(if session.is_gift() {
+                                            "El regalo quedo incompleto."
+                                        } else {
+                                            "El intercambio quedo incompleto."
+                                        });
                                     }
                                     return
                                 },
                                 trade::TradeAck::Incomplete => {
-                                    self.cancel_trade("El intercambio quedo incompleto.");
+                                    self.cancel_trade(if session.is_gift() {
+                                        "El regalo quedo incompleto."
+                                    } else {
+                                        "El intercambio quedo incompleto."
+                                    });
                                     return
                                 },
                                 trade::TradeAck::Duplicate => {
-                                    eprintln!("[trade] OK local duplicado ignorado");
+                                    eprintln!("[{}] OK local duplicado ignorado",
+                                        if session.is_gift() { "gift" } else { "trade" });
                                 },
                                 trade::TradeAck::Wait | trade::TradeAck::Accepted => {
-                                    eprintln!("[trade] OK enviado; esperando OK del rival");
+                                    eprintln!("[{}] OK enviado; esperando OK del rival",
+                                        if session.is_gift() { "gift" } else { "trade" });
                                 },
                             }
                         } else {
-                            self.cancel_trade("No se pudo confirmar el intercambio.");
+                            self.cancel_trade(if session.is_gift() {
+                                "No se pudo confirmar el regalo."
+                            } else {
+                                "No se pudo confirmar el intercambio."
+                            });
                             return
                         }
                     } else {
-                        self.cancel_trade("Has rechazado el intercambio.");
+                        self.cancel_trade(if session.is_gift() {
+                            "Has rechazado el regalo."
+                        } else {
+                            "Has rechazado el intercambio."
+                        });
                         return
                     }
                 }
@@ -4671,6 +4953,10 @@ impl Game {
             let kind = self.interaction_pending_kind.take();
             if response.accept && kind.as_deref() == Some("T") {
                 self.start_trade(response.id, response.name);
+                return
+            }
+            if response.accept && kind.as_deref() == Some("G") {
+                self.start_gift(response.id, response.name, true);
                 return
             }
             if response.accept && kind.as_deref() == Some("F") {
@@ -4761,13 +5047,30 @@ impl Game {
             if let Some((id, name, kind, _)) = self.interaction_request.take() {
                 let accept = selection == 0;
                 if accept && kind == "G" {
-                    self.reloaded_online.send_response(id, false);
-                    self.interaction_response = Some(("Regalar todavia no esta disponible.".into(), false));
-                    return
+                    // Decide gift admission before sending acceptance: a battle
+                    // or a full party must decline, never enter a session.
+                    if self.battle_sync_active || self.battle_pending {
+                        self.reloaded_online.send_response(id, false);
+                        self.interaction_response = Some((
+                            "No puedes recibir un regalo durante un combate.".into(),
+                            false,
+                        ));
+                        return
+                    }
+                    if trade::first_empty_slot(self).is_none() {
+                        self.reloaded_online.send_response(id, false);
+                        self.interaction_response = Some((
+                            "Tu equipo esta lleno; no puedes recibir el regalo.".into(),
+                            false,
+                        ));
+                        return
+                    }
                 }
                 self.reloaded_online.send_response(id, accept);
                 if accept && kind == "T" {
                     self.start_trade(id, name);
+                } else if accept && kind == "G" {
+                    self.start_gift(id, name, false);
                 } else if accept && kind == "F" {
                     self.send_battle_team_to(id, &name);
                 }
@@ -4827,10 +5130,11 @@ impl Game {
             1 => "T",
             _ => "G",
         };
-        if kind == "G" {
+        if kind == "G" && (self.battle_sync_active || self.battle_pending) {
             self.interaction_menu_open = false;
             self.interaction_target = None;
-            self.interaction_response = Some(("Regalar todavia no esta disponible.".into(), false));
+            self.interaction_response =
+                Some(("No puedes regalar durante un combate.".into(), false));
             return
         }
         if let Some(target) = self.interaction_target {
