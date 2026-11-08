@@ -17,7 +17,7 @@ use reloaded_cleanroom::save::{
     self, CURRENT_IMAGE_SCHEMA, CommitOptions, FileBackend, FormatId, MAX_PART_BYTES, Revision, SaveBackend,
     SaveCommit, SaveError, SaveHookConfig, SaveHooks, SaveImage, SaveMode, SaveSlot, SaveTarget, SaveTrigger,
     SnapshotBudget, SnapshotCause, SnapshotEntry, SnapshotId, SnapshotMetaRequest, SnapshotRecord,
-    SnapshotVerification, WorldId,
+    SnapshotVerification, Timestamp, WorldId,
 };
 
 pub(crate) const HOST_FORMAT: FormatId = FormatId(*b"RELOADD1");
@@ -701,6 +701,29 @@ impl HostSaveService {
         self.hooks.capture(self.world(), slot, SnapshotCause::Manual)
     }
 
+    /// Captures an empty baseline for a slot that has no live files yet. A
+    /// failed save can then be rolled back to "slot absent" instead of leaving
+    /// the parts it managed to write behind.
+    pub(crate) fn capture_empty(&self, slot: SaveSlot) -> Result<SnapshotRecord, SaveError> {
+        let _guard = self.save_lock.lock().unwrap_or_else(|poison| poison.into_inner());
+        let world = self.world();
+        let epoch = self.hooks.begin_session(world);
+        let image = SaveImage::empty(HOST_FORMAT, CURRENT_IMAGE_SCHEMA, 0);
+        let config = self.hooks.config();
+        let budget = SnapshotBudget {
+            max_total_bytes: config.max_total_backup_bytes,
+            min_free_bytes: config.min_free_bytes,
+            allow_world_readable: config.allow_world_readable,
+        };
+        let request = SnapshotMetaRequest {
+            epoch,
+            baseline: true,
+            cause: SnapshotCause::Baseline,
+            captured_at: Timestamp::now(),
+        };
+        self.backend.capture(world, slot, &image, request, budget)
+    }
+
     pub(crate) fn save_part(
         &self,
         slot: SaveSlot,
@@ -1173,14 +1196,18 @@ fn checked_slot(slot: i32) -> Result<SaveSlot, SaveError> {
 }
 
 /// Captures the live slot before a mutating operation (trade save, explicit
-/// rollback checkpoints) without changing the selected save file.
+/// rollback checkpoints) without changing the selected save file. An empty slot
+/// still gets a checkpoint, so a failed save that creates part of a new slot can
+/// be rolled back to "slot absent".
 pub(crate) fn capture_slot(program_dir: &Path, slot: i32) -> Result<Option<SnapshotRecord>, SaveError> {
     let slot = checked_slot(slot)?;
     let service = service_for(program_dir)?;
-    if service.load(slot)?.is_none() {
-        return Ok(None)
-    }
-    match service.capture(slot) {
+    let captured = if service.load(slot)?.is_some() {
+        service.capture(slot)
+    } else {
+        service.capture_empty(slot)
+    };
+    match captured {
         Ok(record) => Ok(Some(record)),
         Err(error) if matches!(error.kind(), save::ErrorKind::Unavailable | save::ErrorKind::Rejected) => Ok(None),
         Err(error) => Err(error),
@@ -1464,6 +1491,24 @@ mod tests {
             rollback_slot(dir.path(), 13, record.snapshot.id, "failed save").unwrap().expect("rollback");
         assert_eq!(receipt.previous, record.snapshot.revision + 1);
         assert_eq!(fs::read(live(&dir, 13, f3r::save::EXT_SAVC)).unwrap(), b"one");
+    }
+
+    #[test]
+    fn empty_slot_checkpoint_rolls_back_new_parts() {
+        let dir = TempDir::new();
+        let slot = SaveSlot(21);
+        let record = capture_slot(dir.path(), 21).unwrap().expect("empty checkpoint");
+        assert_eq!(record.snapshot.revision, 0);
+
+        let service = service(&dir);
+        service.save_part(slot, SAVC, b"partial", SaveTrigger::Manual).unwrap();
+        assert!(live(&dir, 21, f3r::save::EXT_SAVC).exists());
+
+        rollback_slot(dir.path(), 21, record.snapshot.id, "failed new save")
+            .unwrap()
+            .expect("rollback");
+        assert!(!live(&dir, 21, f3r::save::EXT_SAVC).exists());
+        assert!(service.load(slot).unwrap().is_none());
     }
 
     #[test]

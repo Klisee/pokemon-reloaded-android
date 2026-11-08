@@ -4291,38 +4291,15 @@ impl Game {
         };
         let slot = self.global_num(f3r::global::SLOT, 0) as i32;
         let directory = std::path::PathBuf::from(self.program_directory.decode_utf8().into_owned());
-        let baseline = if slot > 0 {
-            match save_guard::capture_before_save(&directory, slot) {
-                Ok(record) => record,
-                Err(error) => {
-                    eprintln!("[trade] no se pudo capturar el guardado previo: {error}");
-                    None
-                },
-            }
-        } else {
-            None
-        };
-        let result = self
-            .run_script_value(
+        save_guard::transactional_save(&directory, slot, "trade save", || {
+            self.run_script_value(
                 handle,
                 f3r::script::GUARDAR_PARTIDA_NAME,
                 &[gml::Value::Real(Real::from(1.0))],
             )
             .map(|_| ())
-            .map_err(|error| error.to_string());
-        if let (Err(error), Some(record)) = (&result, baseline) {
-            match save_guard::rollback_after_failure(&directory, slot, record.snapshot.id, "trade save") {
-                Ok(Some(receipt)) => {
-                    eprintln!("[trade] guardado fallido revertido a la revision {}", receipt.current)
-                },
-                Ok(None) => {},
-                Err(rollback_error) => {
-                    eprintln!("[trade] no se pudo revertir el guardado: {rollback_error}")
-                },
-            }
-            eprintln!("[trade] no se pudo guardar: {error}");
-        }
-        result
+            .map_err(|error| error.to_string())
+        })
     }
 
     fn commit_trade_from_session(&mut self, session: &mut trade::TradeSession) -> bool {
@@ -4475,9 +4452,7 @@ impl Game {
                 result
             },
             |game| game.save_trade(),
-            |game| {
-                let _ = snapshot.restore(game);
-            },
+            |game| snapshot.restore(game),
         );
         match outcome {
             trade::TradeCommit::Committed => {

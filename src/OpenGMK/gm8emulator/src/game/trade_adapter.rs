@@ -971,6 +971,7 @@ mod tests {
             |host| {
                 host.globals = before.clone();
                 host.writes.clear();
+                Ok(())
             },
         );
 
@@ -1006,6 +1007,7 @@ mod tests {
             |host| {
                 host.globals = before.clone();
                 host.writes.clear();
+                Ok(())
             },
         );
 
