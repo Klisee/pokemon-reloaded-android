@@ -1840,6 +1840,27 @@ mod tests {
     }
 
     #[test]
+    fn canonical_and_malformed_welcome_keep_existing_parse() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream
+                .write_all(b"WELCOME 7\nWELCOME greeting\nWELCOME 1 extra\nWELCOME -1\nWELCOME\nWAIT\n")
+                .expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+
+        let client = connect(addr);
+        assert_eq!(next_event(&client), RozEvent::Welcome { version: 7, id: 7 });
+        for _ in 0..4 {
+            assert_eq!(next_event(&client), RozEvent::Welcome { version: 0, id: 0 });
+        }
+        assert_eq!(next_event(&client), RozEvent::Wait);
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
     fn legacy_join_wexc_and_raw_wsay_still_work() {
         let (tx, rx) = mpsc::channel();
         let addr = spawn_mock(move |mut stream| {
