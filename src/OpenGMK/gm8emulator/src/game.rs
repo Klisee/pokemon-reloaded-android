@@ -5103,7 +5103,7 @@ impl Game {
         let mut mouse = false;
         if self.input.mouse_check_button_pressed(1) {
             let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
-            let (x1, y1, x2, y2) = self.interaction_row(0);
+            let (x1, y1, x2, y2) = self.interaction_row(6);
             mouse = x >= x1 && x <= x2 && y >= y1 && y <= y2;
         }
         if !key && !mouse {

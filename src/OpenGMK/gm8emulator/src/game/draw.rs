@@ -525,7 +525,7 @@ impl Game {
             ONLINE_CONNECTED_NOTICE,
             &["Aceptar"],
             Some(0),
-            0,
+            6,
         );
     }
 
