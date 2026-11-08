@@ -13,6 +13,7 @@ mod handleman;
 mod imgui_key_utils;
 mod imgui_utils;
 mod input;
+mod input_latch;
 mod instance;
 mod instancelist;
 mod math;

@@ -683,6 +683,14 @@ pub fn show_puzzle_hint() {
     });
 }
 
+/// Drops queued synthetic pointer events when a native overlay closes, so the
+/// same tap cannot be delivered into the game underneath.
+pub fn clear_delayed_pointer() {
+    MOUSE_DOWN_AT.lock().unwrap().clear();
+    DELAYED_DOWNS.lock().unwrap().clear();
+    DELAYED_UPS.lock().unwrap().clear();
+}
+
 /// Delivers the presses and releases that were held back to make a short tap a proper click.
 fn flush_delayed_mouse() {
     let now = Instant::now();

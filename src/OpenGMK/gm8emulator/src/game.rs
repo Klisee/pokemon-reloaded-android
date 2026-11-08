@@ -139,6 +139,7 @@ pub struct Game {
     pub binary_files: HandleArray<file::BinaryHandle, 32>,
     pub rand: Random,
     pub input: Input,
+    pub input_latch: crate::input_latch::InputLatch,
     pub assets: Assets,
     pub event_holders: [IndexMap<u32, Rc<RefCell<Vec<ID>>>>; 12],
     pub custom_draw_objects: HashSet<ID>,
@@ -1394,6 +1395,7 @@ impl Game {
             externals,
             surface_fix: false,
             input: Input::new(),
+            input_latch: crate::input_latch::InputLatch::default(),
             assets: Assets { backgrounds, fonts, objects, paths, rooms, scripts, sprites, sounds, timelines, triggers },
             event_holders,
             custom_draw_objects,
@@ -2196,7 +2198,16 @@ impl Game {
         crate::touch_controls::set_text_entry(self.text_entry_open());
         crate::touch_controls::set_picker_boxes(self.picker_boxes());
         crate::touch_controls::set_modal_open(self.modal_system() > 0);
-        crate::touch_controls::set_modal_id(self.modal_system());
+        let modal = self.modal_system();
+        crate::touch_controls::set_modal_id(modal);
+        if modal == f3r::script::MODAL_QUESTION {
+            eprintln!(
+                "[latch] question held={} pressed={} armed={}",
+                self.input.mouse_check_button(1),
+                self.input.mouse_check_button_pressed(1),
+                self.input_latch.is_armed()
+            );
+        }
         crate::touch_controls::set_party(self.party_species());
     }
 
@@ -2514,6 +2525,7 @@ impl Game {
                     || self.input.keyboard_check_pressed(input::Button::Escape as u8)
                 {
                     self.online_list_open = false;
+                    self.suppress_input_until_release(false, true);
                 }
                 self.draw()?;
                 if self.auto_draw && self.scene_change.is_none() && self.play_type != PlayType::Record {
@@ -2853,6 +2865,32 @@ impl Game {
         (center - 40, y2 - 28, center + 40, y2 - 10)
     }
 
+    /// Swallow the gesture that dismissed a native overlay until its physical
+    /// release. Clearing the held state is what stops the *same* press from
+    /// activating the GML menu underneath; the latch catches delayed pointer
+    /// events from the same tap.
+    fn suppress_input_until_release(&mut self, mouse: bool, key: bool) {
+        if mouse {
+            #[cfg(target_os = "android")]
+            crate::android_main::clear_delayed_pointer();
+            if self.input.mouse_check_button(1) {
+                self.input_latch.arm_mouse();
+                self.input.mouse_release(1, false);
+            }
+        }
+        if key {
+            let held = self.input.keyboard_check(input::Button::Return as u8)
+                || self.input.keyboard_check(input::Button::Space as u8)
+                || self.input.keyboard_check(input::Button::Escape as u8)
+                || self.input.keyboard_check(input::Button::Z as u8)
+                || self.input.keyboard_check(input::Button::X as u8);
+            if held {
+                self.input_latch.arm_key();
+                self.input.keyboard_clear_all();
+            }
+        }
+    }
+
     fn mods_menu_input(&mut self) {
         if !self.input.mouse_check_button(1) {
             self.mods_click_handled = false;
@@ -2904,6 +2942,7 @@ impl Game {
         let (x1, y1, x2, y2) = self.mods_menu_close_rect();
         if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
             self.mods_menu_open = false;
+            self.suppress_input_until_release(true, false);
         }
     }
 
@@ -2956,6 +2995,10 @@ impl Game {
     }
 
     fn close_online_chat(&mut self) {
+        let mouse = self.input.mouse_check_button(1);
+        let key = self.input.keyboard_check(input::Button::Return as u8)
+            || self.input.keyboard_check(input::Button::Escape as u8);
+        self.suppress_input_until_release(mouse, key);
         self.online_chat_open = false;
         self.keyboard_string = "".into();
         #[cfg(target_os = "android")]
@@ -3007,6 +3050,8 @@ impl Game {
     fn online_menu_input(&mut self) {
         let mut selection = self.online_menu_selection.min(2);
         let mut activate = false;
+        let mut activate_mouse = false;
+        let mut activate_key = false;
         if self.input.keyboard_check_pressed(input::Button::UpArrow as u8) {
             selection = (selection + 2) % 3;
         }
@@ -3017,10 +3062,12 @@ impl Game {
             || self.input.keyboard_check_pressed(input::Button::Space as u8)
         {
             activate = true;
+            activate_key = true;
         }
         if self.input.keyboard_check_pressed(input::Button::Escape as u8) {
             selection = 2;
             activate = true;
+            activate_key = true;
         }
         if self.input.mouse_check_button_pressed(1) {
             let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
@@ -3029,6 +3076,7 @@ impl Game {
                 if x >= x1 && x <= x2 && y >= y1 && y <= y2 {
                     selection = index;
                     activate = true;
+                    activate_mouse = true;
                     break
                 }
             }
@@ -3039,9 +3087,10 @@ impl Game {
         }
         self.online_menu_open = false;
         self.online_menu_dismissed = true;
+        self.suppress_input_until_release(activate_mouse, activate_key);
         let from_main = self.online_menu_from_main;
         self.online_menu_from_main = false;
-        eprintln!("[online-menu] activate selection={selection} from_main={from_main} room={}", self.room.id);
+        eprintln!("[online-menu] activate selection={selection} from_main={from_main} mouse={activate_mouse} key={activate_key} room={}", self.room.id);
         match selection {
             0 => {
                 self.finish_online_battle_guard("sesion detenida");
@@ -5082,6 +5131,8 @@ impl Game {
                 || self.input.mouse_check_button_pressed_any();
             if close {
                 self.interaction_response = None;
+                let mouse = self.input.mouse_check_button_pressed_any();
+                self.suppress_input_until_release(mouse, !mouse);
             }
             return
         }
@@ -5173,6 +5224,9 @@ impl Game {
                 for event in self.window.events().into_iter().copied() {
                     match event {
                         Event::KeyboardDown(key) => {
+                            if self.input_latch.swallow_key(true) {
+                                continue
+                            }
                             let vk = self.remap_battle_local_key(input::ramen2vk(key));
                             self.input.button_press(vk, true);
                             // Game Maker's `keyboard_string` drops its last character on backspace.
@@ -5188,6 +5242,9 @@ impl Game {
                             }
                         },
                         Event::KeyboardUp(key) => {
+                            if self.input_latch.swallow_key(false) {
+                                continue
+                            }
                             let vk = self.remap_battle_local_key(input::ramen2vk(key));
                             if was_held(vk) {
                                 self.input.button_release(vk, true);
@@ -5196,12 +5253,23 @@ impl Game {
                             }
                         },
                         Event::MouseMove((x, y)) => {
+                            if self.input_latch.swallow_mouse_move() {
+                                continue
+                            }
                             if let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) {
                                 self.input.mouse_move_to(self.window_to_game(x, y));
                             }
                         },
-                        Event::MouseDown(button) => self.input.mouse_press(input::ramen2mb(button), true),
+                        Event::MouseDown(button) => {
+                            if self.input_latch.swallow_mouse(true) {
+                                continue
+                            }
+                            self.input.mouse_press(input::ramen2mb(button), true)
+                        },
                         Event::MouseUp(button) => {
+                            if self.input_latch.swallow_mouse(false) {
+                                continue
+                            }
                             let mb = input::ramen2mb(button);
                             if was_held(mb as u8) {
                                 self.input.mouse_release(mb, true);
