@@ -20,8 +20,10 @@ use std::{
 };
 
 pub mod bridge;
+pub mod failure;
 pub mod roz;
 
+pub use failure::ConnectionFailure;
 pub use reloaded_cleanroom::world;
 
 pub const DEFAULT_PORT: u16 = 7777;

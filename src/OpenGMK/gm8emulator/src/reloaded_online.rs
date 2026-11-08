@@ -14,6 +14,7 @@ use crate::{
     util,
 };
 use reloaded_online_net::{
+    failure::ConnectionFailure,
     roz::{RozClient, RozEvent},
     world, Event, OnlineClient,
 };
@@ -31,6 +32,12 @@ const SAY_PER_CHAR_MS: u128 = 60;
 const SAY_MAX_MS: u128 = 9000;
 const EXCLAIM_MS: u128 = 1500;
 const SERVER_SENDER: &str = "Servidor";
+/// Upper bound for opening the socket and sending the initial handshake. A slow DNS
+/// lookup or a stuck peer can only delay the failure, never hide it.
+const CONNECT_WATCHDOG: Duration = Duration::from_secs(20);
+/// Upper bound for `WELCOME` and the first `WOK`/`WAIT`/`START`. A server that accepts
+/// the socket but never finishes the handshake must not leave a half-open session.
+const HANDSHAKE_WATCHDOG: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, Deserialize)]
 struct ReloadedOnlineConfig {
@@ -231,6 +238,8 @@ pub struct IncomingBattleTeam {
 pub struct ReloadedOnline {
     connection: Option<Connection>,
     connection_mode: Option<OnlineMode>,
+    connect_deadline: Option<Instant>,
+    handshake_deadline: Option<Instant>,
     remotes: HashMap<u64, Remote>,
     local_id: Option<u64>,
     local_name: String,
@@ -281,6 +290,8 @@ impl Default for ReloadedOnline {
         Self {
             connection: None,
             connection_mode: None,
+            connect_deadline: None,
+            handshake_deadline: None,
             remotes: HashMap::new(),
             local_id: None,
             local_name: default_name(),
@@ -435,6 +446,8 @@ impl ReloadedOnline {
             }
         }
         self.connection_mode = None;
+        self.connect_deadline = None;
+        self.handshake_deadline = None;
         self.remotes.clear();
         self.local_id = None;
         self.world.clear();
@@ -497,6 +510,8 @@ impl ReloadedOnline {
         eprintln!("[reloaded-online] conectando a {} como {} en {}", log_server, self.local_name, self.room_name);
         self.connection = Some(Connection::Waiting(rx));
         self.connection_mode = Some(OnlineMode::Json);
+        self.connect_deadline = Some(Instant::now() + CONNECT_WATCHDOG);
+        self.handshake_deadline = None;
         self.status = format!("Reloaded Online conectando a {log_server}");
     }
 
@@ -536,6 +551,8 @@ impl ReloadedOnline {
         }
         self.connection = Some(Connection::Waiting(rx));
         self.connection_mode = Some(mode);
+        self.connect_deadline = Some(Instant::now() + CONNECT_WATCHDOG);
+        self.handshake_deadline = None;
         self.status = format!("Zibelan conectando a {log_server}");
     }
 
@@ -1231,9 +1248,56 @@ impl ReloadedOnline {
         }
     }
 
+    fn fail_connection(&mut self, failure: ConnectionFailure) {
+        self.fail_connection_with_reason(failure.message().to_string());
+    }
+
+    fn fail_connection_with_reason(&mut self, reason: String) {
+        eprintln!("[reloaded-online] conexión terminada: {reason}");
+        self.apply_local_id(None);
+        self.remotes.clear();
+        self.world.clear();
+        self.world_list.clear();
+        self.peer.clear();
+        self.side = 0;
+        self.pending_request = None;
+        self.requests.clear();
+        self.responses.clear();
+        self.peer_messages.clear();
+        self.last_world_room = None;
+        self.last_world_key = None;
+        self.connect_deadline = None;
+        self.handshake_deadline = None;
+        self.status = reason.clone();
+        self.fail_battle(reason.clone());
+        self.connection = Some(Connection::Failed(reason));
+    }
+
+    fn check_handshake_watchdog(&mut self) {
+        if !matches!(self.connection, Some(Connection::Ready(Backend::Zibelan(_)))) {
+            return
+        }
+        if self.handshake_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.fail_connection(ConnectionFailure::Timeout);
+        }
+    }
+
+    fn localize_connect_error(reason: String) -> String {
+        match ConnectionFailure::from_reason(&reason) {
+            ConnectionFailure::Other => reason,
+            failure => failure.message().to_string(),
+        }
+    }
+
     fn poll_connection(&mut self) {
-        let Some(Connection::Waiting(rx)) = &self.connection else { return };
-        match rx.try_recv() {
+        if !matches!(self.connection, Some(Connection::Waiting(_))) {
+            return
+        }
+        let result = match &self.connection {
+            Some(Connection::Waiting(rx)) => rx.try_recv(),
+            _ => return,
+        };
+        match result {
             Ok(Ok(backend)) => {
                 let status = match &backend {
                     Backend::Json(_) => "Reloaded Online conectado".to_string(),
@@ -1242,17 +1306,32 @@ impl ReloadedOnline {
                     },
                     Backend::Zibelan(_) => "Zibelan conectado; esperando WOK".to_string(),
                 };
+                let zibelan = matches!(backend, Backend::Zibelan(_));
                 self.connection = Some(Connection::Ready(backend));
                 self.status = status;
+                self.connect_deadline = None;
+                self.handshake_deadline =
+                    zibelan.then(|| Instant::now() + HANDSHAKE_WATCHDOG);
             },
             Ok(Err(error)) => {
-                self.status = error.clone();
-                self.connection = Some(Connection::Failed(error));
+                let zibelan = matches!(
+                    self.connection_mode,
+                    Some(OnlineMode::ZibelanWorld) | Some(OnlineMode::ZibelanLobby)
+                );
+                let reason = if zibelan { Self::localize_connect_error(error) } else { error };
+                self.fail_connection_with_reason(reason);
+                return
             },
             Err(TryRecvError::Empty) => (),
             Err(TryRecvError::Disconnected) => {
-                self.connection = Some(Connection::Failed("el hilo de conexion termino".into()));
+                self.fail_connection(ConnectionFailure::Other);
+                return
             },
+        }
+        if matches!(self.connection, Some(Connection::Waiting(_)))
+            && self.connect_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.fail_connection(ConnectionFailure::Timeout);
         }
     }
 
@@ -1279,6 +1358,7 @@ impl ReloadedOnline {
         for event in roz_events {
             self.handle_roz_event(event);
         }
+        self.check_handshake_watchdog();
     }
 
     fn handle_json_event(&mut self, event: Event) {
@@ -1373,11 +1453,14 @@ impl ReloadedOnline {
             RozEvent::Welcome { version, id } => {
                 self.apply_local_id(Some(id));
                 self.announce_welcome("Zibelan", id, Some(version), None);
+                self.handshake_deadline = Some(Instant::now() + HANDSHAKE_WATCHDOG);
             },
             RozEvent::Wait => {
+                self.handshake_deadline = None;
                 self.status = "Zibelan: esperando rival".into();
             },
             RozEvent::Start { side, peer } => {
+                self.handshake_deadline = None;
                 eprintln!("[online] START side={side} peer={peer}");
                 self.side = side;
                 self.peer = peer.clone();
@@ -1397,6 +1480,7 @@ impl ReloadedOnline {
             },
             RozEvent::WorldJoined { side, id } => {
                 eprintln!("[online] WOK side={side}");
+                self.handshake_deadline = None;
                 if let Some(id) = id {
                     let changed = self.local_id != Some(id);
                     self.apply_local_id(Some(id));
@@ -1414,17 +1498,17 @@ impl ReloadedOnline {
                 };
             },
             RozEvent::Full { world } => {
-                self.status = if world {
-                    "Zibelan: el mundo esta lleno".into()
-                } else {
-                    "Zibelan: la sala esta llena".into()
-                };
+                self.fail_connection_with_reason(ConnectionFailure::full_message(world).to_string());
             },
             RozEvent::PeerLeft => {
                 self.peer.clear();
-                self.status = "Zibelan: el rival salio".into();
+                self.pending_request = None;
+                self.status = ConnectionFailure::PeerLeft.message().to_string();
                 self.peer_left = true;
-                self.fail_battle("el rival salio");
+                self.fail_battle(ConnectionFailure::PeerLeft.message());
+            },
+            RozEvent::ConnectionRejected { failure } => {
+                self.fail_connection(failure);
             },
             RozEvent::Message(bytes) => {
                 self.handle_roz_message(&bytes);
@@ -1529,11 +1613,10 @@ impl ReloadedOnline {
                 self.apply_local_id(None);
                 self.world.clear();
                 self.remotes.clear();
-                self.connection = Some(Connection::Failed(reason.clone()));
                 self.connection_notice_pending = false;
                 self.connection_notice_seen = false;
                 self.peer_left = true;
-                self.fail_battle(reason);
+                self.fail_connection_with_reason(reason);
             },
         }
     }
@@ -2876,6 +2959,89 @@ mod tests {
         assert!(!online.is_ready());
         assert!(online.take_peer_left());
         assert!(!online.take_peer_left());
+    }
+
+    #[test]
+    fn zibelan_full_is_a_terminal_failure_and_clears_remotes() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WP 7 2 100 200 S,25,0,0,0,1,1 Ada\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&7));
+
+        transport.send(b"WFULL\n");
+        pump_world(&mut online, |online| matches!(&online.connection, Some(Connection::Failed(_))));
+
+        assert!(!online.is_ready());
+        assert!(online.remotes.is_empty());
+        assert!(online.world.is_empty());
+        assert!(online.status().contains("mundo está lleno"), "{}", online.status());
+    }
+
+    #[test]
+    fn zibelan_rate_limit_is_a_terminal_failure() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"RATE_LIMIT 30\n");
+        pump_world(&mut online, |online| matches!(&online.connection, Some(Connection::Failed(_))));
+
+        assert!(!online.is_ready());
+        assert!(online.status().contains("limitó"), "{}", online.status());
+    }
+
+    #[test]
+    fn zibelan_version_rejection_is_a_terminal_failure() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"ERROR version incompatible\n");
+        pump_world(&mut online, |online| matches!(&online.connection, Some(Connection::Failed(_))));
+
+        assert!(!online.is_ready());
+        assert!(online.status().contains("versión"), "{}", online.status());
+    }
+
+    #[test]
+    fn zibelan_peer_left_reports_a_clear_message_without_dropping_the_world() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"PEER_LEFT\n");
+        pump_world(&mut online, |online| online.status().contains("rival abandonó"));
+
+        assert!(online.take_peer_left());
+        assert!(!online.take_peer_left());
+        assert!(online.is_ready());
+        assert!(online.status().contains("rival"), "{}", online.status());
+    }
+
+    #[test]
+    fn connect_watchdog_turns_a_hung_worker_into_a_terminal_timeout() {
+        let (_tx, rx) = mpsc::channel();
+        let mut online = ReloadedOnline::default();
+        online.connection = Some(Connection::Waiting(rx));
+        online.connection_mode = Some(OnlineMode::ZibelanWorld);
+        online.connect_deadline = Some(Instant::now() - Duration::from_secs(1));
+
+        online.poll_connection();
+
+        assert!(matches!(&online.connection, Some(Connection::Failed(_))));
+        assert!(!online.is_ready());
+        assert!(online.status().contains("tiempo de espera"), "{}", online.status());
+    }
+
+    #[test]
+    fn handshake_watchdog_turns_a_silent_server_into_a_terminal_timeout() {
+        let (mut online, _transport) = mock_world_transport();
+        online.handshake_deadline = Some(Instant::now() - Duration::from_secs(1));
+
+        online.poll_events();
+
+        assert!(matches!(&online.connection, Some(Connection::Failed(_))));
+        assert!(!online.is_ready());
+        assert!(online.status().contains("tiempo de espera"), "{}", online.status());
+    }
+
+    #[test]
+    fn localize_connect_error_keeps_unknown_details_but_translates_known_failures() {
+        assert!(ReloadedOnline::localize_connect_error("Connection refused".into()).contains("rechazó"));
+        assert_eq!(
+            ReloadedOnline::localize_connect_error("detalle propio".into()),
+            "detalle propio"
+        );
     }
 
     #[test]
