@@ -30,6 +30,7 @@ const SAY_BASE_MS: u128 = 3000;
 const SAY_PER_CHAR_MS: u128 = 60;
 const SAY_MAX_MS: u128 = 9000;
 const EXCLAIM_MS: u128 = 1500;
+const SERVER_SENDER: &str = "Servidor";
 
 #[derive(Clone, Debug, Deserialize)]
 struct ReloadedOnlineConfig {
@@ -258,6 +259,7 @@ pub struct ReloadedOnline {
     battle_inputs: Vec<IncomingBattleInput>,
     status: String,
     chat: Vec<(String, String)>,
+    welcome_notice: Option<String>,
     world_list: Vec<String>,
     program_directory: PathBuf,
     world: world::WorldState,
@@ -303,6 +305,7 @@ impl Default for ReloadedOnline {
             battle_inputs: Vec::new(),
             status: "Reloaded Online desactivado".into(),
             chat: Vec::new(),
+            welcome_notice: None,
             world_list: Vec::new(),
             program_directory: PathBuf::new(),
             world: world::WorldState::new(None),
@@ -1230,10 +1233,11 @@ impl ReloadedOnline {
             Event::Connected { id } => {
                 self.local_id = Some(id);
                 self.world.set_local_id(Some(id));
-                self.status = format!("Reloaded Online conectado como #{id}");
+                self.announce_welcome("Reloaded Online", id, None, None);
             },
             Event::Joined { id, name } => {
-                self.status = format!("Reloaded Online conectado con {name} (#{id})");
+                let name = (!name.is_empty()).then_some(name.as_str());
+                self.announce_welcome("Reloaded Online", id, None, name);
             },
             Event::State { id, name, room, x, y, sprite, frame, xs, ys, angle, visible, bbox, depth, blend, alpha } => {
                 self.world.set_local_id(self.local_id);
@@ -1307,7 +1311,7 @@ impl ReloadedOnline {
         match event {
             RozEvent::Welcome { version, id } => {
                 self.apply_local_id(Some(id));
-                self.status = format!("Zibelan conectado (protocolo {version})");
+                self.announce_welcome("Zibelan", id, Some(version), None);
             },
             RozEvent::Wait => {
                 self.status = "Zibelan: esperando rival".into();
@@ -1333,10 +1337,17 @@ impl ReloadedOnline {
             RozEvent::WorldJoined { side, id } => {
                 eprintln!("[online] WOK side={side}");
                 if let Some(id) = id {
+                    let changed = self.local_id != Some(id);
                     self.apply_local_id(Some(id));
+                    if changed {
+                        self.announce_welcome("Zibelan", id, None, None);
+                    }
                 }
                 self.side = side;
-                self.status = format!("Zibelan: mundo conectado (lado {side})");
+                self.status = match &self.welcome_notice {
+                    Some(notice) => format!("{notice} | mundo conectado (lado {side})"),
+                    None => format!("Zibelan: mundo conectado (lado {side})"),
+                };
             },
             RozEvent::Full { world } => {
                 self.status = if world {
@@ -1570,6 +1581,25 @@ impl ReloadedOnline {
                 self.status = format!("Mensaje: {text}");
             },
         }
+    }
+
+    fn announce_welcome(&mut self, server: &str, id: u64, version: Option<u32>, name: Option<&str>) {
+        let notice = match version {
+            Some(version) => format!("Bienvenido a {server}: id #{id} (protocolo {version})"),
+            None => format!("Bienvenido a {server}: id #{id}"),
+        };
+        self.status = match name {
+            Some(name) if !name.is_empty() => format!("{notice} - {name}"),
+            _ => notice.clone(),
+        };
+        if self.welcome_notice.as_deref() == Some(notice.as_str()) {
+            return
+        }
+        if let Some(previous) = self.welcome_notice.take() {
+            self.chat.retain(|(sender, text)| sender != SERVER_SENDER || text != &previous);
+        }
+        self.welcome_notice = Some(notice.clone());
+        self.chat.push((SERVER_SENDER.to_string(), notice));
     }
 
     pub fn take_chat(&mut self) -> Option<(String, String)> {
@@ -2885,6 +2915,75 @@ mod tests {
         assert_eq!(online.world.get(7), Some(&before_state));
         assert_eq!(online.world_list, before_list);
         assert_eq!(online.remotes.len(), 2);
+    }
+
+    #[test]
+    fn mock_transport_welcome_shows_id_and_version_once() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WELCOME 3011\n");
+        pump_world(&mut online, |online| online.local_id() == Some(3011));
+
+        assert!(online.status().contains("Bienvenido a Zibelan"));
+        assert!(online.status().contains("id #3011"));
+        assert!(online.status().contains("protocolo 3011"));
+        assert_eq!(
+            online.take_chat(),
+            Some((
+                "Servidor".to_string(),
+                "Bienvenido a Zibelan: id #3011 (protocolo 3011)".to_string()
+            ))
+        );
+
+        transport.send(b"WELCOME 3011\nWOK 3011\n");
+        pump_world(&mut online, |online| online.status().contains("mundo conectado"));
+        assert!(online.status().contains("Bienvenido a Zibelan"));
+        assert_eq!(online.take_chat(), None);
+    }
+
+    #[test]
+    fn mock_transport_malformed_welcome_keeps_fallback_parse() {
+        let (mut online, transport) = mock_world_transport();
+        transport.send(b"WELCOME greeting\nWAIT\n");
+        pump_world(&mut online, |online| online.status().contains("esperando rival"));
+
+        assert_eq!(online.local_id(), Some(0));
+        assert_eq!(
+            online.take_chat(),
+            Some((
+                "Servidor".to_string(),
+                "Bienvenido a Zibelan: id #0 (protocolo 0)".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn json_welcome_is_single_notice_across_reconnect() {
+        let mut online = ReloadedOnline::default();
+        online.handle_json_event(Event::Connected { id: 7 });
+        online.handle_json_event(Event::Connected { id: 7 });
+        assert_eq!(
+            online.take_chat(),
+            Some((
+                "Servidor".to_string(),
+                "Bienvenido a Reloaded Online: id #7".to_string()
+            ))
+        );
+        assert_eq!(online.take_chat(), None);
+
+        online.handle_json_event(Event::Connected { id: 8 });
+        assert_eq!(
+            online.take_chat(),
+            Some((
+                "Servidor".to_string(),
+                "Bienvenido a Reloaded Online: id #8".to_string()
+            ))
+        );
+        assert_eq!(online.take_chat(), None);
+
+        online.handle_json_event(Event::Joined { id: 8, name: "Ana".to_string() });
+        assert!(online.status().contains("Bienvenido a Reloaded Online"));
+        assert!(online.status().contains("Ana"));
+        assert_eq!(online.take_chat(), None);
     }
 
     #[test]
