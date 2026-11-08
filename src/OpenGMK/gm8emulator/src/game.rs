@@ -4266,6 +4266,10 @@ impl Game {
             return
         }
         eprintln!("[trade] inicio peer={peer} name={name}");
+        // Do not adopt stale OK/NO controls queued before this session started.
+        // A queued OFFER may be the peer answering our accepted request.
+        self.reloaded_online.clear_peer_controls();
+        self.reloaded_online.clear_peer_left();
         self.trade = Some(trade::TradeSession::new(peer, name));
         self.interaction_menu_open = false;
         self.interaction_request = None;
@@ -4321,6 +4325,16 @@ impl Game {
         result
     }
 
+    fn commit_trade_from_session(&mut self, session: &mut trade::TradeSession) -> bool {
+        let Some(slot) = session.slot else { return false };
+        let Some(remote) = session.remote.clone() else { return false };
+        if session.local.is_none() || !session.begin_commit() {
+            return false
+        }
+        self.complete_trade(slot, &remote);
+        true
+    }
+
     fn trade_tick(&mut self) {
         if self.trade.is_none() {
             return
@@ -4329,7 +4343,23 @@ impl Game {
         // OFFER/OK/NO are processed while the trade panel is open.
         self.reloaded_online.tick(&self.room, &self.assets);
         let Some(mut session) = self.trade.take() else { return };
+        if !self.reloaded_online.is_ready() {
+            self.cancel_trade("La conexion online se perdio.");
+            return
+        }
+        let peer_left = self.reloaded_online.take_peer_left();
+        let mut peer_id_left = false;
+        while let Some(id) = self.reloaded_online.take_left_peer() {
+            if id == session.peer {
+                peer_id_left = true;
+            }
+        }
+        if peer_left || peer_id_left {
+            self.cancel_trade("El rival salio del intercambio.");
+            return
+        }
         let mut finished = false;
+        let mut ready_to_commit = false;
         while let Some(message) = self.reloaded_online.take_peer_message() {
             match message.kind {
                 crate::reloaded_online::PeerMessageKind::Offer => {
@@ -4338,64 +4368,68 @@ impl Game {
                             eprintln!("[trade] oferta remota label={} fields={}", offer.label, offer.values.len());
                             if let Err(error) = trade::validate_offer(&offer) {
                                 eprintln!("[trade] oferta remota bloqueada: {error}; campos={:?}", &offer.values[..offer.values.len().min(16)]);
-                                self.reloaded_online.send_peer_message(
-                                    crate::reloaded_online::PeerMessageKind::No,
-                                    &[],
-                                );
-                                self.reloaded_online.end_session();
-                                self.interaction_response = Some((error, false));
+                                self.cancel_trade(&error);
                                 finished = true;
                                 break
                             }
-                            session.remote = Some(offer);
-                            if session.phase == trade::TradePhase::WaitingOffer {
-                                session.phase = trade::TradePhase::Confirm;
-                                session.selection = 0;
-                                session.message = "Oferta recibida.".into();
-                            } else {
-                                session.message = "Oferta recibida; elige tu Pokemon.".into();
+                            match session.bind_remote_offer(offer) {
+                                trade::TradeAck::Duplicate => {
+                                    eprintln!("[trade] oferta remota duplicada ignorada");
+                                },
+                                trade::TradeAck::Complete => {
+                                    ready_to_commit = true;
+                                },
+                                trade::TradeAck::Incomplete => {
+                                    self.cancel_trade("El intercambio quedo incompleto.");
+                                    finished = true;
+                                    break
+                                },
+                                trade::TradeAck::Wait | trade::TradeAck::Accepted => {},
                             }
                         },
                         Err(error) => {
                             eprintln!("[trade] oferta invalida: {error}");
-                            self.reloaded_online.send_peer_message(
-                                crate::reloaded_online::PeerMessageKind::No,
-                                &[],
-                            );
-                            self.reloaded_online.end_session();
-                            self.interaction_response =
-                                Some(("La oferta del rival no es valida.".into(), false));
+                            self.cancel_trade("La oferta del rival no es valida.");
                             finished = true;
                             break
                         },
                     }
                 },
                 crate::reloaded_online::PeerMessageKind::Ok => {
-                    session.remote_ok = true;
-                    if session.phase == trade::TradePhase::WaitingOk {
-                        let Some(slot) = session.slot else {
+                    match session.note_remote_ok() {
+                        trade::TradeAck::Complete => {
+                            ready_to_commit = true;
+                        },
+                        trade::TradeAck::Incomplete => {
                             self.cancel_trade("El intercambio quedo incompleto.");
                             finished = true;
                             break
-                        };
-                        let Some(remote) = session.remote.clone() else {
-                            self.cancel_trade("El intercambio quedo incompleto.");
-                            finished = true;
-                            break
-                        };
-                        self.complete_trade(slot, &remote);
-                        finished = true;
-                        break
-                    } else if session.phase == trade::TradePhase::Confirm {
-                        session.message = "El rival acepto; confirma tu intercambio.".into();
+                        },
+                        trade::TradeAck::Duplicate => {
+                            eprintln!("[trade] OK duplicado ignorado");
+                        },
+                        trade::TradeAck::Wait | trade::TradeAck::Accepted => {},
                     }
                 },
                 crate::reloaded_online::PeerMessageKind::No => {
-                    eprintln!("[trade] NO recibido");
-                    self.reloaded_online.end_session();
-                    self.interaction_response = Some(("El rival cancelo el intercambio.".into(), false));
-                    finished = true;
-                    break
+                    match session.note_remote_no() {
+                        trade::TradeAck::Accepted => {
+                            if session.local_ok {
+                                eprintln!("[trade] NO despues de nuestro OK; se cancela sin aplicar");
+                            } else {
+                                eprintln!("[trade] NO recibido");
+                            }
+                            self.reloaded_online.end_session();
+                            self.interaction_response =
+                                Some(("El rival cancelo el intercambio.".into(), false));
+                            finished = true;
+                            break
+                        },
+                        trade::TradeAck::Duplicate => {
+                            eprintln!("[trade] NO duplicado ignorado");
+                        },
+                        _ => {},
+                    }
                 },
                 crate::reloaded_online::PeerMessageKind::Gift => {
                     self.cancel_trade("Los regalos todavia no estan disponibles.");
@@ -4405,6 +4439,18 @@ impl Game {
             }
         }
         if !finished {
+            // Commit only after the queued batch is drained: an OK followed by a
+            // NO in the same poll must cancel instead of applying one side only.
+            if ready_to_commit {
+                if !self.commit_trade_from_session(&mut session) {
+                    self.cancel_trade("El intercambio quedo incompleto.");
+                }
+                return
+            }
+            if session.is_timed_out(Instant::now()) {
+                self.cancel_trade("El intercambio expiro.");
+                return
+            }
             self.trade = Some(session);
         }
     }
@@ -4533,15 +4579,9 @@ impl Game {
                                 self.cancel_trade("No se pudo enviar la oferta.");
                                 return
                             }
-                            session.slot = Some(slot);
-                            session.local = Some(offer);
-                            if session.remote.is_some() {
-                                session.phase = trade::TradePhase::Confirm;
-                                session.selection = 0;
-                                session.message = "Oferta recibida.".into();
-                            } else {
-                                session.phase = trade::TradePhase::WaitingOffer;
-                                session.message = "Esperando la oferta del rival...".into();
+                            if session.bind_local_offer(slot, offer) == trade::TradeAck::Duplicate {
+                                self.cancel_trade("El intercambio quedo incompleto.");
+                                return
                             }
                         },
                         Err(error) => {
@@ -4598,22 +4638,25 @@ impl Game {
                             crate::reloaded_online::PeerMessageKind::Ok,
                             &[],
                         ) {
-                            session.phase = trade::TradePhase::WaitingOk;
-                            if session.remote_ok {
-                                let Some(slot) = session.slot else {
+                            match session.note_local_ok() {
+                                trade::TradeAck::Complete => {
+                                    eprintln!("[trade] OK cruzado; aplicando intercambio");
+                                    if !self.commit_trade_from_session(&mut session) {
+                                        self.cancel_trade("El intercambio quedo incompleto.");
+                                    }
+                                    return
+                                },
+                                trade::TradeAck::Incomplete => {
                                     self.cancel_trade("El intercambio quedo incompleto.");
                                     return
-                                };
-                                let Some(remote) = session.remote.clone() else {
-                                    self.cancel_trade("El intercambio quedo incompleto.");
-                                    return
-                                };
-                                eprintln!("[trade] OK cruzado; aplicando intercambio");
-                                self.complete_trade(slot, &remote);
-                                return
+                                },
+                                trade::TradeAck::Duplicate => {
+                                    eprintln!("[trade] OK local duplicado ignorado");
+                                },
+                                trade::TradeAck::Wait | trade::TradeAck::Accepted => {
+                                    eprintln!("[trade] OK enviado; esperando OK del rival");
+                                },
                             }
-                            eprintln!("[trade] OK enviado; esperando OK del rival");
-                            session.message = "Esperando la confirmacion del rival...".into();
                         } else {
                             self.cancel_trade("No se pudo confirmar el intercambio.");
                             return

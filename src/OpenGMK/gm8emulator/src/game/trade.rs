@@ -2,12 +2,40 @@
 //!
 //! Wire codec and validation policy live in `trade_codec` (clean-room, no game types).
 //! F3R field/global mapping lives in `trade_adapter` (adapter boundary).
+//!
+//! The stock wire is kept as-is: a 49-field `OFFER` and empty `OK`/`NO` payloads.
+//! Robustness against duplicate or crossed confirmations is session-local, so legacy
+//! peers keep working without new tokens or bind messages.
+
+use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
 pub use super::trade_adapter::{
     apply, capture, decode, encode, encode_message, is_valid_slot, occupied_slots,
     validate_offer, TradeOffer, TradeValue, FIELD_COUNT, VALUE_COUNT,
 };
+
+/// Maximum inactive time in a trade before the session is cancelled. The timer is
+/// refreshed by every accepted offer/confirmation, so a peer that answers keeps the
+/// session alive while a silent one cannot leave the panel stuck.
+pub const TRADE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Outcome of a session transition. `Duplicate` is intentionally a no-op: repeating an
+/// already accepted `OK` or `NO` must not complete or cancel twice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TradeAck {
+    /// Message accepted; the session keeps waiting.
+    Wait,
+    /// Both confirmations are present and the caller may commit exactly once.
+    Complete,
+    /// A confirmation arrived without the selected slot, local offer or remote offer
+    /// needed to apply it.
+    Incomplete,
+    /// Repeated or late confirmation for a session that already handled it.
+    Duplicate,
+    /// A first `NO` was accepted and the session is now closed.
+    Accepted,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TradePhase {
@@ -26,12 +54,25 @@ pub struct TradeSession {
     pub local: Option<TradeOffer>,
     pub remote: Option<TradeOffer>,
     pub remote_ok: bool,
+    pub local_ok: bool,
     pub selection: usize,
     pub message: String,
+    /// Terminal after the peer's `NO`; late `OK`/`NO` messages are ignored.
+    pub closed: bool,
+    /// Set before the single apply/save attempt. A second commit is refused.
+    pub committed: bool,
+    /// Inactivity budget for this session.
+    pub timeout: Duration,
+    /// Last accepted local or remote transition.
+    pub last_activity: Instant,
 }
 
 impl TradeSession {
     pub fn new(peer: u64, name: String) -> Self {
+        Self::new_at(peer, name, Instant::now())
+    }
+
+    pub fn new_at(peer: u64, name: String, now: Instant) -> Self {
         Self {
             peer,
             name,
@@ -40,9 +81,190 @@ impl TradeSession {
             local: None,
             remote: None,
             remote_ok: false,
+            local_ok: false,
             selection: 0,
             message: String::new(),
+            closed: false,
+            committed: false,
+            timeout: TRADE_TIMEOUT,
+            last_activity: now,
         }
+    }
+
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    /// Restart the inactivity timer after an accepted transition.
+    pub fn touch(&mut self, now: Instant) {
+        self.last_activity = now;
+    }
+
+    /// True when the session has been inactive for its whole timeout budget.
+    /// Closed or already committed sessions do not time out.
+    pub fn is_timed_out(&self, now: Instant) -> bool {
+        if self.closed || self.committed {
+            return false
+        }
+        now.saturating_duration_since(self.last_activity) >= self.timeout
+    }
+
+    pub fn remaining(&self, now: Instant) -> Duration {
+        self.timeout
+            .saturating_sub(now.saturating_duration_since(self.last_activity))
+    }
+
+    fn completion(&self) -> TradeAck {
+        if self.slot.is_none() || self.local.is_none() {
+            return TradeAck::Incomplete
+        }
+        if self.remote.is_none() {
+            // Both confirmations may arrive before the peer's offer. Keep waiting
+            // instead of cancelling a session that can still complete.
+            return TradeAck::Wait
+        }
+        if self.local_ok && self.remote_ok {
+            TradeAck::Complete
+        } else {
+            TradeAck::Wait
+        }
+    }
+
+    /// Records the local immutable offer once per session.
+    pub fn bind_local_offer(&mut self, slot: u8, offer: TradeOffer) -> TradeAck {
+        self.bind_local_offer_at(slot, offer, Instant::now())
+    }
+
+    pub fn bind_local_offer_at(
+        &mut self,
+        slot: u8,
+        offer: TradeOffer,
+        now: Instant,
+    ) -> TradeAck {
+        if self.closed || self.committed || self.local.is_some() || self.slot.is_some() {
+            return TradeAck::Duplicate
+        }
+        self.slot = Some(slot);
+        self.local = Some(offer);
+        self.touch(now);
+        if self.remote.is_some() {
+            self.phase = TradePhase::Confirm;
+            self.selection = 0;
+            self.message = "Oferta recibida.".into();
+        } else {
+            self.phase = TradePhase::WaitingOffer;
+            self.message = "Esperando la oferta del rival...".into();
+        }
+        TradeAck::Wait
+    }
+
+    /// Records the first remote offer. A repeated offer is ignored instead of
+    /// replacing the one the user is already confirming.
+    pub fn bind_remote_offer(&mut self, offer: TradeOffer) -> TradeAck {
+        self.bind_remote_offer_at(offer, Instant::now())
+    }
+
+    pub fn bind_remote_offer_at(&mut self, offer: TradeOffer, now: Instant) -> TradeAck {
+        if self.closed || self.committed || self.remote.is_some() {
+            return TradeAck::Duplicate
+        }
+        self.remote = Some(offer);
+        self.touch(now);
+        match self.phase {
+            TradePhase::WaitingOffer => {
+                self.phase = TradePhase::Confirm;
+                self.selection = 0;
+                self.message = "Oferta recibida.".into();
+                TradeAck::Wait
+            },
+            TradePhase::WaitingOk => {
+                if self.remote_ok {
+                    // A crossed early OK plus the now-arrived offer completes
+                    // without waiting for a second OK that will never come.
+                    let outcome = self.completion();
+                    if outcome == TradeAck::Complete {
+                        self.message = "Oferta recibida; intercambio listo.".into();
+                    }
+                    outcome
+                } else {
+                    self.message = "Oferta recibida; esperando la confirmacion del rival...".into();
+                    TradeAck::Wait
+                }
+            },
+            TradePhase::Pick => {
+                self.message = "Oferta recibida; elige tu Pokemon.".into();
+                TradeAck::Wait
+            },
+            TradePhase::Confirm => {
+                self.message = "Oferta recibida.".into();
+                TradeAck::Wait
+            },
+        }
+    }
+
+    pub fn note_remote_ok(&mut self) -> TradeAck {
+        self.note_remote_ok_at(Instant::now())
+    }
+
+    pub fn note_remote_ok_at(&mut self, now: Instant) -> TradeAck {
+        if self.closed || self.committed || self.remote_ok {
+            return TradeAck::Duplicate
+        }
+        self.remote_ok = true;
+        self.touch(now);
+        match self.phase {
+            TradePhase::WaitingOk => self.completion(),
+            TradePhase::Confirm => {
+                self.message = "El rival acepto; confirma tu intercambio.".into();
+                TradeAck::Wait
+            },
+            TradePhase::Pick | TradePhase::WaitingOffer => TradeAck::Wait,
+        }
+    }
+
+    pub fn note_remote_no(&mut self) -> TradeAck {
+        self.note_remote_no_at(Instant::now())
+    }
+
+    pub fn note_remote_no_at(&mut self, now: Instant) -> TradeAck {
+        if self.closed || self.committed {
+            return TradeAck::Duplicate
+        }
+        self.closed = true;
+        self.touch(now);
+        TradeAck::Accepted
+    }
+
+    pub fn note_local_ok(&mut self) -> TradeAck {
+        self.note_local_ok_at(Instant::now())
+    }
+
+    pub fn note_local_ok_at(&mut self, now: Instant) -> TradeAck {
+        if self.closed || self.committed || self.local_ok {
+            return TradeAck::Duplicate
+        }
+        self.local_ok = true;
+        self.phase = TradePhase::WaitingOk;
+        self.touch(now);
+        if self.remote_ok {
+            let outcome = self.completion();
+            if outcome == TradeAck::Wait {
+                self.message = "Esperando la oferta del rival...".into();
+            }
+            outcome
+        } else {
+            self.message = "Esperando la confirmacion del rival...".into();
+            TradeAck::Wait
+        }
+    }
+
+    /// Claims the one allowed commit attempt for this session.
+    pub fn begin_commit(&mut self) -> bool {
+        if self.closed || self.committed {
+            return false
+        }
+        self.committed = true;
+        true
     }
 }
 
@@ -93,6 +315,23 @@ mod tests {
         }
     }
 
+    fn at(millis: u64) -> Instant {
+        Instant::now() + Duration::from_millis(millis)
+    }
+
+    fn offered_session(now: Instant) -> TradeSession {
+        let mut session = TradeSession::new_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_local_offer_at(2, offer("local"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(
+            session.bind_remote_offer_at(offer("remote"), now),
+            TradeAck::Wait
+        );
+        session
+    }
+
     #[test]
     fn session_binds_peer_and_name_on_creation() {
         let session = TradeSession::new(7, "Rival".into());
@@ -103,8 +342,12 @@ mod tests {
         assert!(session.local.is_none());
         assert!(session.remote.is_none());
         assert!(!session.remote_ok);
+        assert!(!session.local_ok);
+        assert!(!session.closed);
+        assert!(!session.committed);
         assert_eq!(session.selection, 0);
         assert!(session.message.is_empty());
+        assert_eq!(session.timeout, TRADE_TIMEOUT);
     }
 
     #[test]
@@ -116,61 +359,15 @@ mod tests {
         first.slot = Some(4);
         first.selection = 2;
         first.phase = TradePhase::Confirm;
+        first.local_ok = true;
 
         assert_eq!(second.peer, 2);
         assert_eq!(second.phase, TradePhase::Pick);
         assert_eq!(second.slot, None);
         assert!(second.local.is_none());
         assert!(second.remote.is_none());
+        assert!(!second.local_ok);
         assert_eq!(second.selection, 0);
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum AckOutcome {
-        Wait,
-        Complete,
-        Incomplete,
-    }
-
-    // Mirrors the OK branches in `Game::trade_tick` and `Game::trade_input`.
-    // Those methods need game assets and a window, so the ordering vectors drive
-    // the same session transitions through this small test model.
-    fn receive_remote_ok(session: &mut TradeSession) -> AckOutcome {
-        session.remote_ok = true;
-        if session.phase == TradePhase::WaitingOk {
-            if session.slot.is_some() && session.remote.is_some() {
-                AckOutcome::Complete
-            } else {
-                AckOutcome::Incomplete
-            }
-        } else {
-            if session.phase == TradePhase::Confirm {
-                session.message = "El rival acepto; confirma tu intercambio.".into();
-            }
-            AckOutcome::Wait
-        }
-    }
-
-    fn receive_local_ok(session: &mut TradeSession) -> AckOutcome {
-        session.phase = TradePhase::WaitingOk;
-        if session.remote_ok {
-            if session.slot.is_some() && session.remote.is_some() {
-                AckOutcome::Complete
-            } else {
-                AckOutcome::Incomplete
-            }
-        } else {
-            AckOutcome::Wait
-        }
-    }
-
-    fn offered_session() -> TradeSession {
-        let mut session = TradeSession::new(7, "Rival".into());
-        session.slot = Some(2);
-        session.local = Some(offer("local"));
-        session.remote = Some(offer("remote"));
-        session.phase = TradePhase::Confirm;
-        session
     }
 
     #[test]
@@ -178,42 +375,191 @@ mod tests {
         // A remote OK can arrive while this side is still picking or checking
         // the offer. It must survive the later local offer/confirm so the local
         // OK completes the trade instead of waiting forever for a second OK.
-        let mut session = TradeSession::new(7, "Rival".into());
-        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Wait);
+        let now = at(0);
+        let mut session = TradeSession::new_at(7, "Rival".into(), now);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Wait);
         assert!(session.remote_ok);
 
-        session.remote = Some(offer("remote"));
-        session.local = Some(offer("local"));
-        session.slot = Some(2);
-        session.phase = TradePhase::Confirm;
+        assert_eq!(
+            session.bind_remote_offer_at(offer("remote"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(
+            session.bind_local_offer_at(2, offer("local"), now),
+            TradeAck::Wait
+        );
         assert!(session.remote_ok);
-        assert_eq!(receive_local_ok(&mut session), AckOutcome::Complete);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Complete);
     }
 
     #[test]
     fn crossed_ok_completes_when_local_ok_arrives_last() {
-        let mut session = offered_session();
-        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Wait);
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Wait);
         assert_eq!(
             session.message,
             "El rival acepto; confirma tu intercambio."
         );
-        assert_eq!(receive_local_ok(&mut session), AckOutcome::Complete);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Complete);
     }
 
     #[test]
     fn crossed_ok_completes_when_remote_ok_arrives_last() {
-        let mut session = offered_session();
-        assert_eq!(receive_local_ok(&mut session), AckOutcome::Wait);
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Wait);
         assert_eq!(session.phase, TradePhase::WaitingOk);
-        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Complete);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Complete);
+    }
+
+    #[test]
+    fn offer_arriving_after_both_oks_completes_waiting_ok() {
+        let now = at(0);
+        let mut session = TradeSession::new_at(7, "Rival".into(), now);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Wait);
+        assert_eq!(
+            session.bind_local_offer_at(2, offer("local"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Wait);
+        assert_eq!(session.phase, TradePhase::WaitingOk);
+        assert_eq!(
+            session.bind_remote_offer_at(offer("remote"), now),
+            TradeAck::Complete
+        );
     }
 
     #[test]
     fn remote_ok_without_slot_or_offer_reports_an_incomplete_trade() {
-        let mut session = TradeSession::new(7, "Rival".into());
+        let now = at(0);
+        let mut session = TradeSession::new_at(7, "Rival".into(), now);
         session.phase = TradePhase::WaitingOk;
-        assert_eq!(receive_remote_ok(&mut session), AckOutcome::Incomplete);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Incomplete);
+    }
+
+    #[test]
+    fn duplicate_remote_ok_is_idempotent() {
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Wait);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Duplicate);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Complete);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Duplicate);
+    }
+
+    #[test]
+    fn duplicate_local_ok_is_idempotent() {
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Wait);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Duplicate);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Complete);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Duplicate);
+    }
+
+    #[test]
+    fn duplicate_no_is_idempotent() {
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_remote_no_at(now), TradeAck::Accepted);
+        assert!(session.closed);
+        assert_eq!(session.note_remote_no_at(now), TradeAck::Duplicate);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Duplicate);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Duplicate);
+    }
+
+    #[test]
+    fn cancel_after_local_ok_prevents_completion() {
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Wait);
+        assert_eq!(session.phase, TradePhase::WaitingOk);
+        assert_eq!(session.note_remote_no_at(now), TradeAck::Accepted);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Duplicate);
+        assert_ne!(session.note_local_ok_at(now), TradeAck::Complete);
+    }
+
+    #[test]
+    fn cancel_after_remote_ok_before_commit_is_still_accepted() {
+        // trade_tick drains the whole peer batch before committing, so an OK
+        // followed by a NO in that batch cancels instead of applying.
+        let now = at(0);
+        let mut session = offered_session(now);
+        assert_eq!(session.note_local_ok_at(now), TradeAck::Wait);
+        assert_eq!(session.note_remote_ok_at(now), TradeAck::Complete);
+        assert_eq!(session.note_remote_no_at(now), TradeAck::Accepted);
+        assert!(session.closed);
+        assert!(!session.begin_commit());
+    }
+
+    #[test]
+    fn duplicate_remote_offer_keeps_the_first_one() {
+        let now = at(0);
+        let mut session = TradeSession::new_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_remote_offer_at(offer("first"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(
+            session.bind_remote_offer_at(offer("second"), now),
+            TradeAck::Duplicate
+        );
+        assert_eq!(session.remote.as_ref().unwrap().label, "first");
+    }
+
+    #[test]
+    fn duplicate_local_offer_is_refused() {
+        let now = at(0);
+        let mut session = TradeSession::new_at(7, "Rival".into(), now);
+        assert_eq!(
+            session.bind_local_offer_at(1, offer("first"), now),
+            TradeAck::Wait
+        );
+        assert_eq!(
+            session.bind_local_offer_at(2, offer("second"), now),
+            TradeAck::Duplicate
+        );
+        assert_eq!(session.slot, Some(1));
+        assert_eq!(session.local.as_ref().unwrap().label, "first");
+    }
+
+    #[test]
+    fn timeout_is_explicit_and_refreshed_by_activity() {
+        let start = at(0);
+        let mut session = TradeSession::new_at(7, "Rival".into(), start);
+        session.set_timeout(Duration::from_secs(5));
+
+        assert!(!session.is_timed_out(start + Duration::from_millis(4_999)));
+        assert!(session.is_timed_out(start + Duration::from_secs(5)));
+
+        session.touch(start + Duration::from_secs(4));
+        assert!(!session.is_timed_out(start + Duration::from_secs(8)));
+        assert!(session.is_timed_out(start + Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn waiting_ok_times_out_instead_of_waiting_forever() {
+        let start = at(0);
+        let mut session = offered_session(start);
+        assert_eq!(session.note_local_ok_at(start), TradeAck::Wait);
+        assert_eq!(session.phase, TradePhase::WaitingOk);
+        assert!(!session.is_timed_out(start));
+        assert!(session.is_timed_out(start + TRADE_TIMEOUT));
+        assert!(!session.closed);
+    }
+
+    #[test]
+    fn closed_or_committed_sessions_do_not_time_out() {
+        let start = at(0);
+        let mut closed = TradeSession::new_at(7, "Rival".into(), start);
+        assert_eq!(closed.note_remote_no_at(start), TradeAck::Accepted);
+        assert!(!closed.is_timed_out(start + TRADE_TIMEOUT));
+
+        let mut committed = offered_session(start);
+        assert!(committed.begin_commit());
+        assert!(!committed.begin_commit());
+        assert!(!committed.is_timed_out(start + TRADE_TIMEOUT));
     }
 
     #[test]
