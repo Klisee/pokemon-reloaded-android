@@ -1,7 +1,7 @@
 use crate::{
     asset::{self, font, Font},
     compat::f3r,
-    game::{Game, GetAsset, PlayType, Version},
+    game::{Game, GetAsset, PlayType, Version, ONLINE_CONNECTED_NOTICE},
     gml,
     math::Real,
     render::BlendType,
@@ -292,6 +292,9 @@ impl Game {
         if self.interaction_response.is_some() {
             self.draw_interaction_response();
         }
+        if self.online_notice_open {
+            self.draw_online_connection_notice();
+        }
         if self.trade.is_some() {
             self.draw_trade();
         }
@@ -514,6 +517,16 @@ impl Game {
         let Some((message, _)) = self.interaction_response.as_ref() else { return };
         let message = message.clone();
         self.draw_interaction_panel("Reloaded Online", &message, &[], None, 0);
+    }
+
+    fn draw_online_connection_notice(&mut self) {
+        self.draw_interaction_panel(
+            "Reloaded Online",
+            ONLINE_CONNECTED_NOTICE,
+            &["Aceptar"],
+            Some(0),
+            0,
+        );
     }
 
     fn draw_mods_button(&mut self) {
