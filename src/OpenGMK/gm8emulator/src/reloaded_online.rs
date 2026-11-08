@@ -3149,7 +3149,9 @@ mod tests {
         );
 
         transport.send(b"IN 5 11 4\nSUM 5 11 222\n");
-        pump_world(&mut online, |online| !online.battle_inputs.is_empty());
+        pump_world(&mut online, |online| {
+            online.battle_inputs.iter().any(|input| input.frame == 11 && input.checksum == 222)
+        });
         let input = online.take_battle_input().expect("input before checksum");
         assert_eq!(
             (input.id, input.mask, input.seq, input.frame, input.checksum),
