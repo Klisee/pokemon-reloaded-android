@@ -4984,6 +4984,16 @@ impl Game {
             || self.interaction_response.is_some()
     }
 
+    fn gift_admission_error(&self) -> Option<&'static str> {
+        if self.battle_sync_active || self.battle_pending {
+            return Some("No puedes recibir un regalo durante un combate.")
+        }
+        if trade::first_empty_slot(self).is_none() {
+            return Some("Tu equipo esta lleno; no puedes recibir el regalo.")
+        }
+        None
+    }
+
     fn interaction_trigger(&mut self) {
         self.trade_tick();
         if !self.reloaded_online.is_active() {
@@ -4994,6 +5004,13 @@ impl Game {
         }
         if let Some(request) = self.reloaded_online.take_request() {
             self.interaction_menu_open = false;
+            if request.kind == "G" {
+                if let Some(reason) = self.gift_admission_error() {
+                    self.reloaded_online.send_response(request.id, false);
+                    self.interaction_response = Some((reason.to_string(), false));
+                    return
+                }
+            }
             self.interaction_request = Some((request.id, request.name, request.kind, request.info));
             self.interaction_menu_selection = 0;
             return
@@ -5096,22 +5113,9 @@ impl Game {
             if let Some((id, name, kind, _)) = self.interaction_request.take() {
                 let accept = selection == 0;
                 if accept && kind == "G" {
-                    // Decide gift admission before sending acceptance: a battle
-                    // or a full party must decline, never enter a session.
-                    if self.battle_sync_active || self.battle_pending {
+                    if let Some(reason) = self.gift_admission_error() {
                         self.reloaded_online.send_response(id, false);
-                        self.interaction_response = Some((
-                            "No puedes recibir un regalo durante un combate.".into(),
-                            false,
-                        ));
-                        return
-                    }
-                    if trade::first_empty_slot(self).is_none() {
-                        self.reloaded_online.send_response(id, false);
-                        self.interaction_response = Some((
-                            "Tu equipo esta lleno; no puedes recibir el regalo.".into(),
-                            false,
-                        ));
+                        self.interaction_response = Some((reason.to_string(), false));
                         return
                     }
                 }
