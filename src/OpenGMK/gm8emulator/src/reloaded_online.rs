@@ -368,16 +368,9 @@ impl ReloadedOnline {
             OnlineMode::Json => OnlineMode::ZibelanWorld,
         };
         online.battle_epoch = config.battle_epoch.max(1);
-        // A bridge configured from the launcher must not connect at startup: the in-game
-        // Multijugador menu owns that connection and starts it only when the player picks it.
-        if config.enabled {
-            match online.mode {
-                OnlineMode::Json if config.bridge_upstream.trim().is_empty() => online.connect_json(false),
-                OnlineMode::Json => (),
-                OnlineMode::ZibelanWorld => online.start_world(),
-                OnlineMode::ZibelanLobby => online.start_lobby(),
-            }
-        }
+        // Online is opt-in: the Multijugador menu starts the connection, and the
+        // world socket is opened only after Cargar partida has loaded a save.
+        // `enabled` in the JSON is intentionally not an auto-connect switch.
         online
     }
 
