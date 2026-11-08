@@ -87,7 +87,7 @@ use std::process::{Command, Stdio};
 
 /// One-shot native notice shown after the first successful world connection.
 pub const ONLINE_CONNECTED_NOTICE: &str =
-    "¡Conectado al mundo online! Verás a los demás jugadores...";
+    "Conectado al mundo online! Veras a los demas jugadores que esten en tu mismo mapa. Con G ves quien esta conectado y donde.";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum GameClock {
@@ -216,6 +216,7 @@ pub struct Game {
     pub interaction_pending_kind: Option<String>,
     pub online_notice_open: bool,
     pub online_notice_just_opened: bool,
+    pub online_connect_pending: bool,
     pub trade: Option<trade::TradeSession>,
     pub battle_pending: bool,
     pub battle_target: Option<u64>,
@@ -1470,6 +1471,7 @@ impl Game {
             interaction_pending_kind: None,
             online_notice_open: false,
             online_notice_just_opened: false,
+            online_connect_pending: false,
             trade: None,
             battle_pending: false,
             battle_target: None,
@@ -2072,6 +2074,10 @@ impl Game {
                 .map_err(|e| gml::Error::FunctionError("game_load".into(), format!("{}", e)))?
         };
         save.into_game(self).map_err(|e| gml::Error::FunctionError("game_load".into(), e))?;
+        if self.online_connect_pending {
+            self.online_connect_pending = false;
+            self.reloaded_online.start_zibelan();
+        }
         self.scene_change = None;
         Ok(Default::default())
     }
@@ -3101,6 +3107,7 @@ impl Game {
         eprintln!("[online-menu] activate selection={selection} from_main={from_main} mouse={activate_mouse} key={activate_key} room={}", self.room.id);
         match selection {
             0 => {
+                self.online_connect_pending = false;
                 self.finish_online_battle_guard("sesion detenida");
                 self.reloaded_online.stop();
                 if from_main {
@@ -3112,7 +3119,9 @@ impl Game {
             1 => {
                 self.input.keyboard_clear_all();
                 self.input.mouse_release(1, false);
-                self.reloaded_online.start_zibelan();
+                // Do not open the socket yet: the player still has to choose a save
+                // in Cargar partida. `load_gm_save` starts the connection.
+                self.online_connect_pending = true;
                 self.scene_change = Some(SceneChange::Room(f3r::room::LOADER));
             },
             _ => (),
@@ -5015,7 +5024,9 @@ impl Game {
         if self.interaction_any_open() {
             return
         }
-        if self.reloaded_online.take_connection_notice() {
+        if !matches!(self.room.id, f3r::room::LOADER | f3r::room::BOOT | f3r::room::SELECT)
+            && self.reloaded_online.take_connection_notice()
+        {
             self.online_notice_open = true;
             self.online_notice_just_opened = true;
             return

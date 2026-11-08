@@ -368,7 +368,7 @@ impl Game {
                 Real::from(f64::from(y1) + 24.0),
                 gml::String::from(body),
                 None,
-                None,
+                Some((x2 - x1 - 16).max(1)),
                 Real::from(1.0),
                 Real::from(1.0),
                 Real::from(0.0),
