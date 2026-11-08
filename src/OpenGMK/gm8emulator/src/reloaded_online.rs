@@ -262,6 +262,8 @@ pub struct ReloadedOnline {
     status: String,
     chat: Vec<(String, String)>,
     welcome_notice: Option<String>,
+    connection_notice_pending: bool,
+    connection_notice_seen: bool,
     world_list: Vec<String>,
     program_directory: PathBuf,
     world: world::WorldState,
@@ -310,6 +312,8 @@ impl Default for ReloadedOnline {
             status: "Reloaded Online desactivado".into(),
             chat: Vec::new(),
             welcome_notice: None,
+            connection_notice_pending: false,
+            connection_notice_seen: false,
             world_list: Vec::new(),
             program_directory: PathBuf::new(),
             world: world::WorldState::new(None),
@@ -452,6 +456,8 @@ impl ReloadedOnline {
         self.pending_say.clear();
         self.pending_exclaim.clear();
         self.local_say = None;
+        self.connection_notice_pending = false;
+        self.connection_notice_seen = false;
         self.end_battle();
         self.status = "Reloaded Online desconectado".into();
     }
@@ -1281,6 +1287,7 @@ impl ReloadedOnline {
                 self.local_id = Some(id);
                 self.world.set_local_id(Some(id));
                 self.announce_welcome("Reloaded Online", id, None, None);
+                self.queue_connection_notice();
             },
             Event::Joined { id, name } => {
                 let name = (!name.is_empty()).then_some(name.as_str());
@@ -1353,6 +1360,8 @@ impl ReloadedOnline {
                 self.world.clear();
                 self.world.set_local_id(None);
                 self.connection = Some(Connection::Failed(error.clone()));
+                self.connection_notice_pending = false;
+                self.connection_notice_seen = false;
                 self.peer_left = true;
                 self.fail_battle(error);
             },
@@ -1394,6 +1403,9 @@ impl ReloadedOnline {
                     if changed {
                         self.announce_welcome("Zibelan", id, None, None);
                     }
+                }
+                if self.connection_mode != Some(OnlineMode::ZibelanLobby) {
+                    self.queue_connection_notice();
                 }
                 self.side = side;
                 self.status = match &self.welcome_notice {
@@ -1518,6 +1530,8 @@ impl ReloadedOnline {
                 self.world.clear();
                 self.remotes.clear();
                 self.connection = Some(Connection::Failed(reason.clone()));
+                self.connection_notice_pending = false;
+                self.connection_notice_seen = false;
                 self.peer_left = true;
                 self.fail_battle(reason);
             },
@@ -1635,6 +1649,23 @@ impl ReloadedOnline {
                 self.status = format!("Mensaje: {text}");
             },
         }
+    }
+
+    fn queue_connection_notice(&mut self) {
+        if self.connection_notice_seen {
+            return
+        }
+        self.connection_notice_seen = true;
+        self.connection_notice_pending = true;
+    }
+
+    /// Takes the one-shot notice for the first successful world connection.
+    ///
+    /// `WELCOME` only greets the client and `WOK` joins the world; queueing here from the
+    /// latter (or from the JSON `Connected` event) keeps the native notice out of the chat
+    /// stream and stops a repeated event from opening it twice on the same connection.
+    pub fn take_connection_notice(&mut self) -> bool {
+        std::mem::take(&mut self.connection_notice_pending)
     }
 
     fn announce_welcome(&mut self, server: &str, id: u64, version: Option<u32>, name: Option<&str>) {
@@ -3086,6 +3117,73 @@ mod tests {
         assert!(online.status().contains("Bienvenido a Reloaded Online"));
         assert!(online.status().contains("Ana"));
         assert_eq!(online.take_chat(), None);
+    }
+
+    #[test]
+    fn mock_transport_world_joined_queues_one_notice_for_the_connection() {
+        let (mut online, transport) = mock_world_transport();
+        assert!(!online.take_connection_notice());
+
+        transport.send(b"WELCOME 3011\n");
+        pump_world(&mut online, |online| online.local_id() == Some(3011));
+        assert!(!online.take_connection_notice());
+
+        transport.send(b"WOK 3011\n");
+        pump_world(&mut online, |online| online.status().contains("mundo conectado"));
+
+        assert!(online.take_connection_notice());
+        assert!(!online.take_connection_notice());
+        assert_eq!(
+            online.take_chat(),
+            Some((
+                "Servidor".to_string(),
+                "Bienvenido a Zibelan: id #3011 (protocolo 3011)".to_string()
+            ))
+        );
+
+        transport.send(b"WOK 3011\nWP 77 2 10 20 S,25,0,0,0,1,1 Ada\n");
+        pump_world(&mut online, |online| online.remotes.contains_key(&77));
+        assert!(!online.take_connection_notice());
+        assert_eq!(online.take_chat(), None);
+    }
+
+    #[test]
+    fn zibelan_lobby_does_not_raise_the_world_notice() {
+        let (mut online, transport) = mock_world_transport();
+        online.connection_mode = Some(OnlineMode::ZibelanLobby);
+
+        transport.send(b"WOK 42\n");
+        pump_world(&mut online, |online| online.local_id() == Some(42));
+
+        assert!(!online.take_connection_notice());
+    }
+
+    #[test]
+    fn json_connected_queues_one_notice_per_connection() {
+        let mut online = ReloadedOnline::default();
+
+        online.handle_json_event(Event::Connected { id: 7 });
+        assert!(online.take_connection_notice());
+        assert!(!online.take_connection_notice());
+
+        online.handle_json_event(Event::Connected { id: 8 });
+        online.handle_json_event(Event::Joined { id: 8, name: "Ana".to_string() });
+        assert!(!online.take_connection_notice());
+
+        online.stop();
+        online.handle_json_event(Event::Connected { id: 9 });
+        assert!(online.take_connection_notice());
+    }
+
+    #[test]
+    fn disconnecting_drops_a_pending_connection_notice() {
+        let mut online = ReloadedOnline::default();
+        online.handle_json_event(Event::Connected { id: 7 });
+        online.handle_json_event(Event::Disconnected("fin".into()));
+        assert!(!online.take_connection_notice());
+
+        online.handle_json_event(Event::Connected { id: 8 });
+        assert!(online.take_connection_notice());
     }
 
     #[test]

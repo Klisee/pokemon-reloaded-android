@@ -85,6 +85,10 @@ use std::{
 #[cfg(not(target_os = "android"))]
 use std::process::{Command, Stdio};
 
+/// One-shot native notice shown after the first successful world connection.
+pub const ONLINE_CONNECTED_NOTICE: &str =
+    "¡Conectado al mundo online! Verás a los demás jugadores...";
+
 #[derive(Clone, Serialize, Deserialize)]
 pub enum GameClock {
     StartupEpoch(#[serde(with = "game_epoch_serde")] Instant),
@@ -210,6 +214,8 @@ pub struct Game {
     pub interaction_request: Option<(u64, String, String, String)>,
     pub interaction_response: Option<(String, bool)>,
     pub interaction_pending_kind: Option<String>,
+    pub online_notice_open: bool,
+    pub online_notice_just_opened: bool,
     pub trade: Option<trade::TradeSession>,
     pub battle_pending: bool,
     pub battle_target: Option<u64>,
@@ -1462,6 +1468,8 @@ impl Game {
             interaction_request: None,
             interaction_response: None,
             interaction_pending_kind: None,
+            online_notice_open: false,
+            online_notice_just_opened: false,
             trade: None,
             battle_pending: false,
             battle_target: None,
@@ -2494,7 +2502,7 @@ impl Game {
             return Ok(())
         }
 
-        if self.reloaded_online.is_active() {
+        if self.reloaded_online.is_active() && !self.online_notice_open {
             if self.online_chat_open {
                 let (sx1, sy1, sx2, sy2) = self.online_chat_send_rect();
                 let (kx1, ky1, kx2, ky2) = self.online_chat_cancel_rect();
@@ -4982,6 +4990,7 @@ impl Game {
             || self.interaction_menu_open
             || self.interaction_request.is_some()
             || self.interaction_response.is_some()
+            || self.online_notice_open
     }
 
     fn gift_admission_error(&self) -> Option<&'static str> {
@@ -4999,7 +5008,16 @@ impl Game {
         if !self.reloaded_online.is_active() {
             return
         }
+        if self.online_notice_open && self.trade.is_none() {
+            // Keep the world stream alive while the native notice waits for Accept.
+            self.reloaded_online.tick(&self.room, &self.assets);
+        }
         if self.interaction_any_open() {
+            return
+        }
+        if self.reloaded_online.take_connection_notice() {
+            self.online_notice_open = true;
+            self.online_notice_just_opened = true;
             return
         }
         if let Some(request) = self.reloaded_online.take_request() {
@@ -5062,7 +5080,34 @@ impl Game {
         self.interaction_menu_just_opened = true;
     }
 
+    fn online_notice_input(&mut self) {
+        if self.online_notice_just_opened {
+            self.online_notice_just_opened = false;
+            return
+        }
+        let key = self.input.keyboard_check_pressed(input::Button::Return as u8)
+            || self.input.keyboard_check_pressed(input::Button::Space as u8)
+            || self.input.keyboard_check_pressed(input::Button::Z as u8)
+            || self.input.keyboard_check_pressed(input::Button::Escape as u8);
+        let mut mouse = false;
+        if self.input.mouse_check_button_pressed(1) {
+            let (x, y) = (self.input.mouse_x(), self.input.mouse_y());
+            let (x1, y1, x2, y2) = self.interaction_row(0);
+            mouse = x >= x1 && x <= x2 && y >= y1 && y <= y2;
+        }
+        if !key && !mouse {
+            return
+        }
+        self.online_notice_open = false;
+        self.online_notice_just_opened = false;
+        self.suppress_input_until_release(mouse, key);
+    }
+
     fn interaction_input(&mut self) {
+        if self.online_notice_open {
+            self.online_notice_input();
+            return
+        }
         if self.trade.is_some() {
             self.trade_input();
             return
