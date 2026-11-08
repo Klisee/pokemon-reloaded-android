@@ -28,7 +28,12 @@
 //! best-effort fallback so existing peers and callers observe the same wire
 //! behaviour. `WREQ`/`WANS`/`WCANCEL` payloads remain opaque, as the
 //! specification requires.
+//!
+//! Unknown server lines that clearly reject the connection (rate limits and
+//! incompatible-version errors) are surfaced as [`RozEvent::ConnectionRejected`]
+//! so the host can end the attempt with a clear message instead of waiting forever.
 
+use crate::failure::ConnectionFailure;
 use reloaded_cleanroom::{
     roz::{ClientCommand, ServerEvent},
     world,
@@ -274,6 +279,8 @@ pub enum RozEvent {
     Full { world: bool },
     /// `PEER_LEFT`.
     PeerLeft,
+    /// A server line that terminates the connection (rate limit or version rejection).
+    ConnectionRejected { failure: ConnectionFailure },
     /// `MSG <hex>` decoded to its original bytes.
     Message(Vec<u8>),
     /// `IN <epoch> <frame> <mask>`.
@@ -437,18 +444,22 @@ impl RozClient {
     ) -> Result<Self, String> {
         let addresses = address
             .to_socket_addrs()
-            .map_err(|error| format!("dirección inválida ({address}): {error}"))?;
-        let mut last_error = None;
+            .map_err(|_| ConnectionFailure::Dns.message().to_string())?;
+        let mut last_failure = None;
         for addr in addresses {
             match TcpStream::connect_timeout(&addr, timeout) {
                 Ok(stream) => return Self::from_stream(stream, event_capacity),
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    let failure = ConnectionFailure::from_io_error(&error);
+                    // IPv6 and IPv4 often resolve together. A "no route" for one
+                    // family must not hide a more useful error from the other.
+                    if failure != ConnectionFailure::NoRoute || last_failure.is_none() {
+                        last_failure = Some(failure);
+                    }
+                },
             }
         }
-        Err(match last_error {
-            Some(error) => format!("no pude conectar a {address}: {error}"),
-            None => format!("{address} no resolvió a ninguna dirección"),
-        })
+        Err(last_failure.unwrap_or(ConnectionFailure::Dns).to_string())
     }
 
     fn from_stream(stream: TcpStream, event_capacity: usize) -> Result<Self, String> {
@@ -456,7 +467,7 @@ impl RozClient {
         stream.set_write_timeout(Some(DEFAULT_WRITE_TIMEOUT)).ok();
         let reader_stream = stream
             .try_clone()
-            .map_err(|error| format!("clonando socket: {error}"))?;
+            .map_err(|error| format!("{} ({error})", ConnectionFailure::Other.message()))?;
         let local_addr = stream.local_addr().ok();
         let peer_addr = stream.peer_addr().ok();
 
@@ -473,7 +484,7 @@ impl RozClient {
             thread::Builder::new()
                 .name("roz-reader".into())
                 .spawn(move || reader_loop(reader_stream, events, status, side, peer))
-                .map_err(|error| format!("no pude iniciar el hilo lector: {error}"))?
+                .map_err(|error| format!("{} ({error})", ConnectionFailure::Other.message()))?
         };
 
         Ok(Self {
@@ -804,7 +815,7 @@ fn reader_loop(
 
     let reason = loop {
         match stream.read(&mut chunk) {
-            Ok(0) => break "el servidor cerró la conexión".to_string(),
+            Ok(0) => break "El servidor cerró la conexión.".to_string(),
             Ok(read) => {
                 for event in buffer.feed(&chunk[..read]) {
                     match event {
@@ -819,6 +830,16 @@ fn reader_loop(
                                 continue;
                             }
                             let text = String::from_utf8_lossy(&line);
+                            let command = text.split_whitespace().next().unwrap_or("");
+                            // `WSAY`/`WEXC` are handled by the legacy fallback below; their
+                            // chat text can legitimately contain words such as "version" or
+                            // "limit", so they must never be treated as control failures.
+                            if !matches!(command, "WSAY" | "WEXC") {
+                                if let Some(failure) = ConnectionFailure::from_server_line(&line) {
+                                    events.push(RozEvent::ConnectionRejected { failure });
+                                    continue;
+                                }
+                            }
                             handle_line(&text, &events, &status, &side, &peer);
                         }
                         adapter::LineEvent::Overlong => events.push(RozEvent::Malformed {
@@ -829,7 +850,13 @@ fn reader_loop(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => break format!("error de red: {error}"),
+            Err(error) => {
+                let failure = ConnectionFailure::from_io_error(&error);
+                break match failure {
+                    ConnectionFailure::Other => ConnectionFailure::Other.message().to_string(),
+                    _ => failure.message().to_string(),
+                };
+            },
         }
     };
 
@@ -2071,6 +2098,72 @@ mod tests {
 
         let client = connect(addr);
         assert_eq!(next_event(&client), RozEvent::Wait);
+    }
+
+    #[test]
+    fn rate_limit_line_is_reported_as_a_terminal_event() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream.write_all(b"RATE_LIMIT 30\n").expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+
+        let client = connect(addr);
+        assert_eq!(
+            next_event(&client),
+            RozEvent::ConnectionRejected { failure: ConnectionFailure::RateLimited }
+        );
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn version_error_line_is_reported_as_a_protocol_failure() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream.write_all(b"ERROR version incompatible\n").expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+
+        let client = connect(addr);
+        assert_eq!(
+            next_event(&client),
+            RozEvent::ConnectionRejected { failure: ConnectionFailure::Protocol }
+        );
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn chat_text_with_failure_words_stays_chat() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream.write_all(b"WSAY 7 la version esta limitada\n").expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(3));
+        });
+
+        let client = connect(addr);
+        assert_eq!(
+            next_event(&client),
+            RozEvent::WorldSay { id: 7, text: "la version esta limitada".into() }
+        );
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn refused_connect_reports_a_spanish_message() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind refused address");
+        let addr = listener.local_addr().expect("refused address");
+        drop(listener);
+
+        let error = RozClient::connect_with_timeout(&addr.to_string(), Duration::from_millis(250))
+            .err()
+            .expect("connect must fail");
+        assert!(error.contains("rechazó"), "{error}");
     }
 
     #[test]

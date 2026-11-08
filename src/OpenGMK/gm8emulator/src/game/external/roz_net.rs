@@ -490,6 +490,10 @@ impl RozRuntime {
                 self.push_inbox(format!("WCANCEL\x1f{id}").into_bytes());
             },
             RozEvent::WorldCancel { id: None } => self.push_inbox(b"WCANCEL\x1f".to_vec()),
+            RozEvent::ConnectionRejected { failure } => {
+                eprintln!("[roz-net] conexión rechazada: {failure}");
+                self.client = None;
+            },
             RozEvent::Disconnected { reason } => {
                 eprintln!("[roz-net] desconectado: {reason}");
                 self.client = None;
