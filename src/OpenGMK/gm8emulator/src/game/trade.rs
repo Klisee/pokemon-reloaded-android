@@ -55,7 +55,9 @@ pub(crate) enum TradeCommit {
 }
 
 /// Run `apply`, then `save` only if apply succeeded. `restore` runs exactly once
-/// after either failure, before the error is returned to the caller.
+/// after either failure, before the error is returned to the caller. A failed
+/// restore is appended to the failure reason so callers can distinguish a clean
+/// rollback from a partial one.
 pub(crate) fn commit_transaction<S, A, B, R>(
     state: &mut S,
     apply: A,
@@ -65,20 +67,21 @@ pub(crate) fn commit_transaction<S, A, B, R>(
 where
     A: FnOnce(&mut S) -> Result<(), String>,
     B: FnOnce(&mut S) -> Result<(), String>,
-    R: FnOnce(&mut S),
+    R: FnOnce(&mut S) -> Result<(), String>,
 {
     match apply(state) {
         Ok(()) => match save(state) {
             Ok(()) => TradeCommit::Committed,
-            Err(error) => {
-                restore(state);
-                TradeCommit::SaveFailed(error)
-            },
+            Err(error) => TradeCommit::SaveFailed(merge_rollback(error, restore(state))),
         },
-        Err(error) => {
-            restore(state);
-            TradeCommit::ApplyFailed(error)
-        },
+        Err(error) => TradeCommit::ApplyFailed(merge_rollback(error, restore(state))),
+    }
+}
+
+fn merge_rollback(error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; rollback failed: {rollback}"),
     }
 }
 
@@ -229,7 +232,10 @@ mod tests {
                 state.push("save");
                 Ok(())
             },
-            |state| state.push("restore"),
+            |state| {
+                state.push("restore");
+                Ok(())
+            },
         );
         assert_eq!(outcome, TradeCommit::Committed);
         assert_eq!(state, ["apply", "save"]);
@@ -248,7 +254,10 @@ mod tests {
                 state.push("save");
                 Ok(())
             },
-            |state| state.push("restore"),
+            |state| {
+                state.push("restore");
+                Ok(())
+            },
         );
         assert_eq!(outcome, TradeCommit::ApplyFailed("E_APPLY".into()));
         assert_eq!(state, ["apply", "restore"]);
@@ -267,10 +276,65 @@ mod tests {
                 state.push("save");
                 Err("GuardarPartida".into())
             },
-            |state| state.push("restore"),
+            |state| {
+                state.push("restore");
+                Ok(())
+            },
         );
         assert_eq!(outcome, TradeCommit::SaveFailed("GuardarPartida".into()));
         assert_eq!(state, ["apply", "save", "restore"]);
+    }
+
+    #[test]
+    fn save_failure_reports_a_failed_restore() {
+        let mut state = Vec::new();
+        let outcome = commit_transaction(
+            &mut state,
+            |state| {
+                state.push("apply");
+                Ok(())
+            },
+            |state| {
+                state.push("save");
+                Err("GuardarPartida".into())
+            },
+            |state| {
+                state.push("restore");
+                Err("estado inconsistente".into())
+            },
+        );
+        assert_eq!(
+            outcome,
+            TradeCommit::SaveFailed(
+                "GuardarPartida; rollback failed: estado inconsistente".into()
+            )
+        );
+        assert_eq!(state, ["apply", "save", "restore"]);
+    }
+
+    #[test]
+    fn apply_failure_reports_a_failed_restore_without_saving() {
+        let mut state = Vec::new();
+        let outcome = commit_transaction(
+            &mut state,
+            |state| {
+                state.push("apply");
+                Err("E_APPLY".into())
+            },
+            |state| {
+                state.push("save");
+                Ok(())
+            },
+            |state| {
+                state.push("restore");
+                Err("estado inconsistente".into())
+            },
+        );
+        assert_eq!(
+            outcome,
+            TradeCommit::ApplyFailed("E_APPLY; rollback failed: estado inconsistente".into())
+        );
+        assert_eq!(state, ["apply", "restore"]);
     }
 
     #[test]
@@ -301,6 +365,7 @@ mod tests {
             |state| {
                 state.party = b"before".to_vec();
                 state.restores += 1;
+                Ok(())
             },
         );
         assert_eq!(outcome, TradeCommit::SaveFailed("disk full".into()));
@@ -330,7 +395,10 @@ mod tests {
                 state.writes += 1;
                 Ok(())
             },
-            |state| state.restores += 1,
+            |state| {
+                state.restores += 1;
+                Ok(())
+            },
         );
         assert_eq!(outcome, TradeCommit::ApplyFailed("rejected".into()));
         assert_eq!(state.party, b"before");

@@ -129,6 +129,57 @@ pub(crate) fn rollback_after_failure(
     super::reloaded_save::rollback_slot(program_dir, slot, source, reason)
 }
 
+/// Runs one mutating save under a rollback checkpoint.
+///
+/// The checkpoint is captured before `save` runs; if it cannot be captured the
+/// save is not attempted, so a failure cannot leave an untracked partial save.
+/// When `save` fails the slot is restored, and a failed restore is appended to
+/// the returned reason instead of being hidden.
+pub(crate) fn transactional_save<F>(
+    program_dir: &Path,
+    slot: i32,
+    reason: &str,
+    save: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let baseline = if slot > 0 {
+        match capture_before_save(program_dir, slot) {
+            Ok(record) => record,
+            Err(error) => {
+                return Err(format!("no se pudo preparar el guardado: {error}"))
+            },
+        }
+    } else {
+        None
+    };
+
+    match save() {
+        Ok(()) => Ok(()),
+        Err(error) => match baseline {
+            Some(record) => {
+                match rollback_after_failure(program_dir, slot, record.snapshot.id, reason) {
+                    Ok(Some(receipt)) => {
+                        eprintln!(
+                            "[save] guardado fallido revertido a la revision {}",
+                            receipt.current
+                        );
+                        Err(error)
+                    },
+                    Ok(None) => Err(error),
+                    Err(rollback_error) => {
+                        let combined = format!("{error}; rollback failed: {rollback_error}");
+                        eprintln!("[save] no se pudo revertir el guardado: {combined}");
+                        Err(combined)
+                    },
+                }
+            },
+            None => Err(error),
+        },
+    }
+}
+
 /// Writes `bytes` to `path` through a temporary file, syncs it and renames it
 /// into place. Canonical save-slot files also go through the clean-room save
 /// hooks so backups and rollback stay available.
@@ -448,6 +499,113 @@ mod tests {
 
         assert_eq!(fs::read(&destination).unwrap(), b"source bytes");
         assert!(!temp.path().join(format!("destination.dat{}", f3r::save::TEMP_SUFFIX)).exists());
+    }
+
+    fn live_slot_path(temp: &TestDir, slot: i32) -> PathBuf {
+        temp.path()
+            .join(f3r::save::ROOT)
+            .join(f3r::save::PARTIDAS)
+            .join(slot_name(slot, f3r::save::EXT_SAVC))
+    }
+
+    fn prepare_live_slot(temp: &TestDir, slot: i32, bytes: &[u8]) -> PathBuf {
+        let path = live_slot_path(temp, slot);
+        fs::create_dir_all(path.parent().unwrap()).expect("create partidas");
+        write_fixture(&path, bytes);
+        path
+    }
+
+    #[test]
+    fn transactional_save_commits_when_the_save_succeeds() {
+        let _guard = GUARD_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        set_online_save_guard(false);
+        let temp = TestDir::new("transactional-ok");
+        let path = prepare_live_slot(&temp, 31, b"before");
+        let mut called = false;
+
+        transactional_save(temp.path(), 31, "trade save", || {
+            called = true;
+            atomic_write(&path, b"after").map_err(|error| error.to_string())
+        })
+        .expect("transactional save");
+
+        assert!(called);
+        assert_eq!(fs::read(&path).unwrap(), b"after");
+    }
+
+    #[test]
+    fn transactional_save_restores_the_slot_after_a_partial_save_failure() {
+        let _guard = GUARD_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        set_online_save_guard(false);
+        let temp = TestDir::new("transactional-failure");
+        let path = prepare_live_slot(&temp, 32, b"before");
+
+        let outcome = transactional_save(temp.path(), 32, "trade save", || {
+            atomic_write(&path, b"partial").map_err(|error| error.to_string())?;
+            Err("disk full".into())
+        });
+
+        assert_eq!(outcome, Err("disk full".into()));
+        assert_eq!(fs::read(&path).unwrap(), b"before");
+    }
+
+    #[test]
+    fn transactional_save_removes_a_new_slot_after_a_failed_save() {
+        let _guard = GUARD_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        set_online_save_guard(false);
+        let temp = TestDir::new("transactional-new-slot");
+        let path = live_slot_path(&temp, 33);
+        fs::create_dir_all(path.parent().unwrap()).expect("create partidas");
+        assert!(!path.exists());
+
+        let outcome = transactional_save(temp.path(), 33, "trade save", || {
+            atomic_write(&path, b"partial").map_err(|error| error.to_string())?;
+            Err("disk full".into())
+        });
+
+        assert_eq!(outcome, Err("disk full".into()));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn transactional_save_does_not_run_without_a_checkpoint() {
+        let temp = TestDir::new("transactional-prepare");
+        let not_a_directory = temp.path().join("save-root");
+        write_fixture(&not_a_directory, b"not a directory");
+        let mut called = false;
+
+        let outcome = transactional_save(&not_a_directory, 34, "trade save", || {
+            called = true;
+            Ok(())
+        });
+
+        assert!(!called);
+        assert!(outcome
+            .unwrap_err()
+            .starts_with("no se pudo preparar el guardado:"));
+    }
+
+    #[test]
+    fn transactional_save_reports_a_failed_rollback() {
+        let _guard = GUARD_TEST_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        set_online_save_guard(false);
+        let temp = TestDir::new("transactional-rollback-failure");
+        let path = prepare_live_slot(&temp, 35, b"before");
+        let backup_root = temp
+            .path()
+            .join(f3r::save::ROOT)
+            .join(f3r::save::PARTIDAS)
+            .join(".reloaded-save");
+
+        let outcome = transactional_save(temp.path(), 35, "trade save", || {
+            fs::write(&path, b"after").expect("write partial save");
+            fs::remove_dir_all(&backup_root).expect("remove rollback checkpoint");
+            Err("disk full".into())
+        });
+
+        let error = outcome.unwrap_err();
+        assert!(error.starts_with("disk full; rollback failed:"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), b"after");
     }
 
     #[test]
