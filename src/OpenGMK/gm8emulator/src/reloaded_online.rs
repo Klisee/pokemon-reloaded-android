@@ -254,6 +254,8 @@ pub struct ReloadedOnline {
     requests: Vec<IncomingRequest>,
     responses: Vec<IncomingResponse>,
     peer_messages: VecDeque<PeerMessage>,
+    peer_left: bool,
+    left_peers: VecDeque<u64>,
     battle_teams: Vec<IncomingBattleTeam>,
     battle_inputs: Vec<IncomingBattleInput>,
     status: String,
@@ -299,6 +301,8 @@ impl Default for ReloadedOnline {
             requests: Vec::new(),
             responses: Vec::new(),
             peer_messages: VecDeque::new(),
+            peer_left: false,
+            left_peers: VecDeque::new(),
             battle_teams: Vec::new(),
             battle_inputs: Vec::new(),
             status: "Reloaded Online desactivado".into(),
@@ -437,6 +441,9 @@ impl ReloadedOnline {
         self.pending_checksums.clear();
         self.requests.clear();
         self.responses.clear();
+        self.peer_messages.clear();
+        self.peer_left = false;
+        self.left_peers.clear();
         self.battle_teams.clear();
         self.battle_inputs.clear();
         self.pending_say.clear();
@@ -722,6 +729,46 @@ impl ReloadedOnline {
 
     pub fn take_peer_message(&mut self) -> Option<PeerMessage> {
         self.peer_messages.pop_front()
+    }
+
+    /// Drops messages queued before a trade session started, so an old offer
+    /// or confirmation cannot be adopted by the new session.
+    pub fn clear_peer_messages(&mut self) {
+        self.peer_messages.clear();
+    }
+
+    /// Drops only queued `OK`/`NO` controls. A legitimately early `OFFER`
+    /// from a legacy peer is kept, while a stale confirmation cannot cancel or
+    /// complete the new session.
+    pub fn clear_peer_controls(&mut self) {
+        self.peer_messages.retain(|message| {
+            !matches!(
+                message.kind,
+                PeerMessageKind::Ok | PeerMessageKind::No
+            )
+        });
+    }
+
+    /// True while a backend is connected. A failed connection is not ready,
+    /// even though `is_active` keeps the online UI visible.
+    pub fn is_ready(&self) -> bool {
+        matches!(self.connection, Some(Connection::Ready(_)))
+    }
+
+    /// Takes the `PEER_LEFT` signal emitted by the server.
+    pub fn take_peer_left(&mut self) -> bool {
+        std::mem::take(&mut self.peer_left)
+    }
+
+    /// Takes the next remote id that left the world.
+    pub fn take_left_peer(&mut self) -> Option<u64> {
+        self.left_peers.pop_front()
+    }
+
+    /// Clears stale leave signals when a new trade session starts.
+    pub fn clear_peer_left(&mut self) {
+        self.peer_left = false;
+        self.left_peers.clear();
     }
 
     pub fn send_peer_message(&mut self, kind: PeerMessageKind, payload: &[u8]) -> bool {
@@ -1285,6 +1332,10 @@ impl ReloadedOnline {
                 if self.battle_active && self.battle_peer == Some(id) {
                     self.fail_battle("el rival salio");
                 }
+                if self.left_peers.len() >= 64 {
+                    self.left_peers.pop_front();
+                }
+                self.left_peers.push_back(id);
                 self.world.apply_wdel(id);
                 self.drop_remote_state(id);
             },
@@ -1298,6 +1349,7 @@ impl ReloadedOnline {
                 self.world.clear();
                 self.world.set_local_id(None);
                 self.connection = Some(Connection::Failed(error.clone()));
+                self.peer_left = true;
                 self.fail_battle(error);
             },
         }
@@ -1348,6 +1400,7 @@ impl ReloadedOnline {
             RozEvent::PeerLeft => {
                 self.peer.clear();
                 self.status = "Zibelan: el rival salio".into();
+                self.peer_left = true;
                 self.fail_battle("el rival salio");
             },
             RozEvent::Message(bytes) => {
@@ -1454,6 +1507,7 @@ impl ReloadedOnline {
                 self.world.clear();
                 self.remotes.clear();
                 self.connection = Some(Connection::Failed(reason.clone()));
+                self.peer_left = true;
                 self.fail_battle(reason);
             },
         }
@@ -2713,6 +2767,54 @@ mod tests {
         assert_eq!(queued.len(), 64);
         assert_eq!(queued.first().unwrap(), b"offer-2");
         assert_eq!(queued.last().unwrap(), b"offer-65");
+    }
+
+    #[test]
+    fn clear_peer_messages_drops_stale_confirmations_before_a_new_trade() {
+        let mut online = ReloadedOnline::default();
+        queue_wire(&mut online, b"OFFER\x1fold");
+        queue_wire(&mut online, b"OK\x1f");
+        queue_wire(&mut online, b"NO\x1f");
+        assert_eq!(online.peer_messages.len(), 3);
+
+        online.clear_peer_messages();
+        assert!(online.take_peer_message().is_none());
+    }
+
+    #[test]
+    fn clear_peer_controls_keeps_an_early_offer_for_legacy_peers() {
+        let mut online = ReloadedOnline::default();
+        queue_wire(&mut online, b"OFFER\x1fearly");
+        queue_wire(&mut online, b"OK\x1f");
+        queue_wire(&mut online, b"NO\x1f");
+
+        online.clear_peer_controls();
+        let message = online.take_peer_message().expect("early offer survives");
+        assert_eq!(message.kind, PeerMessageKind::Offer);
+        assert_eq!(message.payload, b"early");
+        assert!(online.take_peer_message().is_none());
+    }
+
+    #[test]
+    fn peer_left_and_remote_left_are_reported_once_for_trade_cancellation() {
+        let mut online = ReloadedOnline::default();
+        online.handle_roz_event(RozEvent::PeerLeft);
+        assert!(online.take_peer_left());
+        assert!(!online.take_peer_left());
+
+        online.handle_json_event(Event::Left { id: 7 });
+        assert_eq!(online.take_left_peer(), Some(7));
+        assert_eq!(online.take_left_peer(), None);
+    }
+
+    #[test]
+    fn failed_connection_is_not_ready_and_looks_like_a_peer_loss() {
+        let mut online = ReloadedOnline::default();
+        assert!(!online.is_ready());
+        online.handle_roz_event(RozEvent::Disconnected { reason: "fin".into() });
+        assert!(!online.is_ready());
+        assert!(online.take_peer_left());
+        assert!(!online.take_peer_left());
     }
 
     #[test]
