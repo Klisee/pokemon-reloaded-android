@@ -5964,7 +5964,18 @@ impl Game {
                 f3r::room::is_options_name(&name)
             })
             .unwrap_or(false);
-        if (self.room.id == f3r::room::BOOT || options) && (80..=240).contains(&x) {
+        // The title/options hitbox clamp is only for the bare menu rows. A modal
+        // question ("¿Deseas empezar una nueva partida?") owns its own Si/No
+        // boxes; clamping x there collapses "No" onto x=178 and makes it
+        // unpressable.
+        #[cfg(target_os = "android")]
+        let question_modal = matches!(
+            self.modal_system(),
+            f3r::script::MODAL_QUESTION | f3r::script::MODAL_QUESTION_LARGE
+        );
+        #[cfg(not(target_os = "android"))]
+        let question_modal = false;
+        if !question_modal && (self.room.id == f3r::room::BOOT || options) && (80..=240).contains(&x) {
             x.min(178)
         } else {
             x
