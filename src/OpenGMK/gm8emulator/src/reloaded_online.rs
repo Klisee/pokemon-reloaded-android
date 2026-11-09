@@ -276,8 +276,118 @@ pub struct BattleTeamMeta {
 /// `NetConfigString` and consumed by `NetConfigApply` in Reloaded 0.6.3.
 pub const BATTLE_CONFIG_FIELDS: usize = 37;
 
+/// Numeric fields at the front of `WCFG` (indices 0..=31).
+pub const BATTLE_CONFIG_NUMERIC_FIELDS: usize = 32;
+
 /// Field separator used by `NetConfigString` (`chr(29)`).
 const BATTLE_CONFIG_SEPARATOR: u8 = 0x1d;
+
+/// Where `NetConfigApply` writes one `WCFG` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BattleConfigTarget {
+    /// A variable on the `MULTIPLAYER` instance.
+    Instance(&'static str),
+    /// A GML `global`.
+    Global(&'static str),
+    /// A variable on `obj_DayNightControl`, only when that object exists.
+    DayNight(&'static str),
+    /// A text variable on the `MULTIPLAYER` instance.
+    Text(&'static str),
+}
+
+impl BattleConfigTarget {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Instance(name) | Self::Global(name) | Self::DayNight(name) | Self::Text(name) => name,
+        }
+    }
+
+    pub const fn is_text(self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+}
+
+/// The exact destinations of the 37 `NetConfigApply` fields, in wire order.
+///
+/// This table is the single audit point for "is every `WCFG` field applied?".
+pub const BATTLE_CONFIG_TARGETS: [BattleConfigTarget; BATTLE_CONFIG_FIELDS] = [
+    BattleConfigTarget::Instance("NUM_POKEMON1"),
+    BattleConfigTarget::Instance("NUM_POKEMON2"),
+    BattleConfigTarget::Instance("DIFICULTAD1"),
+    BattleConfigTarget::Instance("DIFICULTAD2"),
+    BattleConfigTarget::Instance("CAMBIOS1"),
+    BattleConfigTarget::Instance("CAMBIOS2"),
+    BattleConfigTarget::Instance("NUM_OBJ1"),
+    BattleConfigTarget::Instance("NUM_OBJ2"),
+    BattleConfigTarget::Instance("OBJ_ASG1"),
+    BattleConfigTarget::Instance("OBJ_ASG2"),
+    BattleConfigTarget::Instance("CONT_POKE1"),
+    BattleConfigTarget::Instance("CONT_POKE2"),
+    BattleConfigTarget::Instance("VEL_ATAQUE1"),
+    BattleConfigTarget::Instance("VEL_ATAQUE2"),
+    BattleConfigTarget::Instance("REST_PP1"),
+    BattleConfigTarget::Instance("REST_PP2"),
+    BattleConfigTarget::Instance("SHOW_TYPE"),
+    BattleConfigTarget::Instance("TIME_BATTLE"),
+    BattleConfigTarget::Instance("BTTBACK_INDEX"),
+    BattleConfigTarget::Instance("MUSIC_INDEX"),
+    BattleConfigTarget::Instance("SUBITA"),
+    BattleConfigTarget::Instance("BATTLE_MODE"),
+    BattleConfigTarget::Instance("DAY"),
+    BattleConfigTarget::Global("shownumber"),
+    BattleConfigTarget::Global("showbattleevents"),
+    BattleConfigTarget::Global("showpanelcombate"),
+    BattleConfigTarget::Global("shownumberPS"),
+    BattleConfigTarget::Global("modeBattleBack"),
+    BattleConfigTarget::Global("WorldClima"),
+    BattleConfigTarget::Global("clima"),
+    BattleConfigTarget::DayNight("Hora"),
+    BattleConfigTarget::DayNight("Minuto"),
+    BattleConfigTarget::Text("REGLAS_J1"),
+    BattleConfigTarget::Text("REGLAS_J2"),
+    BattleConfigTarget::Text("OPTIONS_BT"),
+    BattleConfigTarget::Text("MUSIC_NAME"),
+    BattleConfigTarget::Text("txt_clima"),
+];
+
+/// Receiver for applying a decoded `WCFG` to the live game.
+///
+/// `Game` implements this around its instance/global accessors; tests use a
+/// recorder to prove that every field reaches the destination `NetConfigApply`
+/// uses.
+pub trait BattleConfigSink {
+    fn set_instance_number(&mut self, name: &str, value: i32);
+    fn set_global_number(&mut self, name: &str, value: i32);
+    fn set_day_night_number(&mut self, name: &str, value: i32);
+    fn set_instance_text(&mut self, name: &str, value: &[u8]);
+
+    /// `MultiplayerSetBackground` reads `BTTBACK_INDEX` from the controller, but the
+    /// battle room keeps using `global.numfondobattle`. The host sets it when it
+    /// chooses `fondo`; the guest must mirror field 18 or the two sides can pick
+    /// different battle backgrounds.
+    fn set_num_fondo_battle(&mut self, value: i32) {
+        let _ = value;
+    }
+}
+
+/// Apply a `WCFG` configuration exactly as `NetConfigApply` does.
+pub fn apply_battle_config<S: BattleConfigSink>(config: &BattleConfig, sink: &mut S) {
+    let numbers = config.numeric_fields();
+    let texts = config.text_fields();
+    for (index, target) in BATTLE_CONFIG_TARGETS.iter().enumerate() {
+        match *target {
+            BattleConfigTarget::Instance(name) => sink.set_instance_number(name, numbers[index]),
+            BattleConfigTarget::Global(name) => sink.set_global_number(name, numbers[index]),
+            BattleConfigTarget::DayNight(name) => sink.set_day_night_number(name, numbers[index]),
+            BattleConfigTarget::Text(name) => {
+                sink.set_instance_text(name, texts[index - BATTLE_CONFIG_NUMERIC_FIELDS]);
+            },
+        }
+    }
+    if config.bttback_index > 0 {
+        sink.set_num_fondo_battle(config.bttback_index);
+    }
+}
 
 /// The battle settings that side 1 sends to side 2 as
 /// `WCFG\x1f<field>\x1d<field>\x1d...`, matching Reloaded 0.6.3
@@ -326,7 +436,7 @@ pub struct BattleConfig {
 }
 
 impl BattleConfig {
-    fn numeric_fields(&self) -> [i32; 32] {
+    fn numeric_fields(&self) -> [i32; BATTLE_CONFIG_NUMERIC_FIELDS] {
         [
             self.num_pokemon1,
             self.num_pokemon2,
@@ -363,6 +473,16 @@ impl BattleConfig {
         ]
     }
 
+    fn text_fields(&self) -> [&[u8]; BATTLE_CONFIG_FIELDS - BATTLE_CONFIG_NUMERIC_FIELDS] {
+        [
+            &self.rules_j1,
+            &self.rules_j2,
+            &self.options_bt,
+            &self.music_name,
+            &self.txt_clima,
+        ]
+    }
+
     /// Encodes only the `NetConfigString` body, without the `WCFG\x1f` prefix.
     pub fn encode_body(&self) -> Vec<u8> {
         let mut out = Vec::new();
@@ -370,13 +490,7 @@ impl BattleConfig {
             out.extend_from_slice(value.to_string().as_bytes());
             out.push(BATTLE_CONFIG_SEPARATOR);
         }
-        for text in [
-            &self.rules_j1,
-            &self.rules_j2,
-            &self.options_bt,
-            &self.music_name,
-            &self.txt_clima,
-        ] {
+        for text in self.text_fields() {
             out.extend_from_slice(text);
             out.push(BATTLE_CONFIG_SEPARATOR);
         }
@@ -2951,6 +3065,115 @@ mod battle_config_tests {
         assert!(payload.starts_with(b"WCFG\x1f"));
         let rest = payload.strip_prefix(b"WCFG\x1f").expect("prefix");
         assert_eq!(BattleConfig::decode(rest).expect("round trip"), sample());
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Recorded {
+        Instance(String, i32),
+        Global(String, i32),
+        DayNight(String, i32),
+        Text(String, Vec<u8>),
+        NumFondo(i32),
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        applied: Vec<Recorded>,
+    }
+
+    impl BattleConfigSink for RecordingSink {
+        fn set_instance_number(&mut self, name: &str, value: i32) {
+            self.applied.push(Recorded::Instance(name.into(), value));
+        }
+
+        fn set_global_number(&mut self, name: &str, value: i32) {
+            self.applied.push(Recorded::Global(name.into(), value));
+        }
+
+        fn set_day_night_number(&mut self, name: &str, value: i32) {
+            self.applied.push(Recorded::DayNight(name.into(), value));
+        }
+
+        fn set_instance_text(&mut self, name: &str, value: &[u8]) {
+            self.applied.push(Recorded::Text(name.into(), value.to_vec()));
+        }
+
+        fn set_num_fondo_battle(&mut self, value: i32) {
+            self.applied.push(Recorded::NumFondo(value));
+        }
+    }
+
+    #[test]
+    fn battle_config_targets_match_the_cleanroom_wcfg_table() {
+        use reloaded_cleanroom::z063_sec::WcfgKind;
+
+        let names: Vec<&str> = BATTLE_CONFIG_TARGETS.iter().map(|target| target.name()).collect();
+        let expected: Vec<&str> =
+            reloaded_cleanroom::z063_sec::WCFG_FIELD_SPECS.iter().map(|spec| spec.name).collect();
+        assert_eq!(names, expected);
+        assert_eq!(BATTLE_CONFIG_NUMERIC_FIELDS, reloaded_cleanroom::wcfg::NUMERIC_FIELD_COUNT);
+        assert_eq!(BATTLE_CONFIG_FIELDS, reloaded_cleanroom::wcfg::FIELD_COUNT);
+        for (target, spec) in BATTLE_CONFIG_TARGETS.iter().zip(reloaded_cleanroom::z063_sec::WCFG_FIELD_SPECS) {
+            assert_eq!(target.is_text(), spec.kind == WcfgKind::Text, "field {}", target.name());
+        }
+    }
+
+    #[test]
+    fn battle_config_apply_covers_every_net_config_apply_field() {
+        let config = sample();
+        let numbers = config.numeric_fields();
+        let texts = config.text_fields();
+        let mut expected = Vec::with_capacity(BATTLE_CONFIG_FIELDS + 1);
+        for (index, target) in BATTLE_CONFIG_TARGETS.iter().enumerate() {
+            match *target {
+                BattleConfigTarget::Instance(name) => {
+                    expected.push(Recorded::Instance(name.into(), numbers[index]));
+                },
+                BattleConfigTarget::Global(name) => {
+                    expected.push(Recorded::Global(name.into(), numbers[index]));
+                },
+                BattleConfigTarget::DayNight(name) => {
+                    expected.push(Recorded::DayNight(name.into(), numbers[index]));
+                },
+                BattleConfigTarget::Text(name) => {
+                    expected.push(Recorded::Text(
+                        name.into(),
+                        texts[index - BATTLE_CONFIG_NUMERIC_FIELDS].to_vec(),
+                    ));
+                },
+            }
+        }
+        expected.push(Recorded::NumFondo(config.bttback_index));
+
+        let mut sink = RecordingSink::default();
+        apply_battle_config(&config, &mut sink);
+        assert_eq!(sink.applied, expected);
+
+        assert_eq!(
+            sink.applied.iter().filter(|entry| matches!(entry, Recorded::Instance(..))).count(),
+            23
+        );
+        assert_eq!(
+            sink.applied.iter().filter(|entry| matches!(entry, Recorded::Global(..))).count(),
+            7
+        );
+        assert_eq!(
+            sink.applied.iter().filter(|entry| matches!(entry, Recorded::DayNight(..))).count(),
+            2
+        );
+        assert_eq!(
+            sink.applied.iter().filter(|entry| matches!(entry, Recorded::Text(..))).count(),
+            5
+        );
+    }
+
+    #[test]
+    fn battle_config_apply_keeps_num_fondo_untouched_without_a_background() {
+        let mut config = sample();
+        config.bttback_index = 0;
+        let mut sink = RecordingSink::default();
+        apply_battle_config(&config, &mut sink);
+        assert!(!sink.applied.iter().any(|entry| matches!(entry, Recorded::NumFondo(_))));
     }
 }
 
