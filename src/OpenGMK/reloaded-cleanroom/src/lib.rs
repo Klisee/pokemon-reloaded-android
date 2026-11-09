@@ -9,4 +9,5 @@ pub mod roz;
 pub mod save;
 pub mod team;
 pub mod trade;
+pub mod wcfg;
 pub mod world;
