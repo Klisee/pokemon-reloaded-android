@@ -2833,6 +2833,23 @@ mod team_payload_tests {
         assert_eq!(meta.delay, 4);
         assert_eq!(data, b"uno\r\ndos\r\n");
     }
+
+    #[test]
+    fn rejects_team_payload_without_five_version_fields() {
+        assert!(parse_zibelan_team(b"old-team-only\r\n").is_none());
+        assert!(parse_zibelan_team(b"1\x1e2\x1e3\x1e4\x1eteam\r\n").is_none());
+    }
+
+    #[test]
+    fn accepts_empty_team_after_five_prefix_fields() {
+        let (meta, data) = parse_zibelan_team(b"42\x1e0\x1e0\x1e0\x1e2\x1e").expect("empty team");
+        assert_eq!(meta.seed, 42);
+        assert_eq!(meta.fondo, 0);
+        assert_eq!(meta.modo, 0);
+        assert_eq!(meta.sala, 0);
+        assert_eq!(meta.delay, 2);
+        assert!(data.is_empty());
+    }
 }
 
 #[cfg(test)]
