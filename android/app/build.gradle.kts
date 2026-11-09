@@ -18,7 +18,9 @@ val keystoreProperties = Properties().apply {
 //   ./build.sh assembleRelease -PtargetAbi=x86_64
 //   ./build.sh assembleRelease -PtargetAbi=universal
 // after building the same ABIs with cargo-ndk (the error below prints the exact commands).
-val appVersion = "0.4.1"
+val appVersion = providers.gradleProperty("appVersion").orElse("0.4.1").get()
+val appVersionCode = providers.gradleProperty("versionCode").orElse("18").get().toInt()
+val unsignedRelease = providers.gradleProperty("unsignedRelease").orElse("false").get().toBoolean()
 val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 val rustTargetOf = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
@@ -29,8 +31,9 @@ val targetAbi = providers.gradleProperty("targetAbi").orElse("arm64-v8a").get()
 val universal = targetAbi == "universal"
 require(universal || targetAbi in allAbis) { "ABI no soportada: $targetAbi" }
 val buildAbis = if (universal) allAbis else listOf(targetAbi)
+val cargoTargetDir = rootProject.file(providers.gradleProperty("cargoTargetDir").orElse("../src/OpenGMK/target").get())
 val emulatorSos = buildAbis.associateWith { abi ->
-    rootProject.file("../src/OpenGMK/target/${rustTargetOf.getValue(abi)}/release/libgm8emulator.so")
+    cargoTargetDir.resolve("${rustTargetOf.getValue(abi)}/release/libgm8emulator.so")
 }
 val copyEmulatorSo by tasks.registering {
     inputs.files(emulatorSos.values.map { it }).optional()
@@ -58,7 +61,7 @@ android {
         // AAudio exists since Android 8 (API 26), which is the real floor of the engine.
         minSdk = 26
         targetSdk = 36
-        versionCode = 18
+        versionCode = appVersionCode
         versionName = appVersion
         ndk { abiFilters += buildAbis }
     }
@@ -79,10 +82,12 @@ android {
             isMinifyEnabled = false
             // Signed with the project's own key when it is present, so the APK shipped as a release
             // is a real release build and not a debug one.
-            signingConfig = if (!keystoreProperties.isEmpty) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
+            if (!unsignedRelease) {
+                signingConfig = if (!keystoreProperties.isEmpty) {
+                    signingConfigs.getByName("release")
+                } else {
+                    signingConfigs.getByName("debug")
+                }
             }
         }
     }

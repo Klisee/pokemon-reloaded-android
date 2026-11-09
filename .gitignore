@@ -35,3 +35,6 @@ android/app/src/main/jniLibs/
 
 # The built APK goes to the GitHub release, not into git.
 pokemon-reloaded-*.apk
+
+# Local build output for tools/build-067.sh.
+dist/
