@@ -222,6 +222,9 @@ pub struct Game {
     pub battle_pending: bool,
     pub battle_target: Option<u64>,
     pub battle_offer: Option<crate::reloaded_online::BattleTeamMeta>,
+    pub battle_waiting_config: bool,
+    pub battle_pending_team: Option<(crate::reloaded_online::IncomingBattleTeam, u64)>,
+    pub battle_config_since: Option<std::time::Instant>,
     pub battle_sync_active: bool,
     pub battle_opponent: Option<u64>,
     pub battle_remote_mask: u32,
@@ -1479,6 +1482,9 @@ impl Game {
             battle_pending: false,
             battle_target: None,
             battle_offer: None,
+            battle_waiting_config: false,
+            battle_pending_team: None,
+            battle_config_since: None,
             battle_sync_active: false,
             battle_opponent: None,
             battle_remote_mask: 0,
@@ -3399,6 +3405,15 @@ impl Game {
             .next(&self.room.instance_list)
     }
 
+    fn find_object_instance_by_name(&self, name: &[u8]) -> Option<usize> {
+        let object = self
+            .assets
+            .objects
+            .iter()
+            .position(|object| object.as_ref().is_some_and(|object| object.name.as_ref() == name))?;
+        self.find_object_instance(object as i32)
+    }
+
     fn set_instance_value(&mut self, handle: usize, name: &[u8], value: gml::Value) {
         let field = self.compiler.get_field_id(name);
         let instance = self.room.instance_list.get(handle);
@@ -3419,6 +3434,14 @@ impl Game {
         match self.room.instance_list.get(handle).fields.borrow().get(&field_id)?.get(0)? {
             gml::Value::Real(value) => Some(value.into_inner()),
             _ => None,
+        }
+    }
+
+    fn get_instance_text(&self, handle: usize, name: &[u8]) -> Option<Vec<u8>> {
+        let field_id = self.compiler.find_field_id(name)?;
+        match self.room.instance_list.get(handle).fields.borrow().get(&field_id)?.get(0)? {
+            gml::Value::Str(value) => Some(value.as_ref().to_vec()),
+            gml::Value::Real(value) => Some(team_file::number_text(value.into_inner())),
         }
     }
 
@@ -3707,16 +3730,7 @@ impl Game {
     fn battle_team_meta(&self, target: u64) -> crate::reloaded_online::BattleTeamMeta {
         let host = self.battle_is_host(target);
         let seed = if host { self.reloaded_online.battle_seed(target) } else { 0 };
-        let fondo = if host {
-            let value = self.global_number(f3r::global::NUMFONDOBATTLE, 0).unwrap_or(0);
-            if value > 0 {
-                value
-            } else {
-                (seed.unsigned_abs() % f3r::battle::BACKGROUND_COUNT) as i32 + 1
-            }
-        } else {
-            0
-        };
+        let fondo = if host { self.battle_background_for_seed(seed) } else { 0 };
         let modo = self.global_number(f3r::global::MODE_BATTLE_BACK, 0).unwrap_or(0);
         let sala = if host { self.room.id } else { 0 };
         let delay = crate::battle_sync::initial_delay(
@@ -3725,29 +3739,151 @@ impl Game {
         crate::reloaded_online::BattleTeamMeta { seed, fondo, modo, sala, delay }
     }
 
+    fn battle_background_for_seed(&self, seed: i32) -> i32 {
+        let value = self.global_number(f3r::global::NUMFONDOBATTLE, 0).unwrap_or(0);
+        if value > 0 {
+            value
+        } else {
+            (seed.unsigned_abs() % f3r::battle::BACKGROUND_COUNT) as i32 + 1
+        }
+    }
+
+    /// Side 1 generates a fresh 1..=1_000_000_000 seed for the battle, as `NetFight` does.
+    fn next_battle_seed(&mut self) -> i32 {
+        (self.rand.next(1_000_000_000.0).floor() as i64 + 1).clamp(1, 1_000_000_000) as i32
+    }
+
     /// Before creating the multiplayer controller, let the game's own battle-background script
     /// choose the background room and index that Zibelan sends as `sala`/`fondo`.
-    fn battle_team_meta_for_send(&self, target: u64) -> crate::reloaded_online::BattleTeamMeta {
-        let mut meta = self.battle_team_meta(target);
+    fn battle_team_meta_for_send(&mut self, target: u64) -> crate::reloaded_online::BattleTeamMeta {
         if !self.battle_is_host(target) {
-            return meta;
+            return self.battle_team_meta(target);
         }
+        let seed = self.next_battle_seed();
         // `BattleBackground` is the authority, but running it from Rust has side effects
         // (it may create instances). These are the rooms it returns for the common maps.
         let modo = self.global_number(f3r::global::MODE_BATTLE_BACK, 0).unwrap_or(0);
         let hierba = self.global_number(f3r::global::HIERBA, 0).unwrap_or(0);
-        meta.sala = if modo != 0 {
+        let sala = if modo != 0 {
             f3r::room::BATTLE
         } else if hierba == f3r::battle::GRASS_LAVA {
             f3r::room::BATTLE_LAVA
         } else {
             f3r::room::BATTLE_AQUA
         };
-        let fondo = self.global_number(f3r::global::NUMFONDOBATTLE, 0).unwrap_or(0);
-        if fondo > 0 {
-            meta.fondo = fondo;
+        let delay = self.global_number(f3r::global::NET_DELAY, 0).unwrap_or(2).clamp(2, 10);
+        crate::reloaded_online::BattleTeamMeta {
+            seed,
+            fondo: self.battle_background_for_seed(seed),
+            modo,
+            sala,
+            delay,
         }
-        meta
+    }
+
+    fn battle_config_from_instance(&self, handle: usize) -> crate::reloaded_online::BattleConfig {
+        let number = |name: &[u8], default: i32| {
+            self.get_instance_real(handle, name).map(|value| value as i32).unwrap_or(default)
+        };
+        let text = |name: &[u8]| self.get_instance_text(handle, name).unwrap_or_default();
+        let global = |name: &[u8], default: i32| self.global_number(name, 0).unwrap_or(default);
+        let day_night = self.find_object_instance_by_name(b"obj_DayNightControl");
+        let day_night_number = |name: &[u8], default: i32| {
+            day_night
+                .and_then(|handle| self.get_instance_real(handle, name))
+                .map(|value| value as i32)
+                .unwrap_or(default)
+        };
+        crate::reloaded_online::BattleConfig {
+            num_pokemon1: number(b"NUM_POKEMON1", 6),
+            num_pokemon2: number(b"NUM_POKEMON2", 6),
+            dificultad1: number(b"DIFICULTAD1", 1),
+            dificultad2: number(b"DIFICULTAD2", 1),
+            cambios1: number(b"CAMBIOS1", 18),
+            cambios2: number(b"CAMBIOS2", 18),
+            num_obj1: number(b"NUM_OBJ1", 6),
+            num_obj2: number(b"NUM_OBJ2", 6),
+            obj_asg1: number(b"OBJ_ASG1", 15),
+            obj_asg2: number(b"OBJ_ASG2", 15),
+            cont_poke1: number(b"CONT_POKE1", 1),
+            cont_poke2: number(b"CONT_POKE2", 1),
+            vel_ataque1: number(b"VEL_ATAQUE1", 0),
+            vel_ataque2: number(b"VEL_ATAQUE2", 0),
+            rest_pp1: number(b"REST_PP1", 0),
+            rest_pp2: number(b"REST_PP2", 0),
+            show_type: number(b"SHOW_TYPE", 1),
+            time_battle: number(b"TIME_BATTLE", 0),
+            bttback_index: number(b"BTTBACK_INDEX", 0),
+            music_index: number(b"MUSIC_INDEX", 109),
+            subita: number(b"SUBITA", 0),
+            battle_mode: number(b"BATTLE_MODE", global(f3r::global::MODE_BATTLE_BACK, 0)),
+            day: number(b"DAY", 1),
+            shownumber: global(b"shownumber", 1),
+            showbattleevents: global(b"showbattleevents", 1),
+            showpanelcombate: global(b"showpanelcombate", 1),
+            shownumber_ps: global(b"shownumberPS", 0),
+            mode_battle_back: global(f3r::global::MODE_BATTLE_BACK, 0),
+            world_clima: global(b"WorldClima", 0),
+            clima: global(b"clima", 0),
+            hora: day_night_number(b"Hora", 8),
+            minuto: day_night_number(b"Minuto", 30),
+            rules_j1: text(b"REGLAS_J1"),
+            rules_j2: text(b"REGLAS_J2"),
+            options_bt: text(b"OPTIONS_BT"),
+            music_name: text(b"MUSIC_NAME"),
+            txt_clima: text(b"txt_clima"),
+        }
+    }
+
+    /// Applies the 0.6.3 `NetConfigApply` fields before `MultiplayerGoBattle` runs.
+    fn apply_battle_config(&mut self, handle: usize, config: &crate::reloaded_online::BattleConfig) {
+        for (name, value) in [
+            (b"NUM_POKEMON1".as_slice(), config.num_pokemon1),
+            (b"NUM_POKEMON2".as_slice(), config.num_pokemon2),
+            (b"DIFICULTAD1".as_slice(), config.dificultad1),
+            (b"DIFICULTAD2".as_slice(), config.dificultad2),
+            (b"CAMBIOS1".as_slice(), config.cambios1),
+            (b"CAMBIOS2".as_slice(), config.cambios2),
+            (b"NUM_OBJ1".as_slice(), config.num_obj1),
+            (b"NUM_OBJ2".as_slice(), config.num_obj2),
+            (b"OBJ_ASG1".as_slice(), config.obj_asg1),
+            (b"OBJ_ASG2".as_slice(), config.obj_asg2),
+            (b"CONT_POKE1".as_slice(), config.cont_poke1),
+            (b"CONT_POKE2".as_slice(), config.cont_poke2),
+            (b"VEL_ATAQUE1".as_slice(), config.vel_ataque1),
+            (b"VEL_ATAQUE2".as_slice(), config.vel_ataque2),
+            (b"REST_PP1".as_slice(), config.rest_pp1),
+            (b"REST_PP2".as_slice(), config.rest_pp2),
+            (b"SHOW_TYPE".as_slice(), config.show_type),
+            (b"TIME_BATTLE".as_slice(), config.time_battle),
+            (b"BTTBACK_INDEX".as_slice(), config.bttback_index),
+            (b"MUSIC_INDEX".as_slice(), config.music_index),
+            (b"SUBITA".as_slice(), config.subita),
+            (b"BATTLE_MODE".as_slice(), config.battle_mode),
+            (b"DAY".as_slice(), config.day),
+        ] {
+            self.set_instance_number(handle, name, f64::from(value));
+        }
+        self.set_global_real(b"shownumber", 0, f64::from(config.shownumber));
+        self.set_global_real(b"showbattleevents", 0, f64::from(config.showbattleevents));
+        self.set_global_real(b"showpanelcombate", 0, f64::from(config.showpanelcombate));
+        self.set_global_real(b"shownumberPS", 0, f64::from(config.shownumber_ps));
+        self.set_global_real(f3r::global::MODE_BATTLE_BACK, 0, f64::from(config.mode_battle_back));
+        self.set_global_real(b"WorldClima", 0, f64::from(config.world_clima));
+        self.set_global_real(b"clima", 0, f64::from(config.clima));
+        if let Some(day_night) = self.find_object_instance_by_name(b"obj_DayNightControl") {
+            self.set_instance_number(day_night, b"Hora", f64::from(config.hora));
+            self.set_instance_number(day_night, b"Minuto", f64::from(config.minuto));
+        }
+        for (name, value) in [
+            (b"REGLAS_J1".as_slice(), config.rules_j1.as_slice()),
+            (b"REGLAS_J2".as_slice(), config.rules_j2.as_slice()),
+            (b"OPTIONS_BT".as_slice(), config.options_bt.as_slice()),
+            (b"MUSIC_NAME".as_slice(), config.music_name.as_slice()),
+            (b"txt_clima".as_slice(), config.txt_clima.as_slice()),
+        ] {
+            self.set_instance_text(handle, name, value);
+        }
     }
 
     fn send_battle_team_to(&mut self, target: u64, name: &str) {
@@ -3929,6 +4065,12 @@ impl Game {
         self.clear_online_battle_state();
     }
 
+    fn reset_pending_battle_config(&mut self) {
+        self.battle_waiting_config = false;
+        self.battle_pending_team = None;
+        self.battle_config_since = None;
+    }
+
     fn clear_online_battle_state(&mut self) {
         save_guard::set_online_save_guard(false);
         let directory = std::path::PathBuf::from(self.program_directory.decode_utf8().into_owned());
@@ -3939,6 +4081,7 @@ impl Game {
         self.battle_pending = false;
         self.battle_target = None;
         self.battle_offer = None;
+        self.reset_pending_battle_config();
         self.battle_sync_active = false;
         self.battle_opponent = None;
         self.battle_remote_mask = 0;
@@ -3991,13 +4134,45 @@ impl Game {
         self.battle_local_p1 = true;
     }
 
+    fn validate_guest_battle_meta(&self, remote: &crate::reloaded_online::IncomingBattleTeam) -> Result<(), String> {
+        if !remote.zibelan {
+            return Ok(())
+        }
+        if !(1..=1_000_000_000).contains(&remote.meta.seed) {
+            return Err("El anfitrion envio una semilla de combate invalida.".into())
+        }
+        if !(0..=2).contains(&remote.meta.modo) {
+            return Err("El anfitrion envio un modo de combate invalido.".into())
+        }
+        if remote.meta.sala <= 0 {
+            return Err("El anfitrion envio una sala de combate invalida.".into())
+        }
+        Ok(())
+    }
+
+    fn abort_battle_start(&mut self, message: &str) {
+        eprintln!("[battle] inicio cancelado: {message}");
+        self.reset_pending_battle_config();
+        self.battle_pending = false;
+        self.battle_target = None;
+        self.battle_offer = None;
+        if self.battle_snapshot.is_some() {
+            self.finish_online_battle_guard(message);
+        } else {
+            self.reloaded_online.end_battle();
+        }
+        self.interaction_response = Some((message.to_string(), false));
+    }
+
     fn start_battle_with_remote_team(
         &mut self,
         remote: &crate::reloaded_online::IncomingBattleTeam,
         target: u64,
+        config: Option<&crate::reloaded_online::BattleConfig>,
     ) -> gml::Result<()> {
+        self.reset_pending_battle_config();
         self.begin_online_battle_guard();
-        let result = self.start_battle_with_remote_team_inner(remote, target);
+        let result = self.start_battle_with_remote_team_inner(remote, target, config);
         if result.is_err() || !self.battle_sync_active {
             self.finish_online_battle_guard("inicio de batalla fallido");
         }
@@ -4008,6 +4183,7 @@ impl Game {
         &mut self,
         remote: &crate::reloaded_online::IncomingBattleTeam,
         target: u64,
+        config: Option<&crate::reloaded_online::BattleConfig>,
     ) -> gml::Result<()> {
         if !self.battle_local_p1 {
             self.restore_local_battle_team();
@@ -4118,19 +4294,60 @@ impl Game {
         } else {
             local_meta.fondo
         };
+        if host {
+            self.set_global_real(f3r::global::NUMFONDOBATTLE, 0, f64::from(fondo));
+        }
         let modo = if host { local_meta.modo } else { remote.meta.modo };
         let sala = if host { local_meta.sala } else { remote.meta.sala };
+        let delay = if host {
+            local_meta.delay
+        } else {
+            remote.meta.delay
+        }
+        .clamp(2, 10);
+        self.set_global_real(f3r::global::NET_DELAY, 0, f64::from(delay));
         self.set_instance_number(handle, f3r::field::P2_SPRR, p2_sprite as f64);
         self.set_instance_number(handle, f3r::field::SPRINDEX2, p2_spr_index);
         self.set_instance_number(handle, f3r::field::INDEX2, f64::from(p2_header.prota_index));
         self.set_instance_number(handle, f3r::field::SP_CHAR2, p2_header.char2);
-        self.set_instance_number(handle, f3r::field::BTTBACK_INDEX, f64::from(fondo.max(1)));
-        if modo != 0 {
-            self.set_global_real(f3r::global::MODE_BATTLE_BACK, 0, f64::from(modo));
+        let background_index = if zibelan { fondo } else { fondo.max(1) };
+        self.set_instance_number(handle, f3r::field::BTTBACK_INDEX, f64::from(background_index));
+        self.set_global_real(f3r::global::MODE_BATTLE_BACK, 0, f64::from(modo));
+        self.set_global_real(f3r::global::NETW_BROOM, 0, f64::from(sala));
+        if zibelan && !host && config.is_none() {
+            return Err(gml::Error::FunctionError(
+                "WCFG".into(),
+                "el lado 2 necesita la configuracion del anfitrion".into(),
+            )
+            .into())
         }
-        if sala != 0 {
-            self.set_global_real(f3r::global::NETW_BROOM, 0, f64::from(sala));
-        }
+        let battle_config = if zibelan {
+            let mut battle_config = match config {
+                Some(config) => config.clone(),
+                None => self.battle_config_from_instance(handle),
+            };
+            if host {
+                // Side 1 is authoritative: the chosen background/mode travel both in TEAM
+                // and in WCFG, exactly like NetFight.
+                battle_config.bttback_index = fondo;
+                battle_config.battle_mode = modo;
+                battle_config.mode_battle_back = modo;
+                if !self.reloaded_online.send_battle_config(&battle_config) {
+                    return Err(gml::Error::FunctionError(
+                        "WCFG".into(),
+                        "no se pudo enviar la configuracion del combate".into(),
+                    )
+                    .into())
+                }
+            }
+            self.apply_battle_config(handle, &battle_config);
+            // NetConfigApply calls MultiplayerSetBackground when the background changes.
+            // Calling it always is harmless and also loads the host-chosen GIF on side 2.
+            let _ = self.run_instance_script(handle, b"MultiplayerSetBackground");
+            Some(battle_config)
+        } else {
+            None
+        };
         let _ = self.variable_global_set(&[
             gml::Value::Str(gml::String::from(f3r::global::ENTR_SPR)),
             gml::Value::Real(Real::from(p1_sprite as f64)),
@@ -4157,10 +4374,25 @@ impl Game {
                 count2 += 1.0;
             }
         }
+        let party_limit = |configured: i32, count: f64| {
+            if (1..=f3r::format::PARTY_SIZE as i32).contains(&configured) {
+                f64::from(configured)
+            } else {
+                count.max(1.0)
+            }
+        };
+        let limit1 = battle_config
+            .as_ref()
+            .map(|config| party_limit(config.num_pokemon1, count1))
+            .unwrap_or_else(|| count1.max(1.0));
+        let limit2 = battle_config
+            .as_ref()
+            .map(|config| party_limit(config.num_pokemon2, count2))
+            .unwrap_or_else(|| count2.max(1.0));
         self.set_instance_number(handle, f3r::field::PLAYER1_INI, 1.0);
         self.set_instance_number(handle, f3r::field::PLAYER2_INI, 1.0);
-        self.set_instance_number(handle, f3r::field::NUM_POKEMON1, count1.max(1.0));
-        self.set_instance_number(handle, f3r::field::NUM_POKEMON2, count2.max(1.0));
+        self.set_instance_number(handle, f3r::field::NUM_POKEMON1, limit1);
+        self.set_instance_number(handle, f3r::field::NUM_POKEMON2, limit2);
         self.run_instance_script(handle, f3r::script::MULTIPLAYER_IMPORT_PLAYER_ONE)?;
         self.run_instance_script(handle, f3r::script::MULTIPLAYER_IMPORT_PLAYER_TWO)?;
         self.run_instance_script(handle, f3r::script::MULTIPLAYER_GO_BATTLE)?;
@@ -5261,11 +5493,40 @@ impl Game {
     fn interaction_trigger(&mut self) {
         self.trade_tick();
         if !self.reloaded_online.is_active() {
+            if self.battle_waiting_config {
+                self.abort_battle_start("Se perdio la conexion antes de empezar el combate.");
+            }
+            return
+        }
+        if self.battle_waiting_config && !self.reloaded_online.is_ready() {
+            self.abort_battle_start("Se perdio la conexion antes de empezar el combate.");
             return
         }
         if self.online_notice_open && self.trade.is_none() {
             // Keep the world stream alive while the native notice waits for Accept.
             self.reloaded_online.tick(&self.room, &self.assets);
+        }
+        if self.battle_waiting_config && self.battle_pending_team.is_some() {
+            if let Some(error) = self.reloaded_online.take_battle_config_error() {
+                self.abort_battle_start(&error);
+                return
+            }
+            if let Some(config) = self.reloaded_online.take_battle_config() {
+                let (team, id) = self.battle_pending_team.take().expect("pending battle team");
+                self.reset_pending_battle_config();
+                eprintln!("[battle] WCFG recibido; arrancando combate");
+                let _ = self.start_battle_with_remote_team(&team, id, Some(&config));
+                return
+            }
+            if self
+                .battle_config_since
+                .is_some_and(|since| since.elapsed() >= Duration::from_secs(30))
+            {
+                self.abort_battle_start("El rival no envio la configuracion del combate a tiempo.");
+                return
+            }
+            // Do not start trades or menus while the battle configuration is in flight.
+            return
         }
         if self.interaction_any_open() {
             return
@@ -5319,8 +5580,33 @@ impl Game {
             if self.battle_pending && self.battle_target == Some(id) {
                 self.battle_pending = false;
                 self.battle_target = None;
-                eprintln!("[battle] equipo remoto recibido; arrancando combate");
-                let _ = self.start_battle_with_remote_team(&team, id);
+                let host = self.battle_is_host(id);
+                if team.zibelan && !host {
+                    if let Err(error) = self.validate_guest_battle_meta(&team) {
+                        self.abort_battle_start(&error);
+                        return
+                    }
+                    // Side 2 follows 0.6.3: it waits for the host's WCFG before loading
+                    // the teams and calling MultiplayerGoBattle.
+                    self.battle_pending_team = Some((team, id));
+                    self.battle_waiting_config = true;
+                    self.battle_config_since = Some(Instant::now());
+                    if let Some(error) = self.reloaded_online.take_battle_config_error() {
+                        self.abort_battle_start(&error);
+                        return
+                    }
+                    if let Some(config) = self.reloaded_online.take_battle_config() {
+                        let (team, id) = self.battle_pending_team.take().expect("pending battle team");
+                        self.reset_pending_battle_config();
+                        eprintln!("[battle] WCFG recibido; arrancando combate");
+                        let _ = self.start_battle_with_remote_team(&team, id, Some(&config));
+                    } else {
+                        eprintln!("[battle] equipo remoto recibido; esperando WCFG");
+                    }
+                } else {
+                    eprintln!("[battle] equipo remoto recibido; arrancando combate");
+                    let _ = self.start_battle_with_remote_team(&team, id, None);
+                }
             }
             return
         }

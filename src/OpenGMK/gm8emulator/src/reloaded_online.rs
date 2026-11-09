@@ -226,6 +226,188 @@ pub struct BattleTeamMeta {
     pub delay: i32,
 }
 
+/// Number of fields in the `WCFG` battle configuration produced by
+/// `NetConfigString` and consumed by `NetConfigApply` in Reloaded 0.6.3.
+pub const BATTLE_CONFIG_FIELDS: usize = 37;
+
+/// Field separator used by `NetConfigString` (`chr(29)`).
+const BATTLE_CONFIG_SEPARATOR: u8 = 0x1d;
+
+/// The battle settings that side 1 sends to side 2 as
+/// `WCFG\x1f<field>\x1d<field>\x1d...`, matching Reloaded 0.6.3
+/// `NetConfigString`/`NetConfigApply`.
+///
+/// The order of the fields is part of the wire contract and must not change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BattleConfig {
+    pub num_pokemon1: i32,
+    pub num_pokemon2: i32,
+    pub dificultad1: i32,
+    pub dificultad2: i32,
+    pub cambios1: i32,
+    pub cambios2: i32,
+    pub num_obj1: i32,
+    pub num_obj2: i32,
+    pub obj_asg1: i32,
+    pub obj_asg2: i32,
+    pub cont_poke1: i32,
+    pub cont_poke2: i32,
+    pub vel_ataque1: i32,
+    pub vel_ataque2: i32,
+    pub rest_pp1: i32,
+    pub rest_pp2: i32,
+    pub show_type: i32,
+    pub time_battle: i32,
+    pub bttback_index: i32,
+    pub music_index: i32,
+    pub subita: i32,
+    pub battle_mode: i32,
+    pub day: i32,
+    pub shownumber: i32,
+    pub showbattleevents: i32,
+    pub showpanelcombate: i32,
+    pub shownumber_ps: i32,
+    pub mode_battle_back: i32,
+    pub world_clima: i32,
+    pub clima: i32,
+    pub hora: i32,
+    pub minuto: i32,
+    pub rules_j1: Vec<u8>,
+    pub rules_j2: Vec<u8>,
+    pub options_bt: Vec<u8>,
+    pub music_name: Vec<u8>,
+    pub txt_clima: Vec<u8>,
+}
+
+impl BattleConfig {
+    fn numeric_fields(&self) -> [i32; 32] {
+        [
+            self.num_pokemon1,
+            self.num_pokemon2,
+            self.dificultad1,
+            self.dificultad2,
+            self.cambios1,
+            self.cambios2,
+            self.num_obj1,
+            self.num_obj2,
+            self.obj_asg1,
+            self.obj_asg2,
+            self.cont_poke1,
+            self.cont_poke2,
+            self.vel_ataque1,
+            self.vel_ataque2,
+            self.rest_pp1,
+            self.rest_pp2,
+            self.show_type,
+            self.time_battle,
+            self.bttback_index,
+            self.music_index,
+            self.subita,
+            self.battle_mode,
+            self.day,
+            self.shownumber,
+            self.showbattleevents,
+            self.showpanelcombate,
+            self.shownumber_ps,
+            self.mode_battle_back,
+            self.world_clima,
+            self.clima,
+            self.hora,
+            self.minuto,
+        ]
+    }
+
+    /// Encodes only the `NetConfigString` body, without the `WCFG\x1f` prefix.
+    pub fn encode_body(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in self.numeric_fields() {
+            out.extend_from_slice(value.to_string().as_bytes());
+            out.push(BATTLE_CONFIG_SEPARATOR);
+        }
+        for text in [
+            &self.rules_j1,
+            &self.rules_j2,
+            &self.options_bt,
+            &self.music_name,
+            &self.txt_clima,
+        ] {
+            out.extend_from_slice(text);
+            out.push(BATTLE_CONFIG_SEPARATOR);
+        }
+        // `NetConfigString` has no trailing separator: the last field runs to the end.
+        out.pop();
+        out
+    }
+
+    /// Decodes a `NetConfigString` body. Reloaded accepts at least 37 fields and ignores
+    /// anything extra, so old/new peers can append fields without breaking a battle.
+    pub fn decode(body: &[u8]) -> Result<Self, String> {
+        let fields: Vec<&[u8]> = body.split(|byte| *byte == BATTLE_CONFIG_SEPARATOR).collect();
+        if fields.len() < BATTLE_CONFIG_FIELDS {
+            return Err(format!(
+                "WCFG incompleto: {} campos, se esperaban {}",
+                fields.len(),
+                BATTLE_CONFIG_FIELDS
+            ))
+        }
+        let number = |index: usize| -> Result<i32, String> {
+            let field = fields[index];
+            let text = std::str::from_utf8(field)
+                .map_err(|_| format!("WCFG campo {index} no es texto UTF-8"))?
+                .trim();
+            text.parse::<i32>()
+                .map_err(|_| format!("WCFG campo {index} no es un numero: {text:?}"))
+        };
+        let text = |index: usize| -> Vec<u8> { fields[index].to_vec() };
+        let num = [
+            number(0)?, number(1)?, number(2)?, number(3)?, number(4)?, number(5)?, number(6)?,
+            number(7)?, number(8)?, number(9)?, number(10)?, number(11)?, number(12)?, number(13)?,
+            number(14)?, number(15)?, number(16)?, number(17)?, number(18)?, number(19)?,
+            number(20)?, number(21)?, number(22)?, number(23)?, number(24)?, number(25)?,
+            number(26)?, number(27)?, number(28)?, number(29)?, number(30)?, number(31)?,
+        ];
+        Ok(Self {
+            num_pokemon1: num[0],
+            num_pokemon2: num[1],
+            dificultad1: num[2],
+            dificultad2: num[3],
+            cambios1: num[4],
+            cambios2: num[5],
+            num_obj1: num[6],
+            num_obj2: num[7],
+            obj_asg1: num[8],
+            obj_asg2: num[9],
+            cont_poke1: num[10],
+            cont_poke2: num[11],
+            vel_ataque1: num[12],
+            vel_ataque2: num[13],
+            rest_pp1: num[14],
+            rest_pp2: num[15],
+            show_type: num[16],
+            time_battle: num[17],
+            bttback_index: num[18],
+            music_index: num[19],
+            subita: num[20],
+            battle_mode: num[21],
+            day: num[22],
+            shownumber: num[23],
+            showbattleevents: num[24],
+            showpanelcombate: num[25],
+            shownumber_ps: num[26],
+            mode_battle_back: num[27],
+            world_clima: num[28],
+            clima: num[29],
+            hora: num[30],
+            minuto: num[31],
+            rules_j1: text(32),
+            rules_j2: text(33),
+            options_bt: text(34),
+            music_name: text(35),
+            txt_clima: text(36),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct IncomingBattleTeam {
     pub id: u64,
@@ -273,6 +455,8 @@ pub struct ReloadedOnline {
     peer_left: bool,
     left_peers: VecDeque<u64>,
     battle_teams: Vec<IncomingBattleTeam>,
+    battle_configs: VecDeque<BattleConfig>,
+    battle_config_error: Option<String>,
     battle_inputs: Vec<IncomingBattleInput>,
     status: String,
     chat: Vec<(String, String)>,
@@ -331,6 +515,8 @@ impl Default for ReloadedOnline {
             peer_left: false,
             left_peers: VecDeque::new(),
             battle_teams: Vec::new(),
+            battle_configs: VecDeque::new(),
+            battle_config_error: None,
             battle_inputs: Vec::new(),
             status: "Reloaded Online desactivado".into(),
             chat: Vec::new(),
@@ -493,6 +679,8 @@ impl ReloadedOnline {
         self.battle_peer = None;
         self.pending_request = None;
         self.battle_teams.clear();
+        self.battle_configs.clear();
+        self.battle_config_error = None;
         self.battle_inputs.clear();
         self.battle_checksums.clear();
         self.battle_bye_frame = None;
@@ -753,6 +941,23 @@ impl ReloadedOnline {
         }
     }
 
+    /// Zibelan side 1: `WCFG\x1f` followed by the 37 `NetConfigString` fields.
+    pub fn send_battle_config(&mut self, config: &BattleConfig) -> bool {
+        let result = match &self.connection {
+            Some(Connection::Ready(Backend::Zibelan(client))) => {
+                client.send_message_bytes(&zibelan_config_payload(config))
+            },
+            _ => return false,
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.status = error;
+                false
+            },
+        }
+    }
+
     pub fn send_battle_input(&mut self, target: u64, mask: u32, seq: u32, frame: u32, checksum: u32) -> bool {
         let result = match &self.connection {
             Some(Connection::Ready(Backend::Json(client))) => {
@@ -822,6 +1027,14 @@ impl ReloadedOnline {
         } else {
             Some(self.battle_teams.remove(0))
         }
+    }
+
+    pub fn take_battle_config(&mut self) -> Option<BattleConfig> {
+        self.battle_configs.pop_front()
+    }
+
+    pub fn take_battle_config_error(&mut self) -> Option<String> {
+        self.battle_config_error.take()
     }
 
     pub fn nearest_remote(&self, room_id: i32, x: f64, y: f64, max_distance: f64) -> Option<(u64, String)> {
@@ -1815,6 +2028,21 @@ impl ReloadedOnline {
             }
             return;
         }
+        if let Some(rest) = bytes.strip_prefix(b"WCFG\x1f") {
+            match BattleConfig::decode(rest) {
+                Ok(config) => {
+                    if self.battle_configs.len() >= 4 {
+                        self.battle_configs.pop_front();
+                    }
+                    self.battle_configs.push_back(config);
+                },
+                Err(error) => {
+                    eprintln!("[reloaded-online] WCFG Zibelan invalido: {error}");
+                    self.battle_config_error = Some(error);
+                },
+            }
+            return;
+        }
         if let Some(separator) = bytes.iter().position(|byte| *byte == 0x1f) {
             let kind = match &bytes[..separator] {
                 b"OFFER" => Some(PeerMessageKind::Offer),
@@ -2443,6 +2671,14 @@ fn zibelan_team_payload(data: &[u8], meta: &BattleTeamMeta) -> Vec<u8> {
     payload
 }
 
+fn zibelan_config_payload(config: &BattleConfig) -> Vec<u8> {
+    let body = config.encode_body();
+    let mut payload = Vec::with_capacity(5 + body.len());
+    payload.extend_from_slice(b"WCFG\x1f");
+    payload.extend_from_slice(&body);
+    payload
+}
+
 fn parse_zibelan_team(mut rest: &[u8]) -> Option<(BattleTeamMeta, Vec<u8>)> {
     let mut fields = [0i32; 5];
     for field in &mut fields {
@@ -2503,6 +2739,108 @@ mod team_payload_tests {
         assert_eq!(meta.sala, f3r::room::BATTLE_AQUA);
         assert_eq!(meta.delay, 4);
         assert_eq!(data, b"uno\r\ndos\r\n");
+    }
+}
+
+#[cfg(test)]
+mod battle_config_tests {
+    use super::*;
+
+    pub(super) fn sample() -> BattleConfig {
+        BattleConfig {
+            num_pokemon1: 6,
+            num_pokemon2: 3,
+            dificultad1: 2,
+            dificultad2: 0,
+            cambios1: 18,
+            cambios2: 66,
+            num_obj1: 6,
+            num_obj2: 0,
+            obj_asg1: 15,
+            obj_asg2: 16,
+            cont_poke1: 1,
+            cont_poke2: 0,
+            vel_ataque1: 1,
+            vel_ataque2: 0,
+            rest_pp1: 4,
+            rest_pp2: 2,
+            show_type: 1,
+            time_battle: 11,
+            bttback_index: 1001,
+            music_index: 109,
+            subita: 1,
+            battle_mode: 2,
+            day: 0,
+            shownumber: 1,
+            showbattleevents: 0,
+            showpanelcombate: 1,
+            shownumber_ps: 0,
+            mode_battle_back: 2,
+            world_clima: 5,
+            clima: 7,
+            hora: 20,
+            minuto: 30,
+            rules_j1: "6#Normal#18#6#Piedra#Sí#No#0".as_bytes().to_vec(),
+            rules_j2: "3#Difícil#66#0#Ninguno#No#Sí#4".as_bytes().to_vec(),
+            options_bt: "1#0#1#1#0#10:00#1".as_bytes().to_vec(),
+            music_name: "Pista 109".as_bytes().to_vec(),
+            txt_clima: "Lluvia".as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn battle_config_round_trips_every_field() {
+        let config = sample();
+        let body = config.encode_body();
+        assert_eq!(body.split(|byte| *byte == BATTLE_CONFIG_SEPARATOR).count(), BATTLE_CONFIG_FIELDS);
+        assert_eq!(BattleConfig::decode(&body).expect("valid config"), config);
+    }
+
+    #[test]
+    fn battle_config_accepts_trailing_and_extra_fields() {
+        let config = sample();
+        let mut body = config.encode_body();
+        body.push(BATTLE_CONFIG_SEPARATOR);
+        assert_eq!(BattleConfig::decode(&body).expect("trailing separator"), config);
+
+        body.extend_from_slice(b"99\x1dextra");
+        assert_eq!(BattleConfig::decode(&body).expect("extra fields"), config);
+    }
+
+    #[test]
+    fn battle_config_requires_the_0_6_3_field_count() {
+        let body = sample().encode_body();
+        let last_separator = body.iter().rposition(|byte| *byte == BATTLE_CONFIG_SEPARATOR).expect("separator");
+        let error = BattleConfig::decode(&body[..last_separator]).expect_err("short config");
+        assert!(error.contains("WCFG incompleto"));
+    }
+
+    #[test]
+    fn battle_config_rejects_a_non_numeric_numeric_field() {
+        let body = sample().encode_body();
+        let text = String::from_utf8(body).expect("ascii config");
+        let mut fields: Vec<&str> = text.split('\x1d').collect();
+        fields[18] = "no-es-un-fondo";
+        let broken = fields.join("\x1d");
+        let error = BattleConfig::decode(broken.as_bytes()).expect_err("invalid background");
+        assert!(error.contains("campo 18"));
+    }
+
+    #[test]
+    fn battle_config_preserves_non_utf8_text_fields() {
+        let mut config = sample();
+        config.rules_j1 = vec![0xff, 0xfe, b'#', 0x80];
+        config.txt_clima = vec![0x81, 0x82];
+        let body = config.encode_body();
+        assert_eq!(BattleConfig::decode(&body).expect("raw text"), config);
+    }
+
+    #[test]
+    fn battle_config_payload_has_the_expected_prefix() {
+        let payload = zibelan_config_payload(&sample());
+        assert!(payload.starts_with(b"WCFG\x1f"));
+        let rest = payload.strip_prefix(b"WCFG\x1f").expect("prefix");
+        assert_eq!(BattleConfig::decode(rest).expect("round trip"), sample());
     }
 }
 
@@ -2693,7 +3031,11 @@ mod tests {
             if done(online) {
                 return
             }
-            assert!(Instant::now() < deadline, "timed out waiting for mock world transport");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for mock world transport (status: {})",
+                online.status()
+            );
             thread::sleep(Duration::from_millis(1));
         }
     }
@@ -3754,6 +4096,35 @@ mod tests {
         assert_eq!(team.meta.delay, meta.delay);
         assert_eq!(team.data, data);
         assert!(team.zibelan);
+    }
+
+    #[test]
+    fn mock_transport_battle_config_round_trips() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        transport.send(b"WELCOME 7\nSTART 1 Rival\n");
+        pump_world(&mut online, |online| online.battle_side() == Some(1));
+        online.begin_battle();
+
+        let config = super::battle_config_tests::sample();
+        let expected = zibelan_config_payload(&config);
+        assert!(online.send_battle_config(&config));
+        assert_eq!(next_client_message(&transport), expected);
+
+        transport.send(format!("MSG {}\n", hex::encode(&expected)).as_bytes());
+        pump_world(&mut online, |online| online.battle_configs.len() == 1);
+        assert_eq!(online.take_battle_config(), Some(config));
+    }
+
+    #[test]
+    fn mock_transport_invalid_battle_config_reports_error() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        let bad = b"WCFG\x1f1\x1e2".to_vec();
+        transport.send(format!("MSG {}\n", hex::encode(&bad)).as_bytes());
+        pump_world(&mut online, |online| online.battle_config_error.is_some());
+
+        assert!(online.take_battle_config().is_none());
+        let error = online.take_battle_config_error().expect("config error");
+        assert!(error.contains("WCFG incompleto"));
     }
 
     #[test]
