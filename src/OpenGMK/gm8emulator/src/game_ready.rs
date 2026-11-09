@@ -47,6 +47,7 @@ pub enum GameReadyEvent {
 
 impl GameReadyEvent {
     /// Stable text used by the launcher's marker file.
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             GameReadyEvent::AudioStarted => "audio",
@@ -170,11 +171,13 @@ impl GameReadySignal {
     }
 
     /// Current state, mostly for diagnostics and tests.
+    #[allow(dead_code)]
     pub fn state(&self) -> GameReadyState {
         self.lock().state
     }
 
     /// True once [`Self::destroy`] ran.
+    #[allow(dead_code)]
     pub fn is_destroyed(&self) -> bool {
         self.state() == GameReadyState::Destroyed
     }
@@ -216,11 +219,6 @@ mod android {
         signal().destroy();
     }
 
-    /// Current state, exposed for the launcher/debugging.
-    pub fn state() -> GameReadyState {
-        signal().state()
-    }
-
     fn notify(event: GameReadyEvent) {
         write_marker(event);
         crate::android_main::notify_game_ready();
@@ -248,7 +246,7 @@ mod android {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{destroy, game_error, poll, start_session, state};
+pub use android::{destroy, game_error, poll, start_session};
 
 #[cfg(test)]
 mod tests {
