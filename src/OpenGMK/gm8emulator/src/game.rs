@@ -6171,7 +6171,7 @@ impl Game {
         }
         // Auto normally lets vsync pace the screen. If the driver ignores the swap interval, the
         // launcher's detected rate is used as an explicit ceiling.
-        let paced_fps = match self.render_mode {
+        let base_paced_fps = match self.render_mode {
             RenderMode::Fixed(fps) => Some(fps),
             RenderMode::Auto => crate::render::pinned_render_hz(),
             _ => None,
@@ -6191,6 +6191,14 @@ impl Game {
         let mut next_present = time_now;
         let log_render = std::env::var_os("OPENGMK_RENDER_LOG").is_some();
         loop {
+            // Online battles render at most at 60 FPS, but never above the
+            // configured base rate: 30 stays 30, 60 stays 60, 120/uncapped
+            // becomes 60. The world outside the battle is untouched.
+            let paced_fps = if self.battle_sync_active && self.reloaded_online.is_zibelan() {
+                base_paced_fps.map(|fps| fps.min(60)).or(Some(60))
+            } else {
+                base_paced_fps
+            };
             #[cfg(target_os = "android")]
             if crate::android_main::worker_stop_requested() {
                 self.close_requested = true;
