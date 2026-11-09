@@ -6,6 +6,7 @@
 
 mod action;
 mod asset;
+pub(crate) mod battle_diag;
 pub(crate) mod battle_sync;
 pub mod compat;
 pub(crate) mod game;
