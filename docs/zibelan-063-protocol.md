@@ -308,6 +308,21 @@ actual DLL-side wire name is not visible.
 game window does not have focus (`net_focus` returns 0), it returns 0 rather
 than a stall. There is no analog input.
 
+#### Frame clock and render pacing
+
+`NetFrameBegin` is called from the `MULTIPLAYER` object's Begin Step event, so
+one battle frame is exactly one game step. The battle rooms in both the 1.9.2.2
+base game and the online client declare `speed=30` (`BattleROOM`,
+`BattleROOMAqua`, `BattleROOMLava` and `ZonaArenaBattle`), so the base tick is
+30 Hz and the 30-frame checksum is one second. A 60 FPS wrapper may raise
+`room_speed` to 60, in which case the same checksum is half a second.
+
+The render rate is not the battle clock. OpenGMK may draw interpolation frames
+between steps (30, 60, 120 or uncapped), and those extra draws must never call
+`BattleSync` or `NetFrameBegin`. The reverse also matters: if the room steps at
+60 Hz, pacing the render at 30 would starve the fixed-step accumulator and run
+the battle at half speed, so a render cap is never applied below `room_speed`.
+
 ### 7.2 Scheduling
 
 `NET_DELAY` is the negotiated delay in frames (section 5). At the beginning of
