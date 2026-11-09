@@ -4907,17 +4907,17 @@ impl Game {
             self.battle_frame = self.battle_frame.wrapping_add(1);
             return
         };
-        let checksum = self.battle_checksum();
-        self.battle_local_checksum = checksum;
-        let desync = self
-            .battle_sync
-            .as_mut()
-            .is_some_and(|sync| sync.store_checksum(frame, checksum));
-        if desync && !self.battle_desync {
-            eprintln!("[battle] desincronizacion frame={frame} checksum={checksum}");
-        }
-        self.battle_desync |= desync;
-        if frame % crate::battle_sync::CHECKSUM_INTERVAL == 0 {
+        if crate::battle_sync::is_checksum_frame(frame) {
+            let checksum = self.battle_checksum();
+            self.battle_local_checksum = checksum;
+            let desync = self
+                .battle_sync
+                .as_mut()
+                .is_some_and(|sync| sync.store_checksum(frame, checksum));
+            if desync && !self.battle_desync {
+                eprintln!("[battle] desincronizacion frame={frame} checksum={checksum}");
+            }
+            self.battle_desync |= desync;
             self.battle_diag.record_local_checksum(frame, checksum);
             if let Some(target) = self.battle_opponent {
                 self.reloaded_online.send_battle_checksum(target, frame, checksum);

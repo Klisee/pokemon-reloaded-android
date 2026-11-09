@@ -7,7 +7,8 @@
 //! - the first `delay` frames are seeded with empty inputs;
 //! - local input sampled on frame `f` is applied on frame `f + delay`;
 //! - every frame reseeds the RNG with `(epoch mod 65536) * 16384 + (frame mod 16384)`;
-//! - a checksum is exchanged every 30 frames and kept in 64-frame buffers;
+//! - a checksum is exchanged every 30 frames, stored only on those frames in
+//!   64 slots, and compared only with the peer value for the same frame;
 //! - `BYE <epoch> <frame>` ends the battle once the local frame passes it;
 //! - the delay adapts in the 2..=10 range from stalled-frame statistics;
 //! - the next frame is not advanced until the peer input for it arrives.
@@ -126,6 +127,11 @@ pub fn delay_from_rtt(rtt_ms: i32, room_speed: i32) -> i32 {
 /// Deterministic per-frame seed from `NetFrameBegin`.
 pub fn frame_seed(epoch: i32, frame: u32) -> i32 {
     (epoch % 65_536) * 16_384 + (frame % 16_384) as i32
+}
+
+/// True on the frames that carry a checksum (`NetChecksumSend` cadence).
+pub fn is_checksum_frame(frame: u32) -> bool {
+    frame % CHECKSUM_INTERVAL == 0
 }
 
 /// Checksum slot used by `NetChecksumSend`/`NetBattleMessages`.
@@ -305,7 +311,7 @@ impl BattleSync {
             outgoing,
             extra_inputs,
             leave,
-            checksum_due: frame % CHECKSUM_INTERVAL == 0,
+            checksum_due: is_checksum_frame(frame),
         }
     }
 
@@ -348,10 +354,26 @@ impl BattleSync {
         extra
     }
 
-    /// Store the local checksum and compare it with an already-received peer value.
+    /// Store the local checksum for a `NetChecksumSend` frame and compare it with
+    /// the peer value for that exact frame. Non-checksum frames are ignored, and
+    /// a later frame never overwrites the slot before the peer value arrives.
     /// Returns true when it detects a desynchronization.
     pub fn store_checksum(&mut self, frame: u32, checksum: u32) -> bool {
+        if !is_checksum_frame(frame) {
+            return self.desync
+        }
         let slot = checksum_slot(frame);
+        if let Some(previous) = self.local_sum_frame[slot] {
+            if previous > frame {
+                return self.desync
+            }
+            if previous == frame && self.local_sum_value[slot] != checksum {
+                self.desync = true;
+            }
+            if previous == frame {
+                return self.desync
+            }
+        }
         self.local_sum_frame[slot] = Some(frame);
         self.local_sum_value[slot] = checksum;
         if self.peer_sum_frame[slot] == Some(frame) && self.peer_sum_value[slot] != checksum {
@@ -360,10 +382,20 @@ impl BattleSync {
         self.desync
     }
 
-    /// Store a peer checksum and compare it with a local value already sent.
-    /// Returns true when it detects a desynchronization.
+    /// Store a peer checksum and compare it with the local value for that exact
+    /// frame. Duplicates and conflicting replays keep the first value, stale
+    /// frames in the same slot are ignored, and only `NetChecksumSend` frames
+    /// are accepted. Returns true when it detects a desynchronization.
     pub fn receive_checksum(&mut self, frame: u32, checksum: u32) -> bool {
+        if !is_checksum_frame(frame) {
+            return self.desync
+        }
         let slot = checksum_slot(frame);
+        if let Some(previous) = self.peer_sum_frame[slot] {
+            if previous >= frame {
+                return self.desync
+            }
+        }
         self.peer_sum_frame[slot] = Some(frame);
         self.peer_sum_value[slot] = checksum;
         if self.local_sum_frame[slot] == Some(frame) && self.local_sum_value[slot] != checksum {
@@ -537,6 +569,53 @@ mod tests {
         assert!(!equal.receive_checksum(30, 111));
         assert!(!equal.store_checksum(30, 111));
         assert!(!equal.desync());
+    }
+
+    #[test]
+    fn checksum_store_keeps_the_frame_until_the_peer_pairs_it() {
+        let mut sync = BattleSync::new(1, 2);
+        assert!(!sync.store_checksum(30, 111));
+        for frame in 31..=59 {
+            assert!(!sync.store_checksum(frame, 0xdead_0000 + frame));
+        }
+        assert!(sync.receive_checksum(30, 222));
+        assert!(sync.desync());
+
+        let mut equal = BattleSync::new(1, 2);
+        assert!(!equal.store_checksum(30, 111));
+        for frame in 31..=59 {
+            assert!(!equal.store_checksum(frame, 0xdead_0000 + frame));
+        }
+        assert!(!equal.receive_checksum(30, 111));
+        assert!(!equal.desync());
+    }
+
+    #[test]
+    fn checksum_store_ignores_non_checksum_frames() {
+        let mut sync = BattleSync::new(1, 2);
+        assert!(!sync.receive_checksum(30, 222));
+        assert!(!sync.store_checksum(31, 111));
+        assert!(sync.store_checksum(30, 111));
+        assert!(sync.desync());
+    }
+
+    #[test]
+    fn peer_checksum_repeats_do_not_overwrite_the_first_value() {
+        let mut sync = BattleSync::new(1, 2);
+        assert!(!sync.receive_checksum(30, 222));
+        assert!(!sync.receive_checksum(30, 333));
+        assert!(!sync.store_checksum(30, 222));
+        assert!(!sync.desync());
+    }
+
+    #[test]
+    fn peer_checksum_ignores_stale_frames_in_the_same_slot() {
+        let mut sync = BattleSync::new(1, 2);
+        assert_eq!(checksum_slot(30), checksum_slot(1_950));
+        assert!(!sync.receive_checksum(1_950, 222));
+        assert!(!sync.receive_checksum(30, 333));
+        assert!(!sync.store_checksum(30, 222));
+        assert!(!sync.desync());
     }
 
     #[test]
