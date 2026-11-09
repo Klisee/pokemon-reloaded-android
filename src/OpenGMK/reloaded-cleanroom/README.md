@@ -6,6 +6,7 @@ depend on F3R GML, the game executable, game data, or the host emulator.
 ## Modules
 - `team`: `.TEAM` codec, validation, versions, checksum.
 - `trade`: 49-field offer codec, safety validation, story/Master Ball policy.
+- `wcfg`: 37-field WCFG codec and side-1/side-2 post-TEAM exchange.
 - `world`: WP/WDEL/WPOS/WLIST parsing and sprite mapping.
 - `roz`: ROZ/Zibelan line framing, command codec, state blobs and MSG payloads.
 - `save`: generic atomic save interception, backups, rollback.
@@ -17,4 +18,4 @@ The modules were written from the functional specifications in
 The crate is isolated so the host can adopt it behind a compatibility adapter.
 
 ## Tests
-`cargo test -p reloaded-cleanroom --offline` currently runs 149 tests.
+`cargo test -p reloaded-cleanroom --offline` currently runs 203 tests.
