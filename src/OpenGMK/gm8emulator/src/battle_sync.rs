@@ -261,6 +261,11 @@ impl BattleSync {
         Some(self.begin_frame(local_sample))
     }
 
+    /// Number of peer inputs queued for frames that have not been simulated yet.
+    pub fn remote_queued(&self) -> usize {
+        self.remote.keys().filter(|frame| **frame > self.frame).count()
+    }
+
     /// Advance to the next frame and plan its inputs.
     pub fn begin_frame(&mut self, local_sample: u32) -> FrameStep {
         self.frame = self.frame.wrapping_add(1);
@@ -493,6 +498,21 @@ mod tests {
         assert_eq!(step.outgoing.expect("scheduled input").mask & STALL_BIT, STALL_BIT);
         let next = sync.begin_frame(0);
         assert_eq!(next.outgoing.expect("scheduled input").mask & STALL_BIT, 0);
+    }
+
+    #[test]
+    fn remote_queue_counts_only_future_frames() {
+        let mut sync = BattleSync::new(1, 2);
+        sync.push_remote(1, 0x01);
+        sync.push_remote(5, 0x02);
+        assert_eq!(sync.remote_queued(), 2);
+
+        sync.begin_frame(0); // frame 1 consumes its input
+        assert_eq!(sync.remote_queued(), 1);
+
+        sync.push_remote(0, 0x03); // stale, already simulated
+        assert_eq!(sync.remote_queued(), 1);
+        assert!(sync.remote_pending(0));
     }
 
     #[test]

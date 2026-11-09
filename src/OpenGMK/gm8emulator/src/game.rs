@@ -36,6 +36,7 @@ pub use view::View;
 
 use crate::{
     action::Tree,
+    battle_diag::BattleDiag,
     battle_sync::BattleSync,
     compat::f3r,
     asset::{
@@ -237,6 +238,7 @@ pub struct Game {
     pub battle_desync: bool,
     pub battle_room: Option<i32>,
     pub battle_sync: Option<BattleSync>,
+    pub battle_diag: BattleDiag,
     pub battle_key_restore: Vec<(u8, bool)>,
     pub battle_wait_since: Option<std::time::Instant>,
     pub battle_wait_sample: Option<u32>,
@@ -1530,6 +1532,7 @@ impl Game {
             battle_desync: false,
             battle_room: None,
             battle_sync: None,
+            battle_diag: BattleDiag::from_env(),
             battle_key_restore: Vec::new(),
             battle_wait_since: None,
             battle_wait_sample: None,
@@ -4082,6 +4085,9 @@ impl Game {
             eprintln!("[online] no se pudieron limpiar los guardados online: {error}");
         }
         crate::touch_controls::clear_battle_role();
+        if let Some(line) = self.battle_diag.finish() {
+            eprintln!("{line}");
+        }
         self.battle_pending = false;
         self.battle_target = None;
         self.battle_offer = None;
@@ -4432,6 +4438,13 @@ impl Game {
         self.battle_local_checksum = 0;
         self.battle_desync = false;
         self.battle_room = None;
+        if zibelan {
+            if let Some(line) =
+                self.battle_diag.start(if host { "P1" } else { "P2" }, epoch, seed, delay, local_id, target)
+            {
+                eprintln!("{line}");
+            }
+        }
         Ok(())
     }
 
@@ -4667,6 +4680,7 @@ impl Game {
             if let Some(sync) = self.battle_sync.as_mut() {
                 sync.push_remote(input.frame, input.mask);
             }
+            self.battle_diag.record_remote_input(input.frame, self.battle_frame);
             self.battle_remote_frame = input.frame;
             self.battle_remote_checksum = input.checksum;
             self.battle_remote_mask = input.mask;
@@ -4679,6 +4693,7 @@ impl Game {
             if let Some(sync) = self.battle_sync.as_mut() {
                 checksum_desync |= sync.receive_checksum(frame, checksum);
             }
+            self.battle_diag.record_peer_checksum(frame, checksum);
         }
         if checksum_desync && !self.battle_desync {
             eprintln!("[battle] desincronizacion por checksum remoto");
@@ -4772,6 +4787,8 @@ impl Game {
             },
             None => return true,
         };
+        let queued = self.battle_sync.as_ref().map(BattleSync::remote_queued).unwrap_or(0);
+        self.battle_diag.record_frame(&step, queued);
         if step.leave {
             self.leave_online_battle("Tu rival ha abandonado el combate.");
             return true
@@ -4876,9 +4893,13 @@ impl Game {
         }
         self.battle_desync |= desync;
         if frame % crate::battle_sync::CHECKSUM_INTERVAL == 0 {
+            self.battle_diag.record_local_checksum(frame, checksum);
             if let Some(target) = self.battle_opponent {
                 self.reloaded_online.send_battle_checksum(target, frame, checksum);
             }
+        }
+        if let Some(line) = self.battle_diag.maybe_report() {
+            eprintln!("{line}");
         }
         self.battle_frame = frame;
         self.reloaded_online.set_battle_frame(frame);
