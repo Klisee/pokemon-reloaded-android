@@ -1754,6 +1754,17 @@ impl Game {
             return Err(gml::Error::NonexistentAsset(asset::Type::Room, room_id).into());
         };
 
+        // The online socket is opt-in and waits for Cargar partida. Start it
+        // when the loaded save reaches a gameplay room (some load paths change
+        // room without calling game_load directly).
+        if self.online_connect_pending
+            && !matches!(room_id, f3r::room::LOADER | f3r::room::BOOT | f3r::room::SELECT)
+        {
+            self.online_connect_pending = false;
+            eprintln!("[online] sala de juego {room_id}; iniciando Zibelan");
+            self.reloaded_online.start_zibelan();
+        }
+
         // Update this early so the other events run
         self.scene_change = None;
 
@@ -2076,6 +2087,7 @@ impl Game {
         save.into_game(self).map_err(|e| gml::Error::FunctionError("game_load".into(), e))?;
         if self.online_connect_pending {
             self.online_connect_pending = false;
+            eprintln!("[online] partida cargada; iniciando Zibelan");
             self.reloaded_online.start_zibelan();
         }
         self.scene_change = None;
@@ -3122,6 +3134,7 @@ impl Game {
                 // Do not open the socket yet: the player still has to choose a save
                 // in Cargar partida. `load_gm_save` starts the connection.
                 self.online_connect_pending = true;
+                eprintln!("[online] conexión pendiente hasta Cargar partida");
                 self.scene_change = Some(SceneChange::Room(f3r::room::LOADER));
             },
             _ => (),
