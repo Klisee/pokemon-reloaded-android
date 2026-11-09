@@ -10,6 +10,7 @@ pub(crate) mod battle_diag;
 pub(crate) mod battle_sync;
 pub mod compat;
 pub(crate) mod game;
+pub(crate) mod game_ready;
 mod gml;
 mod handleman;
 mod imgui_key_utils;

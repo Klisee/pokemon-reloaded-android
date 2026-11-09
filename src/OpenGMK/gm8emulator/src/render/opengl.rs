@@ -4040,17 +4040,10 @@ impl RendererTrait for RendererImpl {
                 );
                 // The launcher keeps its own loading screen until the game is really there. The first
                 // presented frame is not enough: the game paints a small "Loading…" screen of its own
-                // before the music starts, so the signal is the first sound being heard (with a
-                // generous fallback in case a device has no audio at all).
-                static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                if !READY.load(std::sync::atomic::Ordering::Relaxed) {
-                    let frames = FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if crate::game::audio::sound_started() || frames > 900 {
-                        READY.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let _ = std::fs::write(crate::android_main::storage_path("game-ready"), b"");
-                    }
-                }
+                // before the music starts, so the signal is the first sound being heard. The module
+                // owns the one-shot, the no-audio timeout, the error path and the destroy latch; a
+                // second driver here just makes sure the first sound is seen even if the pump is late.
+                crate::game_ready::poll(crate::game::audio::sound_started());
             }
 
             // On Intel, glBlitFrameBuffer just does nothing if the scissor box is too big, which it
