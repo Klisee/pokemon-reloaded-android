@@ -238,6 +238,8 @@ pub struct Game {
     pub battle_room: Option<i32>,
     pub battle_sync: Option<BattleSync>,
     pub battle_key_restore: Vec<(u8, bool)>,
+    pub battle_wait_since: Option<std::time::Instant>,
+    pub battle_wait_sample: Option<u32>,
     pub battle_snapshot: Option<online_snapshot::OnlineSnapshot>,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
@@ -1498,6 +1500,8 @@ impl Game {
             battle_room: None,
             battle_sync: None,
             battle_key_restore: Vec::new(),
+            battle_wait_since: None,
+            battle_wait_sample: None,
             battle_snapshot: None,
             last_instance_id,
             last_tile_id,
@@ -2490,7 +2494,10 @@ impl Game {
             return Ok(())
         }
 
-        self.battle_sync_tick();
+        if !self.battle_sync_tick() {
+            self.battle_wait_frame()?;
+            return Ok(())
+        }
 
         if self.input.keyboard_check_pressed(input::Button::F3 as u8) {
             eprintln!("[battle-test] F3");
@@ -4095,6 +4102,8 @@ impl Game {
         self.battle_room = None;
         self.battle_sync = None;
         self.battle_key_restore.clear();
+        self.battle_wait_since = None;
+        self.battle_wait_sample = None;
         self.reloaded_online.end_battle();
     }
 
@@ -4479,6 +4488,31 @@ impl Game {
         }
     }
 
+    /// `NetSampleLocal`: no input while the window is unfocused.
+    fn battle_sample_local(&self, keys: &[(u8, u32)]) -> u32 {
+        if !self.roz_online.net_focus() {
+            return 0
+        }
+        let mut mask = 0u32;
+        for (key, bit) in keys {
+            if self.input.keyboard_check(*key) {
+                mask |= *bit;
+            }
+        }
+        mask
+    }
+
+    /// `NetLeaveBattle` for the engine-owned online battle: restore the snapshot
+    /// (which also sends BYE) or put the local party back before returning.
+    fn leave_online_battle(&mut self, reason: &str) {
+        if self.battle_snapshot.is_some() {
+            self.finish_online_battle_guard(reason);
+        } else {
+            self.restore_local_battle_team();
+            self.clear_online_battle_state();
+        }
+    }
+
     fn battle_sync_tick(&mut self) -> bool {
         if let Some(reason) = self.reloaded_online.take_battle_failure() {
             if self.battle_snapshot.is_some() {
@@ -4671,31 +4705,63 @@ impl Game {
             (&p2_keys, &p1_keys)
         };
 
-        let mut local_sample = 0u32;
-        for (key, bit) in local_keys {
-            if self.input.keyboard_check(*key) {
-                local_sample |= *bit;
+        if !self.battle_sync.as_ref().is_some_and(BattleSync::ready) {
+            if self.battle_wait_since.is_none() {
+                self.battle_wait_since = Some(std::time::Instant::now());
+                self.battle_wait_sample = Some(self.battle_sample_local(local_keys));
             }
+            let elapsed = self.battle_wait_since.map(|since| since.elapsed()).unwrap_or_default();
+            match crate::battle_sync::wait_action(elapsed) {
+                crate::battle_sync::WaitAction::Timeout => {
+                    // `NetConnectionLost` prefers a pending BYE over the socket text.
+                    let reason = if self.battle_sync.as_ref().and_then(BattleSync::bye_frame).is_some()
+                    {
+                        "Tu rival ha abandonado el combate."
+                    } else {
+                        "Se perdio la conexion con el rival."
+                    };
+                    self.leave_online_battle(reason);
+                    return true
+                },
+                crate::battle_sync::WaitAction::Escape
+                    if self.input.keyboard_check_direct(input::Button::Escape as u8)
+                        && self.roz_online.net_focus() =>
+                {
+                    self.leave_online_battle("Has salido del combate porque tu rival no respondia.");
+                    return true
+                },
+                _ => (),
+            }
+            // Poll the socket while the gate is closed; the next engine frame will
+            // drain whatever arrived here. `io_handle` in the GML loop does this.
+            self.reloaded_online.tick(&self.room, &self.assets);
+            return false
         }
 
+        let waited = self.battle_wait_since.take();
+        let local_sample =
+            self.battle_wait_sample.take().unwrap_or_else(|| self.battle_sample_local(local_keys));
         let step = match self.battle_sync.as_mut() {
-            Some(sync) => sync.begin_frame(local_sample),
+            Some(sync) => match sync.try_begin_frame(local_sample) {
+                Some(step) => step,
+                None => {
+                    // The peer word disappeared between the check and the call:
+                    // keep the gate closed and retry on the next engine frame.
+                    self.battle_wait_since = waited;
+                    self.battle_wait_sample = Some(local_sample);
+                    return false
+                },
+            },
             None => return true,
         };
         if step.leave {
-            if self.battle_snapshot.is_some() {
-                self.finish_online_battle_guard("Tu rival ha abandonado el combate.");
-            } else {
-                self.restore_local_battle_team();
-                self.clear_online_battle_state();
-            }
+            self.leave_online_battle("Tu rival ha abandonado el combate.");
             return true
         }
 
-        // `NetFrameBegin` marks the next input as stalled when it had to wait for
-        // the peer. This emulator never blocks the UI thread, so a missing frame is
-        // the equivalent signal.
-        if !step.remote_ready {
+        // `NetFrameBegin` sets NET_STALL when the peer fetch took at least
+        // 25 ms; the next sampled word then carries bit 15.
+        if waited.is_some_and(|since| crate::battle_sync::is_stall(since.elapsed())) {
             if let Some(sync) = self.battle_sync.as_mut() {
                 sync.mark_stall();
             }
@@ -4740,6 +4806,26 @@ impl Game {
         }
         self.battle_local_checksum = 0;
         true
+    }
+
+    /// Draws and presents the frozen battle while `battle_sync_tick_zibelan`
+    /// waits for the peer word. The game step and checksum cadence stay paused.
+    fn battle_wait_frame(&mut self) -> gml::Result<()> {
+        self.render_only()?;
+        let wait_action = self
+            .battle_wait_since
+            .map(|since| crate::battle_sync::wait_action(since.elapsed()))
+            .unwrap_or(crate::battle_sync::WaitAction::Wait);
+        if self.play_type != PlayType::Record
+            && matches!(
+                wait_action,
+                crate::battle_sync::WaitAction::Notice | crate::battle_sync::WaitAction::Escape
+            )
+        {
+            self.window.set_title("Esperando al rival... (ESC para salir del combate)");
+        }
+        self.input.step();
+        Ok(())
     }
 
     /// Runs after the battle step: sends the 30-frame checksum and restores the
