@@ -678,16 +678,40 @@ pub fn checksum_text(text: &[u8]) -> u32 {
 /// Party slots walked by `NetStateText` (`for (i = 0; i <= 5; i += 1)`).
 pub const NET_STATE_PARTY_SLOTS: usize = 6;
 
+/// `with (all) { if (!persistent) { NET_TMP += object_index; NET_TMP2 += 1 } }`.
+///
+/// The GML visits every active instance of the current room and ignores the
+/// persistent ones. Order does not matter because both outputs are sums: the
+/// count (`NET_TMP2`) and the object index total (`NET_TMP`). Keeping this in
+/// one function makes the two accumulators testable without a running game.
+pub fn net_object_tally<I>(instances: I) -> (i64, i64)
+where
+    I: IntoIterator<Item = (i32, bool)>,
+{
+    let mut count = 0i64;
+    let mut sum = 0i64;
+    for (object_index, persistent) in instances {
+        if persistent {
+            continue
+        }
+        count += 1;
+        sum += i64::from(object_index);
+    }
+    (count, sum)
+}
+
 /// Snapshot of the values `NetStateText` reads from the running game.
 ///
 /// The fields mirror the GML globals and object positions one-to-one so the
 /// string can be reproduced without evaluating any GML:
 ///
 /// - `object_count`/`object_sum` are `NET_TMP2`/`NET_TMP` from `with(all)`
-///   over non-persistent instances;
-/// - `pokemon1`/`pokemon2` are the rounded `Pokemon1`/`Pokemon2` positions,
-///   absent when `instance_exists` is false;
-/// - `actual1`/`actual2` index the active party slots;
+///   over non-persistent instances (see [`net_object_tally`]);
+/// - `pokemon1`/`pokemon2` are the raw `Pokemon1`/`Pokemon2` positions, absent
+///   when `instance_exists` is false; `NetStateText` rounds them only when it
+///   appends `P1`/`P2`;
+/// - `actual1`/`actual2` are the raw active slot globals. `A=` prints them with
+///   `string()` and `PP=` rounds them only to address the party array;
 /// - `ps1`/`ps2` are `PS_1`/`PS_2` and `pp1`/`pp2` are `PP_1`/`PP_2`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetState {
@@ -715,14 +739,11 @@ impl NetState {
     }
 }
 
-/// GML `string()` for a real: integral values print without decimals and other
-/// values use the two-decimal form of the GM8 runner.
+/// GML `string()` for a real, matching the GM8 runner byte for byte: integral
+/// values print without a decimal point and every other value uses exactly two
+/// decimals. This is also what the emulator's `Value::repr` emits.
 fn gml_number(value: f64) -> String {
-    if value.fract() == 0.0 {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.2}")
-    }
+    if value.fract() == 0.0 { format!("{value:.0}") } else { format!("{value:.2}") }
 }
 
 /// GML `round()`: nearest integer with ties to even (Delphi/IEEE rounding).
@@ -738,6 +759,13 @@ fn gml_round(value: f64) -> f64 {
     }
 }
 
+/// Converts a real into a GML array index the way the runner does: `round()`
+/// to a real and then to a 32-bit integer. `NaN` becomes slot 0 because Rust
+/// casts it to zero, exactly like `Real::to_i32`.
+fn gml_array_index(value: f64) -> Option<usize> {
+    usize::try_from(gml_round(value) as i64 as i32).ok()
+}
+
 fn rounded_number(value: f64) -> String {
     gml_number(gml_round(value))
 }
@@ -746,12 +774,13 @@ fn scaled_number(value: f64) -> String {
     rounded_number(value * 10.0)
 }
 
+/// `string(round(global.PP_x[global.actualx] * 10))`.
+///
+/// Read out of range returns 0 in GM8, so an active slot outside the six-slot
+/// party array contributes the same `0` as a missing array element.
 fn active_pp(actual: f64, pp: &[f64; NET_STATE_PARTY_SLOTS]) -> String {
-    let index = gml_round(actual);
-    if !index.is_finite() || index < 0.0 {
-        return scaled_number(0.0)
-    }
-    scaled_number(pp.get(index as usize).copied().unwrap_or(0.0))
+    let value = gml_array_index(actual).and_then(|index| pp.get(index).copied()).unwrap_or(0.0);
+    scaled_number(value)
 }
 
 /// Reproduce the 0.6.3 `NetStateText()` companion function exactly.

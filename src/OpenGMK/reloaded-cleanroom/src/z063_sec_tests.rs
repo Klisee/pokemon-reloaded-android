@@ -514,6 +514,95 @@ fn net_state_text_omits_missing_pokemon_and_trailing_slots() {
 }
 
 #[test]
+fn net_object_tally_matches_the_gml_with_all_loop() {
+    // `with (all) { if (!persistent) { NET_TMP += object_index; NET_TMP2 += 1 } }`
+    let instances = [(4, false), (0, false), (95, false), (4, true), (1172, false)];
+    assert_eq!(net_object_tally(instances), (4, 1_271));
+    assert_eq!(net_object_tally(instances.into_iter().rev()), (4, 1_271));
+    assert_eq!(net_object_tally([(7, true), (9, true)]), (0, 0));
+    assert_eq!(net_object_tally(std::iter::empty::<(i32, bool)>()), (0, 0));
+}
+
+#[test]
+fn net_state_text_applies_gml_rounding_and_string_formatting() {
+    // GML: round(120.5)=120, round(121.5)=122 (banker's rounding), and
+    // `string()` prints integral reals without decimals and the rest as xx.xx.
+    let state = NetState {
+        object_count: 17,
+        object_sum: 4_242,
+        pokemon1: Some((120.5, 121.5)),
+        pokemon2: Some((-20.5, -21.5)),
+        actual1: 1.5,
+        actual2: 5.5,
+        ps1: [0.0, 0.05, 1.005, 2.675, 55.5, -0.5],
+        ps2: [100.0, 55.5, 0.0, 1.04, 9.99, 20.0],
+        pp1: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        pp2: [7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    };
+    assert_eq!(
+        net_state_text(&state),
+        "17 4242 P1=120,122 P2=-20,-22 A=1.50,5.50 PS=0,0,10,27,555,-5,/1000,555,0,10,100,200, PP=300,0"
+    );
+    assert_eq!(net_checksum(&state), 678_162);
+}
+
+#[test]
+fn net_state_text_prints_every_ps_slot_and_only_the_active_pp() {
+    let state = NetState {
+        object_count: 1,
+        object_sum: 4,
+        pokemon1: Some((0.0, 0.0)),
+        pokemon2: None,
+        actual1: 2.0,
+        actual2: 0.0,
+        ps1: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        ps2: [11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+        pp1: [100.0, 101.0, 102.0, 103.0, 104.0, 105.0],
+        pp2: [200.0, 201.0, 202.0, 203.0, 204.0, 205.0],
+    };
+    assert_eq!(net_state_text(&state), "1 4 P1=0,0 A=2,0 PS=10,20,30,40,50,60,/110,120,130,140,150,160, PP=1020,2000");
+}
+
+#[test]
+fn net_state_text_appends_pokemon_only_when_that_object_exists() {
+    let state = NetState {
+        object_count: 0,
+        object_sum: 0,
+        pokemon1: None,
+        pokemon2: Some((300.5, -20.5)),
+        actual1: 0.0,
+        actual2: 0.0,
+        ps1: [0.0; NET_STATE_PARTY_SLOTS],
+        ps2: [0.0; NET_STATE_PARTY_SLOTS],
+        pp1: [0.0; NET_STATE_PARTY_SLOTS],
+        pp2: [0.0; NET_STATE_PARTY_SLOTS],
+    };
+    assert_eq!(net_state_text(&state), "0 0 P2=300,-20 A=0,0 PS=0,0,0,0,0,0,/0,0,0,0,0,0, PP=0,0");
+}
+
+#[test]
+fn active_pp_uses_the_gml_array_index_conversion() {
+    let state = NetState {
+        object_count: 0,
+        object_sum: 0,
+        pokemon1: None,
+        pokemon2: None,
+        actual1: f64::NAN,
+        actual2: -0.5,
+        ps1: [0.0; NET_STATE_PARTY_SLOTS],
+        ps2: [0.0; NET_STATE_PARTY_SLOTS],
+        pp1: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        pp2: [7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    };
+    // NaN casts to slot 0, and -0.5 rounds to slot 0 (ties to even).
+    assert!(net_state_text(&state).ends_with(" PP=100,70"));
+
+    let out_of_range = NetState { actual1: 5.5, actual2: 6.0, ..state };
+    // round(5.5)=6 and round(6)=6, both outside the six-slot party array.
+    assert!(net_state_text(&out_of_range).ends_with(" PP=0,0"));
+}
+
+#[test]
 fn net_checksum_is_the_base31_polynomial_over_the_state_text() {
     let fixture = NetState {
         object_count: 42,
