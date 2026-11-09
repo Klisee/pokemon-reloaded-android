@@ -11,6 +11,7 @@ depend on F3R GML, the game executable, game data, or the host emulator.
 - `roz`: ROZ/Zibelan line framing, command codec, state blobs and MSG payloads.
 - `save`: generic atomic save interception, backups, rollback.
 - `ports`: declaration-only core/adapter interfaces.
+- `z063_sec`: 0.6.3 handshake/TEAM/WCFG/IN/SUM/BYE validation and replay guards.
 
 ## Provenance
 The modules were written from the functional specifications in
