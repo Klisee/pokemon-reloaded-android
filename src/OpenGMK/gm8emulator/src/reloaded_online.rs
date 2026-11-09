@@ -4570,6 +4570,30 @@ mod tests {
     }
 
     #[test]
+    fn mock_transport_repeated_sums_keep_their_order() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        online.set_battle_epoch(7);
+        online.begin_battle();
+        let first = b"SUM\x1f30\x1e111";
+        let second = b"SUM\x1f60\x1e222";
+        transport.send(
+            format!(
+                "MSG {}\nMSG {}\nMSG {}\n",
+                hex::encode(first),
+                hex::encode(first),
+                hex::encode(second)
+            )
+            .as_bytes(),
+        );
+        pump_world(&mut online, |online| online.battle_checksums.len() == 3);
+
+        assert_eq!(online.take_battle_checksum(), Some((30, 111)));
+        assert_eq!(online.take_battle_checksum(), Some((30, 111)));
+        assert_eq!(online.take_battle_checksum(), Some((60, 222)));
+        assert_eq!(online.take_battle_checksum(), None);
+    }
+
+    #[test]
     fn mock_transport_battle_initial_inputs_and_30_frame_checksums() {
         let (mut online, mut transport) = mock_duplex_transport();
         online.set_battle_epoch(7);

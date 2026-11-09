@@ -26,13 +26,18 @@
 //! the longest such streak, `rx`/`rq`/`rlate` the remote inputs received / still queued / already
 //! too late, `sumf`+`lsum` and `rsumf`+`rsum` the local and peer checksum samples with their
 //! frame, and `bad` the number of same-frame checksum mismatches in the window.
+//! Checksums are paired by exact frame, so a late peer sample still compares with
+//! the local sample it belongs to instead of with the latest one.
 
-use crate::battle_sync::FrameStep;
+use crate::battle_sync::{CHECKSUM_SLOTS, FrameStep};
+use std::collections::VecDeque;
 
 const PREFIX: &str = "[battle-diag]";
 const DEFAULT_INTERVAL: u32 = crate::battle_sync::CHECKSUM_INTERVAL;
 const MIN_INTERVAL: u32 = 1;
 const MAX_INTERVAL: u32 = 1800;
+/// Checksums kept for late same-frame pairing, matching the `BattleSync` window.
+const CHECKSUM_HISTORY: usize = CHECKSUM_SLOTS;
 
 /// Enablement and report cadence for [`BattleDiag`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,7 +115,9 @@ pub struct BattleDiag {
     queued: usize,
     local_sum: Option<(u32, u32)>,
     peer_sum: Option<(u32, u32)>,
-    bad_frame: Option<u32>,
+    local_history: VecDeque<(u32, u32)>,
+    peer_history: VecDeque<(u32, u32)>,
+    bad_frames: VecDeque<u32>,
     total_frames: u64,
     total_wait: u64,
     max_wait_streak: u32,
@@ -142,7 +149,9 @@ impl BattleDiag {
             queued: 0,
             local_sum: None,
             peer_sum: None,
-            bad_frame: None,
+            local_history: VecDeque::new(),
+            peer_history: VecDeque::new(),
+            bad_frames: VecDeque::new(),
             total_frames: 0,
             total_wait: 0,
             max_wait_streak: 0,
@@ -192,7 +201,9 @@ impl BattleDiag {
         self.queued = 0;
         self.local_sum = None;
         self.peer_sum = None;
-        self.bad_frame = None;
+        self.local_history.clear();
+        self.peer_history.clear();
+        self.bad_frames.clear();
         self.total_frames = 0;
         self.total_wait = 0;
         self.max_wait_streak = 0;
@@ -258,8 +269,8 @@ impl BattleDiag {
         self.local_sum = Some((frame, checksum));
         self.window.sums += 1;
         self.total_sums += 1;
-        self.bad_frame = None;
-        self.compare_checksums();
+        record_checksum(&mut self.local_history, frame, checksum);
+        self.compare_checksums(frame);
     }
 
     /// Observe a peer checksum passed to `BattleSync::receive_checksum`.
@@ -268,17 +279,22 @@ impl BattleDiag {
             return
         }
         self.peer_sum = Some((frame, checksum));
-        self.compare_checksums();
+        record_checksum(&mut self.peer_history, frame, checksum);
+        self.compare_checksums(frame);
     }
 
-    fn compare_checksums(&mut self) {
-        let Some((local_frame, local_value)) = self.local_sum else { return };
-        let Some((peer_frame, peer_value)) = self.peer_sum else { return };
-        if local_frame == peer_frame && local_value != peer_value && self.bad_frame != Some(local_frame) {
-            self.bad_frame = Some(local_frame);
-            self.window.bad += 1;
-            self.total_bad += 1;
+    fn compare_checksums(&mut self, frame: u32) {
+        let Some(local_value) = lookup_checksum(&self.local_history, frame) else { return };
+        let Some(peer_value) = lookup_checksum(&self.peer_history, frame) else { return };
+        if local_value == peer_value || self.bad_frames.contains(&frame) {
+            return
         }
+        if self.bad_frames.len() >= CHECKSUM_HISTORY {
+            self.bad_frames.pop_front();
+        }
+        self.bad_frames.push_back(frame);
+        self.window.bad += 1;
+        self.total_bad += 1;
     }
 
     /// Emit the periodic report when the current frame reaches the next interval.
@@ -353,6 +369,22 @@ impl BattleDiag {
             self.total_bad,
         ))
     }
+}
+
+/// Keep one checksum per frame; duplicates and conflicting replays must not
+/// replace the value that represents the frame.
+fn record_checksum(history: &mut VecDeque<(u32, u32)>, frame: u32, checksum: u32) {
+    if history.iter().any(|(queued, _)| *queued == frame) {
+        return
+    }
+    if history.len() >= CHECKSUM_HISTORY {
+        history.pop_front();
+    }
+    history.push_back((frame, checksum));
+}
+
+fn lookup_checksum(history: &VecDeque<(u32, u32)>, frame: u32) -> Option<u32> {
+    history.iter().find(|(queued, _)| *queued == frame).map(|(_, checksum)| *checksum)
 }
 
 #[cfg(test)]
@@ -462,6 +494,46 @@ mod tests {
         equal.record_frame(&step(30, true, 3), 0);
         let line = equal.maybe_report().expect("equal report");
         assert!(line.contains("sums=1 bad=0"));
+    }
+
+    #[test]
+    fn late_peer_checksums_pair_with_the_retained_local_frame() {
+        let mut diag = diag(30);
+        diag.record_local_checksum(30, 111);
+        diag.record_local_checksum(60, 222);
+        diag.record_peer_checksum(30, 999);
+        diag.record_frame(&step(60, true, 3), 0);
+        let line = diag.maybe_report().expect("skewed report");
+        assert!(line.contains("sumf=60 lsum=0x000000de rsumf=30 rsum=0x000003e7 sums=2 bad=1"));
+        let end = diag.finish().expect("end line");
+        assert!(end.contains("sums=2 bad=1"));
+    }
+
+    #[test]
+    fn repeated_and_conflicting_peer_checksums_count_once() {
+        let mut diag = diag(30);
+        diag.record_local_checksum(30, 111);
+        diag.record_peer_checksum(30, 222);
+        diag.record_peer_checksum(30, 222);
+        diag.record_peer_checksum(30, 111);
+        diag.record_frame(&step(30, true, 3), 0);
+        let line = diag.maybe_report().expect("report");
+        assert!(line.contains("sumf=30 lsum=0x0000006f rsumf=30"));
+        assert!(line.contains("sums=1 bad=1"));
+        let end = diag.finish().expect("end line");
+        assert!(end.contains("sums=1 bad=1"));
+    }
+
+    #[test]
+    fn checksums_from_different_frames_are_never_compared() {
+        let mut diag = diag(30);
+        diag.record_local_checksum(30, 111);
+        diag.record_peer_checksum(60, 222);
+        diag.record_peer_checksum(30, 111);
+        diag.record_local_checksum(60, 222);
+        diag.record_frame(&step(60, true, 3), 0);
+        let line = diag.maybe_report().expect("report");
+        assert!(line.contains("sums=2 bad=0"));
     }
 
     #[test]
