@@ -475,6 +475,79 @@ fn checksum_text_matches_the_gml_rolling_formula() {
 }
 
 #[test]
+fn net_state_text_matches_the_gml_companion_function() {
+    let state = NetState {
+        object_count: 42,
+        object_sum: 123_456,
+        pokemon1: Some((120.4, 96.5)),
+        pokemon2: Some((300.5, -20.5)),
+        actual1: 2.0,
+        actual2: 4.0,
+        ps1: [100.0, 55.5, 0.0, 1.04, 9.99, 20.0],
+        ps2: [12.0, 34.0, 56.0, 78.0, 90.0, 100.0],
+        pp1: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        pp2: [7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    };
+    assert_eq!(
+        net_state_text(&state),
+        "42 123456 P1=120,96 P2=300,-20 A=2,4 PS=1000,555,0,10,100,200,/120,340,560,780,900,1000, PP=300,110"
+    );
+    assert_eq!(state.text(), net_state_text(&state));
+}
+
+#[test]
+fn net_state_text_omits_missing_pokemon_and_trailing_slots() {
+    let state = NetState {
+        object_count: 0,
+        object_sum: 0,
+        pokemon1: None,
+        pokemon2: None,
+        actual1: 0.0,
+        actual2: 0.0,
+        ps1: [0.0; NET_STATE_PARTY_SLOTS],
+        ps2: [0.0; NET_STATE_PARTY_SLOTS],
+        pp1: [0.0; NET_STATE_PARTY_SLOTS],
+        pp2: [0.0; NET_STATE_PARTY_SLOTS],
+    };
+    assert_eq!(net_state_text(&state), "0 0 A=0,0 PS=0,0,0,0,0,0,/0,0,0,0,0,0, PP=0,0");
+    assert_eq!(net_checksum(&state), 322_448);
+}
+
+#[test]
+fn net_checksum_is_the_base31_polynomial_over_the_state_text() {
+    let fixture = NetState {
+        object_count: 42,
+        object_sum: 123_456,
+        pokemon1: Some((120.4, 96.5)),
+        pokemon2: Some((300.5, -20.5)),
+        actual1: 2.0,
+        actual2: 4.0,
+        ps1: [100.0, 55.5, 0.0, 1.04, 9.99, 20.0],
+        ps2: [12.0, 34.0, 56.0, 78.0, 90.0, 100.0],
+        pp1: [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+        pp2: [7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    };
+    assert_eq!(fixture.checksum(), 399_662);
+    assert_eq!(fixture.checksum(), checksum_text(fixture.text().as_bytes()));
+    assert!(fixture.checksum() <= MAX_CHECKSUM as u32);
+
+    let small = NetState {
+        object_count: 1,
+        object_sum: 4,
+        pokemon1: None,
+        pokemon2: None,
+        actual1: 1.0,
+        actual2: 0.0,
+        ps1: [15.5, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ps2: [0.0; NET_STATE_PARTY_SLOTS],
+        pp1: [3.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        pp2: [0.0; NET_STATE_PARTY_SLOTS],
+    };
+    assert_eq!(small.text(), "1 4 A=1,0 PS=155,0,0,0,0,0,/0,0,0,0,0,0, PP=0,0");
+    assert_eq!(small.checksum(), 493_565);
+}
+
+#[test]
 fn checksum_frame_and_mask_validation() {
     assert_eq!(validate_checksum(0), Ok(0));
     assert_eq!(validate_checksum(MAX_CHECKSUM), Ok(MAX_CHECKSUM as u32));
