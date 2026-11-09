@@ -24,7 +24,7 @@ pub mod failure;
 pub mod roz;
 
 pub use failure::ConnectionFailure;
-pub use reloaded_cleanroom::world;
+pub use reloaded_cleanroom::{world, z063_sec};
 
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_LINE: usize = 64 * 1024;
