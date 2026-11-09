@@ -20,6 +20,28 @@ const INFO_KIND_TEXT: u8 = f3r::team::INFO_KIND_TEXT;
 const INFO_KIND_ENCODED: u8 = f3r::team::INFO_KIND_ENCODED;
 const INFO_KINDS: [u8; INFO_LINES] = f3r::team::INFO_KINDS;
 
+/// Where one battle side gets its `.TEAM` bytes from on this client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BattleTeamSource {
+    /// The local player's own export, as `MultiplayerLoadOne` reloads it.
+    Local,
+    /// The bytes received from the peer.
+    Remote,
+}
+
+/// Which file each side loads, following GML `NetFight`.
+///
+/// `NetFight` calls `MultiplayerLoadOne` with the host file and
+/// `MultiplayerLoadTwo` with the guest file on both clients, so the host must
+/// reload its own export into Player 1 instead of keeping its live party.
+pub(crate) fn battle_team_sources(host: bool) -> [(u8, BattleTeamSource); 2] {
+    if host {
+        [(1, BattleTeamSource::Local), (2, BattleTeamSource::Remote)]
+    } else {
+        [(1, BattleTeamSource::Remote), (2, BattleTeamSource::Local)]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TeamError(pub String);
 
@@ -433,6 +455,35 @@ mod tests {
             phrase: b"Hello".to_vec(),
             mons,
             version: CURRENT_VERSION,
+        }
+    }
+
+    #[test]
+    fn both_clients_load_host_file_into_p1_and_guest_file_into_p2() {
+        assert_eq!(
+            battle_team_sources(true),
+            [(1, BattleTeamSource::Local), (2, BattleTeamSource::Remote)]
+        );
+        assert_eq!(
+            battle_team_sources(false),
+            [(1, BattleTeamSource::Remote), (2, BattleTeamSource::Local)]
+        );
+    }
+
+    #[test]
+    fn host_self_reload_matches_the_guest_view_of_the_same_export() {
+        let local = sample();
+        let wire = local.encode().expect("encode host team");
+        // The host reloads its own export; the guest loads the same bytes for P1.
+        let host_p1 = TeamFile::decode(&wire).expect("host reload");
+        let guest_p1 = TeamFile::decode(&wire).expect("guest import");
+        assert_eq!(host_p1.mons.len(), guest_p1.mons.len());
+        for (host, guest) in host_p1.mons.iter().zip(guest_p1.mons.iter()) {
+            assert_eq!(host.species, guest.species);
+            assert_eq!(host.level, guest.level);
+            assert_eq!(host.iv, guest.iv);
+            assert_eq!(host.selue, guest.selue);
+            assert_eq!(host.exp, guest.exp);
         }
     }
 
