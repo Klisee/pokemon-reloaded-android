@@ -4239,31 +4239,46 @@ impl Game {
         let original_apodo = self.global_text(f3r::global::APODO_NAME);
         let original_prota_id = self.global_text(f3r::global::PROTA_ID);
         let original_frase = self.instance_text(f3r::object::VARIABLES, f3r::field::FRASE_PROPIA);
-        let remote_header = if zibelan {
-            self.battle_team_import(&remote.data, if host { 2 } else { 1 }, Some(handle))
+        let (p1_header, p2_header) = if zibelan {
+            // `NetFight` loads both `.TEAM` files on both clients: Player 1 always
+            // gets the host's file and Player 2 the guest's. Reloading the host's
+            // own export is what keeps `indexpkmn`, `indexnivel`, `IV` and
+            // `selue_pk1` identical on both sides, so `CentroPokemon` and
+            // `PonerActualPrimero` choose the same active slot before the checksum.
+            let mut headers: [Option<BattleTeamHeader>; 2] = [None, None];
+            for (side, source) in team_file::battle_team_sources(host) {
+                let data = match source {
+                    team_file::BattleTeamSource::Local => {
+                        let Some(export) = &local_export else { return Ok(()) };
+                        export.data.as_slice()
+                    },
+                    team_file::BattleTeamSource::Remote => remote.data.as_slice(),
+                };
+                let Some(header) = self.battle_team_import(data, side, Some(handle)) else {
+                    eprintln!("[battle] no se pudo importar el equipo de P{side}");
+                    return Ok(())
+                };
+                headers[usize::from(side) - 1] = Some(header);
+            }
+            let [Some(p1_header), Some(p2_header)] = headers else { return Ok(()) };
+            (p1_header, p2_header)
         } else {
             let text = String::from_utf8_lossy(&remote.data);
-            self.apply_battle_team(&text, if host { 2 } else { 1 }).map(Self::header_from_json)
-        };
-        let Some(remote_header) = remote_header else {
-            eprintln!("[battle] no se pudo importar el equipo remoto");
-            return Ok(())
-        };
-        let p2_local_header = if host {
-            remote_header.clone()
-        } else if zibelan {
-            let Some(export) = &local_export else { return Ok(()) };
-            let Some(header) = self.battle_team_import(&export.data, 2, Some(handle)) else { return Ok(()) };
-            header
-        } else {
-            let Some(json) = &local_json else { return Ok(()) };
-            let Some(appearance) = self.apply_battle_team(json, 2) else { return Ok(()) };
-            Self::header_from_json(appearance)
-        };
-        let (p1_header, p2_header) = if host {
-            (local_header, p2_local_header)
-        } else {
-            (remote_header, p2_local_header)
+            let Some(remote_header) =
+                self.apply_battle_team(&text, if host { 2 } else { 1 }).map(Self::header_from_json)
+            else {
+                eprintln!("[battle] no se pudo importar el equipo remoto");
+                return Ok(())
+            };
+            let p2_header = if host {
+                remote_header.clone()
+            } else {
+                let Some(json) = &local_json else { return Ok(()) };
+                let Some(appearance) = self.apply_battle_team(json, 2) else { return Ok(()) };
+                Self::header_from_json(appearance)
+            };
+            let p1_header = if host { local_header } else { remote_header };
+            (p1_header, p2_header)
         };
         let p1_spr_index = if host { 0.0 } else { self.team_spr_index(handle, &p1_header) };
         let p2_spr_index = self.team_spr_index(handle, &p2_header);
