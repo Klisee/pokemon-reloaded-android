@@ -6,7 +6,7 @@ Scope: `horde/z-build63`, package `com.klisee.reloaded`, version `0.6.7`, fixed
 The build is verified against the protocol integration documented in
 `docs/zibelan-protocol-re.md`:
 
-- the world handshake is `WJOIN <name>`, `WVER 6`, `WBUILD 20261103`, then
+- the world handshake is `WJOIN <name>`, `WVER 8`, `WBUILD 20261109`, then
   `WSYNC`;
 - `WELCOME <u64>` is the session identity and the welcome notice;
 - `WOK <u64>` acknowledges the joined world without inventing an identity;
@@ -156,8 +156,8 @@ unzip -Z1 "$APK" | grep 'lib/.*/libgm8emulator.so'   # only lib/arm64-v8a/...
 # The packaged engine still carries the protocol surface:
 unzip -p "$APK" lib/arm64-v8a/libgm8emulator.so > /tmp/libgm8emulator-067.so
 strings -a /tmp/libgm8emulator-067.so | grep -F \
-    -e 'WVER 6' \
-    -e 'WBUILD 20261103' \
+    -e 'WVER 8' \
+    -e 'WBUILD 20261109' \
     -e 'WOK side=' \
     -e 'Zibelan conectado; esperando WOK' \
     -e 'Zibelan: mundo conectado (lado ' \

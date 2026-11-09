@@ -392,8 +392,8 @@ unzip -p "$SIGNED_APK" "lib/$ABI/libgm8emulator.so" > "$EXTRACTED_SO"
     die "el .so extraido del APK no coincide con el hash esperado"
 strings -a "$EXTRACTED_SO" > "$WORK_DIR/engine-strings.txt"
 for token in \
-    "WVER 6" \
-    "WBUILD 20261103" \
+    "WVER 8" \
+    "WBUILD 20261109" \
     "WOK side=" \
     "Zibelan conectado; esperando WOK" \
     "Zibelan: mundo conectado (lado " \
