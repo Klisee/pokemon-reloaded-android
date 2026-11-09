@@ -683,6 +683,16 @@ pub fn show_puzzle_hint() {
     });
 }
 
+/// Tells the Kotlin activity that the game is really on screen, so its loading overlay can be
+/// dismissed. The one-shot logic (audio start, no-audio timeout, error and destroy) lives in
+/// [`crate::game_ready`]; this is only the JNI hop.
+pub fn notify_game_ready() -> bool {
+    with_activity(|env, class| {
+        env.call_static_method(class, "gameReady", "()V", &[])?;
+        Ok(())
+    })
+}
+
 /// Drops queued synthetic pointer events when a native overlay closes, so the
 /// same tap cannot be delivered into the game underneath.
 pub fn clear_delayed_pointer() {
@@ -1495,6 +1505,9 @@ pub fn android_entry(app: AndroidApp) {
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from(format!("/data/data/{}/files", PACKAGE_DIR)));
     let _ = STORAGE_DIR.set(storage);
+    // A recreated Activity must not inherit the previous session's ready signal either.
+    crate::game::audio::reset_sound_started();
+    crate::game_ready::start_session();
     // First thing, so the opening lines of the session are captured as well.
     pipe_std_to_logcat();
     logf(&format!("almacenamiento: {}", storage_dir().display()));
@@ -1542,6 +1555,7 @@ pub fn android_entry(app: AndroidApp) {
             Ok(exe) => exe,
             Err(e) => {
                 logf(&format!("no se pudo preparar el juego: {}", e));
+                crate::game_ready::game_error();
                 game_over_thread.store(true, std::sync::atomic::Ordering::SeqCst);
                 return
             },
@@ -1556,8 +1570,18 @@ pub fn android_entry(app: AndroidApp) {
             crate::run_game(vec!["gm8emulator".to_string(), game_exe.to_string_lossy().into_owned()])
         });
         match outcome {
-            Ok(code) => logf(&format!("el emulador termino (codigo {}); se cierra la actividad", code)),
-            Err(_) => logf("el emulador se cayo (panic); se cierra la actividad"),
+            Ok(code) => {
+                logf(&format!("el emulador termino (codigo {}); se cierra la actividad", code));
+                // A non-zero exit before the first sound means the game never became ready; release
+                // the launcher's overlay instead of leaving it waiting for a timeout.
+                if code != 0 {
+                    crate::game_ready::game_error();
+                }
+            },
+            Err(_) => {
+                logf("el emulador se cayo (panic); se cierra la actividad");
+                crate::game_ready::game_error();
+            },
         }
         game_over_thread.store(true, std::sync::atomic::Ordering::SeqCst);
     });
@@ -1576,6 +1600,9 @@ pub fn android_entry(app: AndroidApp) {
         if game_over.load(std::sync::atomic::Ordering::SeqCst) || destroying {
             break
         }
+        // The pump keeps running when the game thread is stuck, so it can also drive the no-audio
+        // timeout; the first sound is picked up here as soon as the audio callback sets the flag.
+        crate::game_ready::poll(crate::game::audio::sound_started());
         if resumed && surface_retry.elapsed() >= Duration::from_millis(100) {
             surface_retry = Instant::now();
             if let Some(window) = game_app.native_window() {
@@ -1689,6 +1716,9 @@ pub fn android_entry(app: AndroidApp) {
                 // The system is tearing the activity down (the app was closed): stop pumping so
                 // `android_main` can return and the activity really goes away.
                 android_activity::MainEvent::Destroy => {
+                    // Cancel any pending ready listener before the Activity goes away; from here on
+                    // an audio start, timeout or error must not reach Kotlin.
+                    crate::game_ready::destroy();
                     resumed = false;
                     destroying = true;
                 },
@@ -1699,6 +1729,9 @@ pub fn android_entry(app: AndroidApp) {
             _ => {},
         });
     }
+    // The loop can also end because the game closed itself (normal exit, not `Destroy`). Either
+    // way the pump is done here, so nothing may signal the launcher after this point.
+    crate::game_ready::destroy();
     logf(&format!(
         "cerrando la actividad (juego terminado: {}, destruyendo: {})",
         game_over.load(std::sync::atomic::Ordering::SeqCst),

@@ -31,6 +31,13 @@ pub fn sound_started() -> bool {
     aaudio::sound_started()
 }
 
+/// Forgets the previous session's audio so the ready signal cannot fire from a flag left over by
+/// an Activity that was recreated in the same process.
+#[cfg(target_os = "android")]
+pub fn reset_sound_started() {
+    aaudio::reset_sound_started()
+}
+
 pub use self::midi::MidiHandle;
 use self::{
     mixer::{Mixer, MixerHandle},

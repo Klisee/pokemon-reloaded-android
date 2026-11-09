@@ -190,6 +190,11 @@ pub fn sound_started() -> bool {
     SOUND.load(Ordering::Relaxed)
 }
 
+/// Clears the flag for a new game session in the same process.
+pub fn reset_sound_started() {
+    SOUND.store(false, Ordering::Relaxed);
+}
+
 /// Pulls `num_frames` of interleaved f32 audio out of the mixer. AAudio calls this from its own
 /// real-time thread, so a failed `try_lock` just yields silence instead of blocking that thread.
 extern "C" fn data_callback(
