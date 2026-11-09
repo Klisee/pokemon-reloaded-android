@@ -215,6 +215,52 @@ pub struct IncomingBattleInput {
     pub checksum: u32,
 }
 
+/// Native connection/battle notice categories shown by the engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnlineNoticeKind {
+    Connected,
+    Full,
+    ServerNoResponse,
+    VersionMismatch,
+    Desync,
+    Disconnected,
+}
+
+impl OnlineNoticeKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Desync => "Combate online",
+            _ => "Reloaded Online",
+        }
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Connected => {
+                "Conectado al mundo online. Ya puedes ver al resto de jugadores del mapa."
+            },
+            Self::Full => ConnectionFailure::Full.message(),
+            Self::ServerNoResponse => ConnectionFailure::Timeout.message(),
+            Self::VersionMismatch => ConnectionFailure::Protocol.message(),
+            Self::Desync => ConnectionFailure::Desync.message(),
+            Self::Disconnected => ConnectionFailure::Reset.message(),
+        }
+    }
+}
+
+/// One pending notice for the native online panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnlineNotice {
+    pub kind: OnlineNoticeKind,
+    pub message: String,
+}
+
+impl OnlineNotice {
+    fn new(kind: OnlineNoticeKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+}
+
 /// The five numeric fields that travel in the `TEAM` prefix used by Zibelan:
 /// `TEAM\x1f<seed>\x1e<fondo>\x1e<modo>\x1e<sala>\x1e<delay>\x1e<.TEAM>`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -463,6 +509,7 @@ pub struct ReloadedOnline {
     welcome_notice: Option<String>,
     connection_notice_pending: bool,
     connection_notice_seen: bool,
+    notice: Option<OnlineNotice>,
     world_list: Vec<String>,
     program_directory: PathBuf,
     world: world::WorldState,
@@ -523,6 +570,7 @@ impl Default for ReloadedOnline {
             welcome_notice: None,
             connection_notice_pending: false,
             connection_notice_seen: false,
+            notice: None,
             world_list: Vec::new(),
             program_directory: PathBuf::new(),
             world: world::WorldState::new(None),
@@ -767,6 +815,7 @@ impl ReloadedOnline {
         self.local_say = None;
         self.connection_notice_pending = false;
         self.connection_notice_seen = false;
+        self.notice = None;
         self.end_battle();
         self.status = "Reloaded Online desconectado".into();
     }
@@ -1613,6 +1662,7 @@ impl ReloadedOnline {
 
     fn fail_connection_with_reason(&mut self, reason: String) {
         eprintln!("[reloaded-online] conexión terminada: {reason}");
+        let failure = ConnectionFailure::from_reason(&reason);
         self.apply_local_id(None);
         self.remotes.clear();
         self.world.clear();
@@ -1627,9 +1677,21 @@ impl ReloadedOnline {
         self.last_world_key = None;
         self.connect_deadline = None;
         self.handshake_deadline = None;
+        self.connection_notice_pending = false;
+        self.queue_notice(Self::notice_kind(failure), reason.clone());
         self.status = reason.clone();
         self.fail_battle(reason.clone());
         self.connection = Some(Connection::Failed(reason));
+    }
+
+    fn notice_kind(failure: ConnectionFailure) -> OnlineNoticeKind {
+        match failure {
+            ConnectionFailure::Full => OnlineNoticeKind::Full,
+            ConnectionFailure::Protocol => OnlineNoticeKind::VersionMismatch,
+            ConnectionFailure::Timeout => OnlineNoticeKind::ServerNoResponse,
+            ConnectionFailure::Desync => OnlineNoticeKind::Desync,
+            _ => OnlineNoticeKind::Disconnected,
+        }
     }
 
     fn check_handshake_watchdog(&mut self) {
@@ -1735,6 +1797,7 @@ impl ReloadedOnline {
             Event::Connected { id } => {
                 self.local_id = Some(id);
                 self.world.set_local_id(Some(id));
+                self.notice = None;
                 self.announce_welcome("Reloaded Online", id, None, None);
                 self.queue_connection_notice();
             },
@@ -1804,7 +1867,13 @@ impl ReloadedOnline {
                 self.status = error;
             },
             Event::Disconnected(error) => {
-                self.status = error.clone();
+                let failure = ConnectionFailure::from_reason(&error);
+                let message = match failure {
+                    ConnectionFailure::Other => error.clone(),
+                    failure => failure.message().to_string(),
+                };
+                self.queue_notice(Self::notice_kind(failure), message.clone());
+                self.status = message;
                 self.remotes.clear();
                 self.world.clear();
                 self.world.set_local_id(None);
@@ -1821,6 +1890,7 @@ impl ReloadedOnline {
         match event {
             RozEvent::Welcome { version, id } => {
                 self.apply_local_id(Some(id));
+                self.notice = None;
                 self.announce_welcome("Zibelan", id, Some(version), None);
                 self.handshake_deadline = Some(Instant::now() + HANDSHAKE_WATCHDOG);
             },
@@ -2155,6 +2225,29 @@ impl ReloadedOnline {
     /// stream and stops a repeated event from opening it twice on the same connection.
     pub fn take_connection_notice(&mut self) -> bool {
         std::mem::take(&mut self.connection_notice_pending)
+    }
+
+    fn queue_notice(&mut self, kind: OnlineNoticeKind, message: impl Into<String>) {
+        if let Some(current) = &self.notice {
+            // A concrete rejection (full/version/no response/desync) stays on screen when
+            // the server closes the socket right after it.
+            if current.kind != OnlineNoticeKind::Disconnected && kind == OnlineNoticeKind::Disconnected {
+                return;
+            }
+        }
+        self.notice = Some(OnlineNotice::new(kind, message));
+    }
+
+    /// Takes the pending connection or battle notice for the native panel.
+    pub fn take_notice(&mut self) -> Option<OnlineNotice> {
+        self.notice.take()
+    }
+
+    /// Records a checksum divergence and returns the battle notice to show.
+    pub fn note_battle_desync(&mut self) -> String {
+        let message = OnlineNoticeKind::Desync.message().to_string();
+        self.status = message.clone();
+        message
     }
 
     fn announce_welcome(&mut self, server: &str, id: u64, version: Option<u32>, name: Option<&str>) {
@@ -3544,6 +3637,57 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_queues_one_clear_disconnect_notice() {
+        let mut online = ReloadedOnline::default();
+        online.handle_roz_event(RozEvent::Disconnected {
+            reason: "El servidor cerró la conexión.".into(),
+        });
+        let notice = online.take_notice().expect("disconnect notice");
+        assert_eq!(notice.kind, OnlineNoticeKind::Disconnected);
+        assert!(notice.message.contains("conexión"), "{}", notice.message);
+        assert!(online.take_notice().is_none());
+    }
+
+    #[test]
+    fn desync_notice_has_battle_copy_and_title() {
+        assert_eq!(OnlineNoticeKind::Desync.title(), "Combate online");
+        assert!(OnlineNoticeKind::Desync.message().contains("desincronizó"));
+
+        let mut online = ReloadedOnline::default();
+        let message = online.note_battle_desync();
+        assert!(message.contains("desincronizó"));
+        assert_eq!(online.status(), message);
+    }
+
+    #[test]
+    fn a_specific_rejection_is_not_replaced_by_the_following_disconnect() {
+        let mut online = ReloadedOnline::default();
+        online.handle_roz_event(RozEvent::Full { world: true });
+        online.handle_roz_event(RozEvent::Disconnected {
+            reason: "El servidor cerró la conexión.".into(),
+        });
+
+        let notice = online.take_notice().expect("full notice wins");
+        assert_eq!(notice.kind, OnlineNoticeKind::Full);
+        assert!(notice.message.contains("lleno"), "{}", notice.message);
+    }
+
+    #[test]
+    fn stop_clears_a_pending_online_notice() {
+        let mut online = ReloadedOnline::default();
+        online.handle_roz_event(RozEvent::Disconnected {
+            reason: "El servidor cerró la conexión.".into(),
+        });
+        assert!(online.take_notice().is_some());
+
+        online.handle_roz_event(RozEvent::Disconnected {
+            reason: "El servidor cerró la conexión.".into(),
+        });
+        online.stop();
+        assert!(online.take_notice().is_none());
+    }
+
+    #[test]
     fn zibelan_full_is_a_terminal_failure_and_clears_remotes() {
         let (mut online, transport) = mock_world_transport();
         transport.send(b"WP 7 2 100 200 S,25,0,0,0,1,1 Ada\n");
@@ -3556,6 +3700,10 @@ mod tests {
         assert!(online.remotes.is_empty());
         assert!(online.world.is_empty());
         assert!(online.status().contains("mundo está lleno"), "{}", online.status());
+        let notice = online.take_notice().expect("full notice");
+        assert_eq!(notice.kind, OnlineNoticeKind::Full);
+        assert!(notice.message.contains("lleno"), "{}", notice.message);
+        assert!(online.take_notice().is_none());
     }
 
     #[test]
@@ -3576,13 +3724,16 @@ mod tests {
 
         assert!(!online.is_ready());
         assert!(online.status().contains("versión"), "{}", online.status());
+        let notice = online.take_notice().expect("version mismatch notice");
+        assert_eq!(notice.kind, OnlineNoticeKind::VersionMismatch);
+        assert!(notice.message.contains("versión"), "{}", notice.message);
     }
 
     #[test]
     fn zibelan_peer_left_reports_a_clear_message_without_dropping_the_world() {
         let (mut online, transport) = mock_world_transport();
         transport.send(b"PEER_LEFT\n");
-        pump_world(&mut online, |online| online.status().contains("rival abandonó"));
+        pump_world(&mut online, |online| online.status().contains("rival se desconectó"));
 
         assert!(online.take_peer_left());
         assert!(!online.take_peer_left());
@@ -3603,6 +3754,9 @@ mod tests {
         assert!(matches!(&online.connection, Some(Connection::Failed(_))));
         assert!(!online.is_ready());
         assert!(online.status().contains("tiempo de espera"), "{}", online.status());
+        let notice = online.take_notice().expect("no response notice");
+        assert_eq!(notice.kind, OnlineNoticeKind::ServerNoResponse);
+        assert!(notice.message.contains("no responde"), "{}", notice.message);
     }
 
     #[test]
@@ -3615,6 +3769,9 @@ mod tests {
         assert!(matches!(&online.connection, Some(Connection::Failed(_))));
         assert!(!online.is_ready());
         assert!(online.status().contains("tiempo de espera"), "{}", online.status());
+        let notice = online.take_notice().expect("no response notice");
+        assert_eq!(notice.kind, OnlineNoticeKind::ServerNoResponse);
+        assert!(notice.message.contains("no responde"), "{}", notice.message);
     }
 
     #[test]
@@ -3932,6 +4089,18 @@ mod tests {
 
         online.handle_json_event(Event::Connected { id: 8 });
         assert!(online.take_connection_notice());
+        assert!(online.take_notice().is_none());
+    }
+
+    #[test]
+    fn json_disconnect_queues_a_clear_localized_notice() {
+        let mut online = ReloadedOnline::default();
+        online.handle_json_event(Event::Disconnected(
+            "servidor cerro la conexion".into(),
+        ));
+        let notice = online.take_notice().expect("disconnect notice");
+        assert_eq!(notice.kind, OnlineNoticeKind::Disconnected);
+        assert!(notice.message.contains("conexión"), "{}", notice.message);
     }
 
     #[test]
