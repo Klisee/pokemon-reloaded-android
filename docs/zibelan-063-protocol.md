@@ -273,6 +273,12 @@ Details that matter for a parser:
   only checked indirectly by the frame-state checksum, if a mismatch affects the
   checksummed state.
 
+Engine note: the host sets `global.numfondobattle` while choosing `fondo` with
+`BattleBackground`, but `NetConfigApply` only copies field 18 to the controller
+instance. The emulator therefore also mirrors field 18 into
+`global.numfondobattle` on both sides; otherwise the battle room keeps a stale
+background index on the guest and the two peers render different backdrops.
+
 After `TEAM` and `WCFG`, both sides load the two team files and call
 `NetStartBattle(seed)`. There is no `GO`/`START` line in this world-battle path;
 the start is implicit once team loading succeeds. A player can still abort with

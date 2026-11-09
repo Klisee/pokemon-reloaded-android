@@ -415,6 +415,37 @@ macro_rules! handle_scene_change {
     }};
 }
 
+/// Bridges `reloaded_online::apply_battle_config` to the live `Game` accessors.
+struct GameBattleConfigSink<'a> {
+    game: &'a mut Game,
+    handle: usize,
+    day_night: Option<usize>,
+}
+
+impl crate::reloaded_online::BattleConfigSink for GameBattleConfigSink<'_> {
+    fn set_instance_number(&mut self, name: &str, value: i32) {
+        self.game.set_instance_number(self.handle, name.as_bytes(), f64::from(value));
+    }
+
+    fn set_global_number(&mut self, name: &str, value: i32) {
+        self.game.set_global_real(name.as_bytes(), 0, f64::from(value));
+    }
+
+    fn set_day_night_number(&mut self, name: &str, value: i32) {
+        if let Some(day_night) = self.day_night {
+            self.game.set_instance_number(day_night, name.as_bytes(), f64::from(value));
+        }
+    }
+
+    fn set_instance_text(&mut self, name: &str, value: &[u8]) {
+        self.game.set_instance_text(self.handle, name.as_bytes(), value);
+    }
+
+    fn set_num_fondo_battle(&mut self, value: i32) {
+        self.game.set_global_real(f3r::global::NUMFONDOBATTLE, 0, f64::from(value));
+    }
+}
+
 impl Game {
     pub fn launch(
         assets: gm8exe::GameAssets,
@@ -3782,10 +3813,20 @@ impl Game {
     }
 
     fn battle_config_from_instance(&self, handle: usize) -> crate::reloaded_online::BattleConfig {
+        // GML resolves a bare name in `with(MULTIPLAYER)NetConfigString` to the
+        // instance field first and to a global of the same name otherwise. Keep that
+        // fallback so a missing instance field cannot turn into a bogus default.
         let number = |name: &[u8], default: i32| {
-            self.get_instance_real(handle, name).map(|value| value as i32).unwrap_or(default)
+            self.get_instance_real(handle, name)
+                .map(|value| value as i32)
+                .or_else(|| self.global_number(name, 0))
+                .unwrap_or(default)
         };
-        let text = |name: &[u8]| self.get_instance_text(handle, name).unwrap_or_default();
+        let text = |name: &[u8]| {
+            self.get_instance_text(handle, name)
+                .or_else(|| self.global_text(name))
+                .unwrap_or_default()
+        };
         let global = |name: &[u8], default: i32| self.global_number(name, 0).unwrap_or(default);
         let day_night = self.find_object_instance_by_name(b"obj_DayNightControl");
         let day_night_number = |name: &[u8], default: i32| {
@@ -3814,7 +3855,7 @@ impl Game {
             show_type: number(b"SHOW_TYPE", 1),
             time_battle: number(b"TIME_BATTLE", 0),
             bttback_index: number(b"BTTBACK_INDEX", 0),
-            music_index: number(b"MUSIC_INDEX", 109),
+            music_index: number(b"MUSIC_INDEX", 161),
             subita: number(b"SUBITA", 0),
             battle_mode: number(b"BATTLE_MODE", global(f3r::global::MODE_BATTLE_BACK, 0)),
             day: number(b"DAY", 1),
@@ -3837,53 +3878,9 @@ impl Game {
 
     /// Applies the 0.6.3 `NetConfigApply` fields before `MultiplayerGoBattle` runs.
     fn apply_battle_config(&mut self, handle: usize, config: &crate::reloaded_online::BattleConfig) {
-        for (name, value) in [
-            (b"NUM_POKEMON1".as_slice(), config.num_pokemon1),
-            (b"NUM_POKEMON2".as_slice(), config.num_pokemon2),
-            (b"DIFICULTAD1".as_slice(), config.dificultad1),
-            (b"DIFICULTAD2".as_slice(), config.dificultad2),
-            (b"CAMBIOS1".as_slice(), config.cambios1),
-            (b"CAMBIOS2".as_slice(), config.cambios2),
-            (b"NUM_OBJ1".as_slice(), config.num_obj1),
-            (b"NUM_OBJ2".as_slice(), config.num_obj2),
-            (b"OBJ_ASG1".as_slice(), config.obj_asg1),
-            (b"OBJ_ASG2".as_slice(), config.obj_asg2),
-            (b"CONT_POKE1".as_slice(), config.cont_poke1),
-            (b"CONT_POKE2".as_slice(), config.cont_poke2),
-            (b"VEL_ATAQUE1".as_slice(), config.vel_ataque1),
-            (b"VEL_ATAQUE2".as_slice(), config.vel_ataque2),
-            (b"REST_PP1".as_slice(), config.rest_pp1),
-            (b"REST_PP2".as_slice(), config.rest_pp2),
-            (b"SHOW_TYPE".as_slice(), config.show_type),
-            (b"TIME_BATTLE".as_slice(), config.time_battle),
-            (b"BTTBACK_INDEX".as_slice(), config.bttback_index),
-            (b"MUSIC_INDEX".as_slice(), config.music_index),
-            (b"SUBITA".as_slice(), config.subita),
-            (b"BATTLE_MODE".as_slice(), config.battle_mode),
-            (b"DAY".as_slice(), config.day),
-        ] {
-            self.set_instance_number(handle, name, f64::from(value));
-        }
-        self.set_global_real(b"shownumber", 0, f64::from(config.shownumber));
-        self.set_global_real(b"showbattleevents", 0, f64::from(config.showbattleevents));
-        self.set_global_real(b"showpanelcombate", 0, f64::from(config.showpanelcombate));
-        self.set_global_real(b"shownumberPS", 0, f64::from(config.shownumber_ps));
-        self.set_global_real(f3r::global::MODE_BATTLE_BACK, 0, f64::from(config.mode_battle_back));
-        self.set_global_real(b"WorldClima", 0, f64::from(config.world_clima));
-        self.set_global_real(b"clima", 0, f64::from(config.clima));
-        if let Some(day_night) = self.find_object_instance_by_name(b"obj_DayNightControl") {
-            self.set_instance_number(day_night, b"Hora", f64::from(config.hora));
-            self.set_instance_number(day_night, b"Minuto", f64::from(config.minuto));
-        }
-        for (name, value) in [
-            (b"REGLAS_J1".as_slice(), config.rules_j1.as_slice()),
-            (b"REGLAS_J2".as_slice(), config.rules_j2.as_slice()),
-            (b"OPTIONS_BT".as_slice(), config.options_bt.as_slice()),
-            (b"MUSIC_NAME".as_slice(), config.music_name.as_slice()),
-            (b"txt_clima".as_slice(), config.txt_clima.as_slice()),
-        ] {
-            self.set_instance_text(handle, name, value);
-        }
+        let day_night = self.find_object_instance_by_name(b"obj_DayNightControl");
+        let mut sink = GameBattleConfigSink { game: self, handle, day_night };
+        crate::reloaded_online::apply_battle_config(config, &mut sink);
     }
 
     fn send_battle_team_to(&mut self, target: u64, name: &str) {
