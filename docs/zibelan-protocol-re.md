@@ -53,20 +53,25 @@ mixing them.
 
 ### 3.1 World/direct Zibelan mode (modern server)
 
-The client sends three lines immediately after connecting, in this order:
+The client sends its join burst immediately after connecting, in this order:
 
 | Order | Line | Meaning | Encoding |
 |---|---|---|---|
 | 1 | `WJOIN <name>` | announce the local display name | name is the rest of the line; CR/LF sanitized |
-| 2 | `WVER <version>` | announce protocol version | canonical decimal `u32`; observed `6` |
-| 3 | `WBUILD <build>` | announce client build | canonical decimal `u64`; observed `20261103` |
+| 2 | `WTID <prota_ID>` | announce the trainer id | decimal digits, matching `string_digits(string(global.prota_ID))` |
+| 3 | `WTSPR <sprD>` | announce the player sprite | optional; sent only when `sprD` exists |
+| 4 | `WVER <version>` | announce protocol version | canonical decimal `u32`; current `NetInit` value `8` |
+| 5 | `WBUILD <build>` | announce client build | canonical decimal `u64`; current `NetInit` value `20261109` |
 
-Observed opening transcript:
+Current opening transcript (older captures show the three-line `WVER 6` /
+`WBUILD 20261103` form without `WTID`/`WTSPR`):
 
 ```text
 C: WJOIN Klisee
-C: WVER 6
-C: WBUILD 20261103
+C: WTID 00123
+C: WTSPR 456
+C: WVER 8
+C: WBUILD 20261109
 S: WELCOME 7432
 S: WOK 7432
 C: WSYNC
@@ -77,21 +82,22 @@ The server greets with `WELCOME <id>` on accept, then answers the join with
 client does not choose its numeric id, and there is no password, token, or
 resume state.
 
-The installed 0.6.7 native library contains the contiguous `.rodata` bytes
-`WVER 6WBUILD 20261103`; the values are native constants, not dex or user
-configuration. The current host sends exactly those values through
-`send_raw_line` after `world_join`
-(`src/OpenGMK/gm8emulator/src/reloaded_online.rs:515-519`). The clean-room codec
-has the same three-line sequence in `encode_handshake`
-(`src/OpenGMK/reloaded-cleanroom/src/roz.rs:426-431`), locked by
-`handshake_is_three_commands_in_order`.
+The installed 0.6.7 native library contains the older contiguous `.rodata`
+bytes `WVER 6WBUILD 20261103`. The current `NetInit` script declares
+`NET_VERSION="8"` and `NET_BUILD=20261109`, and `NetWorldConnect` writes
+`WJOIN`, `WTID`, optional `WTSPR`, `WVER` and `WBUILD` in that order. The Rust
+host uses `RozClient::world_handshake` and the clean-room codec exposes the same
+sequence in `encode_world_handshake`
+(`src/OpenGMK/reloaded-cleanroom/src/roz.rs`).
 
 Expectations that follow from the evidence:
 
-- `WVER` is a small protocol version; `6` is the observed current value.
-- `WBUILD` is an opaque decimal build stamp; `20261103` looks like a date but
+- `WVER` is a small protocol version; `8` is the current `NetInit` value.
+- `WBUILD` is an opaque decimal build stamp; `20261109` looks like a date but
   must not be interpreted as game logic unless a separate requirement says so.
-- Both fields are sent in world mode before the server is considered joined.
+- `WTID` is always sent in world mode and `WTSPR` only when the game has a
+  `sprD` global.
+- The version/build fields are sent before the server is considered joined.
   The current source comments say the server uses them to reject mixed client
   versions before a battle starts.
 - The stock `ROZ.dll` contains no `WVER`/`WBUILD` literals; its `net_join`
@@ -162,7 +168,7 @@ it sets `local_id` from `WELCOME` and also derives a displayed “protocol” nu
 from the same value
 (`src/OpenGMK/online/src/roz.rs:924-926,1005-1008`;
 `src/OpenGMK/gm8emulator/src/reloaded_online.rs:1364-1366,1640-1647`). That is a
-known defect: the protocol version is `WVER 6`, not the id.
+known defect: the protocol version is `WVER 8`, not the id.
 
 Recommended handling:
 
@@ -248,7 +254,7 @@ Rules established from the capture and the connection-notice review:
 - A reconnect is a new epoch and shows a fresh notice only after its own
   `WELCOME`; it must not replay the old one.
 - Keep the notice and the protocol version separate: show the connection id from
-  `WELCOME` and, if desired, the protocol version from `WVER` (6), never the id
+  `WELCOME` and, if desired, the protocol version from `WVER` (8), never the id
   as the version.
 
 Why the legacy client can appear to trigger on `WOK`: the stock client does not
@@ -270,7 +276,7 @@ notice dedupe is keyed by text rather than by session. The status line
 
 | Topic | Evidence | Current code | Assessment |
 |---|---|---|---|
-| World handshake | `WJOIN`, `WVER 6`, `WBUILD 20261103`, then `WSYNC` | same order via `world_join` + raw `WVER`/`WBUILD` | wire-compatible; raw senders bypass typed codec |
+| World handshake | `WJOIN`, `WTID`, optional `WTSPR`, `WVER 8`, `WBUILD 20261109`, then `WSYNC` | same order via `RozClient::world_handshake` and typed codec commands | wire-compatible; bounded wait for status 6/5 |
 | Lobby handshake | `HELLO <name>`, `JOIN <room>` | `hello`, `join` | matches stock profile; absent from capture |
 | `WELCOME` | session identity `u64`, first one only | `Welcome { version, id }`, applies every event, version derived from id | semantics/notification need correction |
 | `WOK` | generic ack/id, also after `WEND` | parsed as `i32` side plus optional `u64` id; announces welcome on change | conflates ack/id/side; rejects large ids |
