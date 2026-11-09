@@ -1762,7 +1762,7 @@ impl Game {
         {
             self.online_connect_pending = false;
             eprintln!("[online] sala de juego {room_id}; iniciando Zibelan");
-            self.reloaded_online.start_zibelan();
+            self.start_zibelan_world();
         }
 
         // Update this early so the other events run
@@ -2088,7 +2088,7 @@ impl Game {
         if self.online_connect_pending {
             self.online_connect_pending = false;
             eprintln!("[online] partida cargada; iniciando Zibelan");
-            self.reloaded_online.start_zibelan();
+            self.start_zibelan_world();
         }
         self.scene_change = None;
         Ok(Default::default())
@@ -3326,6 +3326,27 @@ impl Game {
             gml::Value::Str(value) => Some(value.as_ref().to_vec()),
             gml::Value::Real(value) => Some(team_file::number_text(value.into_inner())),
         }
+    }
+
+    /// Identity values read from the `NetInit`/`NetWorldConnect` globals.
+    fn zibelan_identity(&self) -> (Option<Vec<u8>>, Option<i32>) {
+        let trainer_id = self.global_text(f3r::global::PROTA_ID);
+        let sprite = match self.global_value(f3r::global::SPRD, 0) {
+            Some(gml::Value::Real(value)) => Some(value.into_inner() as i32),
+            Some(gml::Value::Str(value)) => std::str::from_utf8(value.as_ref())
+                .ok()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+                .map(|value| value as i32),
+            None => None,
+        };
+        (trainer_id, sprite)
+    }
+
+    /// Start the Zibelan world connection with the current save's identity.
+    fn start_zibelan_world(&mut self) {
+        let (trainer_id, sprite) = self.zibelan_identity();
+        self.reloaded_online.set_world_identity(trainer_id, sprite);
+        self.reloaded_online.start_zibelan();
     }
 
     fn set_global_real(&mut self, name: &[u8], index: u32, value: f64) {

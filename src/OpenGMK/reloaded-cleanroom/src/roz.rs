@@ -21,6 +21,18 @@ pub const MIN_MSG_PAYLOAD_BYTES: usize = 4 * 1024;
 /// Largest payload that fits in a line with the `MSG ` prefix and hex encoding.
 pub const MAX_MSG_PAYLOAD_BYTES: usize = (MAX_LINE_BYTES - 4) / 2;
 
+/// Protocol version announced by the current world handshake (`WVER`).
+pub const WORLD_PROTOCOL_VERSION: u32 = 8;
+
+/// Build stamp announced by the current world handshake (`WBUILD`).
+pub const WORLD_BUILD: u64 = 20_261_109;
+
+/// `NET_VERSION` as named by the game's `NetInit` script.
+pub const NET_VERSION: u32 = WORLD_PROTOCOL_VERSION;
+
+/// `NET_BUILD` as named by the game's `NetInit` script.
+pub const NET_BUILD: u64 = WORLD_BUILD;
+
 /// Separates a `MSG` subcommand from its fields.
 pub const UNIT_SEPARATOR: u8 = 0x1f;
 
@@ -301,6 +313,10 @@ pub enum ClientCommand {
     Version { version: u32 },
     /// `WBUILD <build-id>`
     Build { build: u64 },
+    /// `WTID <trainer-id>`
+    WorldTrainerId { id: Vec<u8> },
+    /// `WTSPR <sprite>`
+    WorldSprite { sprite: Vec<u8> },
     /// `WSYNC`
     Sync,
     /// `WPOS <room> <x> <y> <state>`
@@ -349,6 +365,16 @@ impl ClientCommand {
             Self::Build { build } => {
                 line.extend_from_slice(b"WBUILD ");
                 line.extend_from_slice(build.to_string().as_bytes());
+            },
+            Self::WorldTrainerId { id } => {
+                check_token(id)?;
+                line.extend_from_slice(b"WTID ");
+                line.extend_from_slice(id);
+            },
+            Self::WorldSprite { sprite } => {
+                check_token(sprite)?;
+                line.extend_from_slice(b"WTSPR ");
+                line.extend_from_slice(sprite);
             },
             Self::Sync => line.extend_from_slice(b"WSYNC"),
             Self::Position(position) => {
@@ -429,6 +455,37 @@ pub fn encode_handshake(name: &[u8], version: u32, build: u64) -> Result<Vec<Vec
         ClientCommand::Version { version }.encode()?,
         ClientCommand::Build { build }.encode()?,
     ])
+}
+
+/// Encode the world join burst used by `NetWorldConnect`.
+///
+/// Order is `WJOIN`, `WTID`, optional `WTSPR`, `WVER`, `WBUILD`.
+pub fn encode_world_handshake(
+    name: &[u8],
+    trainer_id: &[u8],
+    sprite: Option<&[u8]>,
+    version: u32,
+    build: u64,
+) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    let mut lines = vec![
+        ClientCommand::Join { name: name.to_vec() }.encode()?,
+        ClientCommand::WorldTrainerId { id: trainer_id.to_vec() }.encode()?,
+    ];
+    if let Some(sprite) = sprite {
+        lines.push(ClientCommand::WorldSprite { sprite: sprite.to_vec() }.encode()?);
+    }
+    lines.push(ClientCommand::Version { version }.encode()?);
+    lines.push(ClientCommand::Build { build }.encode()?);
+    Ok(lines)
+}
+
+/// Encode the current world join burst with the `NetInit` version/build.
+pub fn encode_current_world_handshake(
+    name: &[u8],
+    trainer_id: &[u8],
+    sprite: Option<&[u8]>,
+) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    encode_world_handshake(name, trainer_id, sprite, WORLD_PROTOCOL_VERSION, WORLD_BUILD)
 }
 
 /// A parsed server-to-client command.
@@ -977,8 +1034,55 @@ mod tests {
 
     #[test]
     fn handshake_is_three_commands_in_order() {
-        let lines = encode_handshake(b"Klisee", 6, 20_261_103).unwrap();
-        assert_eq!(lines, vec![b"WJOIN Klisee\n".to_vec(), b"WVER 6\n".to_vec(), b"WBUILD 20261103\n".to_vec(),]);
+        let lines = encode_handshake(b"Klisee", WORLD_PROTOCOL_VERSION, WORLD_BUILD).unwrap();
+        assert_eq!(
+            lines,
+            vec![b"WJOIN Klisee\n".to_vec(), b"WVER 8\n".to_vec(), b"WBUILD 20261109\n".to_vec(),]
+        );
+    }
+
+    #[test]
+    fn world_handshake_is_net_world_connect_order() {
+        let lines =
+            encode_current_world_handshake(b"Klisee", b"00123", Some(b"456")).unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                b"WJOIN Klisee\n".to_vec(),
+                b"WTID 00123\n".to_vec(),
+                b"WTSPR 456\n".to_vec(),
+                b"WVER 8\n".to_vec(),
+                b"WBUILD 20261109\n".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn world_handshake_omits_sprite_when_absent() {
+        let lines = encode_world_handshake(b"Klisee", b"123", None, 8, 20_261_109).unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                b"WJOIN Klisee\n".to_vec(),
+                b"WTID 123\n".to_vec(),
+                b"WVER 8\n".to_vec(),
+                b"WBUILD 20261109\n".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn identity_commands_reject_whitespace_and_controls() {
+        assert_eq!(client(ClientCommand::WorldTrainerId { id: b"123".to_vec() }), b"WTID 123\n");
+        assert_eq!(client(ClientCommand::WorldSprite { sprite: b"-1".to_vec() }), b"WTSPR -1\n");
+        assert_eq!(
+            ClientCommand::WorldTrainerId { id: b"12 3".to_vec() }.encode(),
+            Err(ProtocolError::InvalidField)
+        );
+        assert_eq!(
+            ClientCommand::WorldSprite { sprite: b"1\n2".to_vec() }.encode(),
+            Err(ProtocolError::EmbeddedControl)
+        );
     }
 
     #[test]
@@ -986,7 +1090,7 @@ mod tests {
         assert_eq!(client(ClientCommand::Sync), b"WSYNC\n");
         assert_eq!(client(ClientCommand::End), b"WEND\n");
         assert_eq!(client(ClientCommand::Bye), b"BYE\n");
-        assert_eq!(client(ClientCommand::Version { version: 6 }), b"WVER 6\n");
+        assert_eq!(client(ClientCommand::Version { version: 8 }), b"WVER 8\n");
     }
 
     #[test]

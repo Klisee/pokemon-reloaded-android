@@ -15,7 +15,7 @@ use crate::{
 };
 use reloaded_online_net::{
     failure::ConnectionFailure,
-    roz::{RozClient, RozEvent},
+    roz::{RozClient, RozEvent, DEFAULT_WORLD_HANDSHAKE_TIMEOUT},
     world, Event, OnlineClient,
 };
 use serde::Deserialize;
@@ -240,6 +240,9 @@ pub struct ReloadedOnline {
     connection_mode: Option<OnlineMode>,
     connect_deadline: Option<Instant>,
     handshake_deadline: Option<Instant>,
+    world_handshake_timeout: Duration,
+    world_trainer_id: String,
+    world_sprite: Option<i32>,
     remotes: HashMap<u64, Remote>,
     local_id: Option<u64>,
     local_name: String,
@@ -292,6 +295,9 @@ impl Default for ReloadedOnline {
             connection_mode: None,
             connect_deadline: None,
             handshake_deadline: None,
+            world_handshake_timeout: DEFAULT_WORLD_HANDSHAKE_TIMEOUT,
+            world_trainer_id: "0".into(),
+            world_sprite: None,
             remotes: HashMap::new(),
             local_id: None,
             local_name: default_name(),
@@ -386,6 +392,48 @@ impl ReloadedOnline {
     #[allow(dead_code)]
     pub fn start_remote(&mut self) {
         self.connect_json(true);
+    }
+
+    /// Set the identity the next Zibelan world handshake sends as `WTID` and,
+    /// when present, `WTSPR`. Non-digits are stripped like the game's
+    /// `string_digits(string(global.prota_ID))`; an empty result becomes `0`.
+    pub fn set_world_identity<T: AsRef<[u8]>>(
+        &mut self,
+        trainer_id: Option<T>,
+        sprite: Option<i32>,
+    ) {
+        let digits: Vec<u8> = trainer_id
+            .as_ref()
+            .map(|value| {
+                value
+                    .as_ref()
+                    .iter()
+                    .copied()
+                    .filter(u8::is_ascii_digit)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.world_trainer_id = if digits.is_empty() {
+            "0".into()
+        } else {
+            String::from_utf8_lossy(&digits).into_owned()
+        };
+        self.world_sprite = sprite;
+    }
+
+    /// Set only the `WTID` value.
+    pub fn set_world_trainer_id<T: AsRef<[u8]>>(&mut self, trainer_id: T) {
+        self.set_world_identity(Some(trainer_id), self.world_sprite);
+    }
+
+    /// Set only the optional `WTSPR` value.
+    pub fn set_world_sprite(&mut self, sprite: Option<i32>) {
+        self.world_sprite = sprite;
+    }
+
+    /// Override the bounded world-handshake timeout (mainly for tests and hosts).
+    pub fn set_world_handshake_timeout(&mut self, timeout: Duration) {
+        self.world_handshake_timeout = timeout;
     }
 
     pub fn start_zibelan(&mut self) {
@@ -513,6 +561,9 @@ impl ReloadedOnline {
         let server = self.server.clone();
         let name = self.local_name.clone();
         let room = self.room_name.clone();
+        let trainer_id = self.world_trainer_id.clone();
+        let sprite = self.world_sprite;
+        let handshake_timeout = self.world_handshake_timeout;
         let log_server = server.clone();
         let log_name = name.clone();
         let log_room = room.clone();
@@ -526,11 +577,24 @@ impl ReloadedOnline {
                         client.join(&room)?;
                     },
                     _ => {
-                        client.world_join(&name)?;
-                        // Protocol metadata used by the Zibelan server to reject mixed
-                        // client versions before a battle starts.
-                        client.send_raw_line("WVER 6")?;
-                        client.send_raw_line("WBUILD 20261103")?;
+                        // NetWorldConnect order: WJOIN, WTID, optional WTSPR,
+                        // WVER and WBUILD. The server then answers WOK, FULL,
+                        // WFULL or another terminal status.
+                        client.world_handshake(&name, &trainer_id, sprite)?;
+                        let status = client.wait_world_status(handshake_timeout)?;
+                        match status.world_handshake_outcome() {
+                            reloaded_online_net::roz::WorldHandshakeOutcome::Connected => {},
+                            reloaded_online_net::roz::WorldHandshakeOutcome::Full => {
+                                return Err(
+                                    ConnectionFailure::full_message(true).to_string()
+                                )
+                            },
+                            reloaded_online_net::roz::WorldHandshakeOutcome::Failed => {
+                                return Err(format!(
+                                    "El servidor del mundo online no responde (estado {status})."
+                                ))
+                            },
+                        }
                     }
                 }
                 Ok(Backend::Zibelan(client))
@@ -1278,6 +1342,16 @@ impl ReloadedOnline {
     fn localize_connect_error(reason: String) -> String {
         match ConnectionFailure::from_reason(&reason) {
             ConnectionFailure::Other => reason,
+            ConnectionFailure::Full => {
+                let lower = reason.to_ascii_lowercase();
+                if lower.contains("mundo") {
+                    ConnectionFailure::full_message(true).to_string()
+                } else if lower.contains("sala") {
+                    ConnectionFailure::full_message(false).to_string()
+                } else {
+                    ConnectionFailure::Full.message().to_string()
+                }
+            },
             failure => failure.message().to_string(),
         }
     }
@@ -2312,7 +2386,10 @@ mod team_payload_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::{Shutdown, TcpListener, TcpStream},
+    };
 
     struct MockWorldTransport {
         lines: Option<mpsc::Sender<Vec<u8>>>,
@@ -2427,6 +2504,53 @@ mod tests {
         online.connection = Some(Connection::Ready(Backend::Zibelan(client)));
         online.connection_mode = Some(OnlineMode::ZibelanWorld);
         (online, MockDuplexTransport { stream, lines, reader: Some(reader) })
+    }
+
+    fn spawn_zibelan_server(
+        reply: &'static [u8],
+    ) -> (String, mpsc::Receiver<Vec<String>>, mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind zibelan mock");
+        let address = listener.local_addr().expect("zibelan mock address").to_string();
+        let (lines_tx, lines_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("zibelan mock accept");
+            stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
+            let mut reader = BufReader::new(stream.try_clone().expect("zibelan mock clone"));
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let text = line.trim_end_matches(['\r', '\n']).to_string();
+                        let done = text.starts_with("WBUILD ");
+                        lines.push(text);
+                        if done {
+                            break
+                        }
+                    },
+                }
+            }
+            let _ = lines_tx.send(lines);
+            let _ = stream.write_all(reply);
+            let _ = stream.flush();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+        (address, lines_rx, release_tx, handle)
+    }
+
+    fn pump_connection(online: &mut ReloadedOnline, mut done: impl FnMut(&ReloadedOnline) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            online.poll_connection();
+            online.poll_events();
+            if done(online) {
+                return
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for mock handshake");
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn next_client_line(transport: &MockDuplexTransport) -> String {
@@ -3343,6 +3467,124 @@ mod tests {
 
         online.handle_json_event(Event::Connected { id: 8 });
         assert!(online.take_connection_notice());
+    }
+
+    #[test]
+    fn zibelan_start_world_sends_net_world_connect_handshake() {
+        let (address, lines, release, server) =
+            spawn_zibelan_server(b"WELCOME 7\nWOK 7\n");
+        let mut online = ReloadedOnline::default();
+        online.server = address;
+        online.local_name = "Klisee".into();
+        online.set_world_identity(Some("00123"), Some(456));
+
+        online.start_world();
+        pump_connection(&mut online, |online| {
+            online.is_ready() && online.status().contains("mundo conectado")
+        });
+
+        assert_eq!(online.local_id(), Some(7));
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(2)).expect("handshake lines"),
+            vec![
+                "WJOIN Klisee".to_string(),
+                "WTID 00123".to_string(),
+                "WTSPR 456".to_string(),
+                "WVER 8".to_string(),
+                "WBUILD 20261109".to_string(),
+            ]
+        );
+        let _ = release.send(());
+        server.join().expect("zibelan server");
+    }
+
+    #[test]
+    fn zibelan_start_world_omits_sprite_and_defaults_missing_id_to_zero() {
+        let (address, lines, release, server) =
+            spawn_zibelan_server(b"WELCOME 9\nWOK 9\n");
+        let mut online = ReloadedOnline::default();
+        online.server = address;
+        online.local_name = "Ada".into();
+        online.set_world_identity::<&[u8]>(None, None);
+
+        online.start_world();
+        pump_connection(&mut online, |online| {
+            online.is_ready() && online.status().contains("mundo conectado")
+        });
+
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(2)).expect("handshake lines"),
+            vec![
+                "WJOIN Ada".to_string(),
+                "WTID 0".to_string(),
+                "WVER 8".to_string(),
+                "WBUILD 20261109".to_string(),
+            ]
+        );
+        let _ = release.send(());
+        server.join().expect("zibelan server");
+    }
+
+    #[test]
+    fn zibelan_start_world_full_status_is_terminal() {
+        let (address, lines, release, server) = spawn_zibelan_server(b"WFULL\n");
+        let mut online = ReloadedOnline::default();
+        online.server = address;
+        online.local_name = "Klisee".into();
+
+        online.start_world();
+        pump_connection(&mut online, |online| {
+            matches!(&online.connection, Some(Connection::Failed(_)))
+        });
+
+        assert!(!online.is_ready());
+        assert!(online.status().contains("mundo está lleno"), "{}", online.status());
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(2)).expect("handshake lines").len(),
+            4
+        );
+        let _ = release.send(());
+        server.join().expect("zibelan server");
+    }
+
+    #[test]
+    fn zibelan_start_world_other_status_is_a_failure() {
+        let (address, lines, release, server) = spawn_zibelan_server(b"WAIT\n");
+        let mut online = ReloadedOnline::default();
+        online.server = address;
+        online.local_name = "Klisee".into();
+
+        online.start_world();
+        pump_connection(&mut online, |online| {
+            matches!(&online.connection, Some(Connection::Failed(_)))
+        });
+
+        assert!(!online.is_ready());
+        assert!(online.status().contains("no responde"), "{}", online.status());
+        let _ = lines.recv_timeout(Duration::from_secs(2));
+        let _ = release.send(());
+        server.join().expect("zibelan server");
+    }
+
+    #[test]
+    fn zibelan_start_world_handshake_timeout_is_bounded() {
+        let (address, lines, release, server) = spawn_zibelan_server(b"");
+        let mut online = ReloadedOnline::default();
+        online.server = address;
+        online.local_name = "Klisee".into();
+        online.set_world_handshake_timeout(Duration::from_millis(50));
+
+        let started = Instant::now();
+        online.start_world();
+        pump_connection(&mut online, |online| {
+            matches!(&online.connection, Some(Connection::Failed(_)))
+        });
+
+        assert!(online.status().contains("tiempo de espera"), "{}", online.status());
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        let _ = lines.recv_timeout(Duration::from_secs(2));
+        let _ = release.send(());
+        server.join().expect("zibelan server");
     }
 
     #[test]

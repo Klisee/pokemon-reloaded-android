@@ -38,6 +38,10 @@ use reloaded_cleanroom::{
     roz::{ClientCommand, ServerEvent},
     world,
 };
+
+pub use reloaded_cleanroom::roz::{
+    NET_BUILD, NET_VERSION, WORLD_BUILD, WORLD_PROTOCOL_VERSION,
+};
 use std::{
     collections::VecDeque,
     fmt,
@@ -166,6 +170,14 @@ pub const DEFAULT_EVENT_CAPACITY: usize = 256;
 /// thread forever. The public server does not document its own send timeout.
 pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Bound for the Zibelan world handshake (`WJOIN`/`WTID`/`WTSPR`/`WVER`/`WBUILD`
+/// until `WOK`, `FULL`/`WFULL` or another terminal status). The game's
+/// `NetWorldConnect` waits 250 x 20 ms, so five seconds is the reference bound.
+pub const WORLD_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Alias used by callers that want to override the default explicitly.
+pub const DEFAULT_WORLD_HANDSHAKE_TIMEOUT: Duration = WORLD_HANDSHAKE_TIMEOUT;
+
 /// Connection/session state, mirroring the values observed in `net_status`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -207,6 +219,34 @@ impl RozStatus {
 impl Default for RozStatus {
     fn default() -> Self {
         Self::Disconnected
+    }
+}
+
+/// How a Zibelan world connection finished its initial handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldHandshakeOutcome {
+    /// Status 6 (`WOK`): the world is joined.
+    Connected,
+    /// Status 5 (`FULL`/`WFULL`): the world or room is full.
+    Full,
+    /// Any other status, including a closed socket: the attempt failed.
+    Failed,
+}
+
+/// Classify a status using the `NetWorldConnect` rules: 6 connected, 5 full,
+/// anything else a failure.
+pub fn world_handshake_outcome(status: RozStatus) -> WorldHandshakeOutcome {
+    match status {
+        RozStatus::WorldJoined => WorldHandshakeOutcome::Connected,
+        RozStatus::Full => WorldHandshakeOutcome::Full,
+        _ => WorldHandshakeOutcome::Failed,
+    }
+}
+
+impl RozStatus {
+    /// Apply the `NetWorldConnect` status rules to this value.
+    pub fn world_handshake_outcome(self) -> WorldHandshakeOutcome {
+        world_handshake_outcome(self)
     }
 }
 
@@ -530,6 +570,37 @@ impl RozClient {
         self.send_command(ClientCommand::Join { name })
     }
 
+    /// Send `WTID <trainer-id>`.
+    pub fn world_trainer_id<T: fmt::Display>(&self, id: T) -> Result<(), String> {
+        self.send_command(ClientCommand::WorldTrainerId { id: id.to_string().into_bytes() })
+    }
+
+    /// Send `WTSPR <sprite>`.
+    pub fn world_sprite<T: fmt::Display>(&self, sprite: T) -> Result<(), String> {
+        self.send_command(ClientCommand::WorldSprite { sprite: sprite.to_string().into_bytes() })
+    }
+
+    /// Send the complete `NetWorldConnect` burst.
+    ///
+    /// `WJOIN`, `WTID`, optional `WTSPR`, `WVER` and `WBUILD` are written in
+    /// that order. `WTSPR` is omitted when no sprite is available, matching the
+    /// game's `variable_global_exists("sprD")` check.
+    pub fn world_handshake(
+        &self,
+        name: &str,
+        trainer_id: &str,
+        sprite: Option<i32>,
+    ) -> Result<(), String> {
+        self.world_join(name)?;
+        self.world_trainer_id(trainer_id)?;
+        if let Some(sprite) = sprite {
+            self.world_sprite(sprite)?;
+        }
+        self.send_command(ClientCommand::Version { version: WORLD_PROTOCOL_VERSION })?;
+        self.send_command(ClientCommand::Build { build: WORLD_BUILD })?;
+        Ok(())
+    }
+
     /// Send `MSG <hex>` for a UTF-8/text payload.
     ///
     /// Hex keeps CR/LF and non-UTF-8 bytes from breaking the line framing.
@@ -713,6 +784,33 @@ impl RozClient {
     /// Current session state.
     pub fn status(&self) -> RozStatus {
         RozStatus::from_u8(self.status.load(Ordering::SeqCst))
+    }
+
+    /// Wait, with a hard deadline, until the initial world handshake reaches a
+    /// terminal status.
+    ///
+    /// Returns the first status other than `Connecting` (or `Disconnected` when
+    /// the reader stops). `NetWorldConnect` rules then classify 6 as connected,
+    /// 5 as full and anything else as failure. A timeout returns a localized
+    /// error instead of waiting forever.
+    pub fn wait_world_status(&self, timeout: Duration) -> Result<RozStatus, String> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| ConnectionFailure::Timeout.message().to_string())?;
+        loop {
+            let status = self.status();
+            if status != RozStatus::Connecting {
+                return Ok(status)
+            }
+            if self.is_closed() {
+                return Ok(RozStatus::Disconnected)
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(ConnectionFailure::Timeout.message().to_string())
+            }
+            thread::sleep(deadline.saturating_duration_since(now).min(Duration::from_millis(10)));
+        }
     }
 
     /// Whether the reader has stopped and the event queue is closed.
@@ -1627,6 +1725,132 @@ mod tests {
                 "WEND".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn world_handshake_sends_net_world_connect_lines_in_order() {
+        let (tx, rx) = mpsc::channel();
+        let addr = spawn_mock(move |stream| {
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::new();
+            for _ in 0..5 {
+                lines.push(read_line(&mut reader));
+            }
+            tx.send(lines).expect("send lines");
+        });
+
+        let client = connect(addr);
+        client.world_handshake("Klisee", "00123", Some(456)).expect("world handshake");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).expect("lines"),
+            vec![
+                "WJOIN Klisee".to_string(),
+                "WTID 00123".to_string(),
+                "WTSPR 456".to_string(),
+                "WVER 8".to_string(),
+                "WBUILD 20261109".to_string(),
+            ]
+        );
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn world_handshake_omits_sprite_and_keeps_join_first() {
+        let (tx, rx) = mpsc::channel();
+        let addr = spawn_mock(move |stream| {
+            let mut reader = BufReader::new(stream);
+            let mut lines = Vec::new();
+            for _ in 0..4 {
+                lines.push(read_line(&mut reader));
+            }
+            tx.send(lines).expect("send lines");
+        });
+
+        let client = connect(addr);
+        client.world_handshake("Klisee", "77", None).expect("world handshake");
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).expect("lines"),
+            vec![
+                "WJOIN Klisee".to_string(),
+                "WTID 77".to_string(),
+                "WVER 8".to_string(),
+                "WBUILD 20261109".to_string(),
+            ]
+        );
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn world_handshake_status_maps_six_to_connected_five_to_full() {
+        assert_eq!(
+            world_handshake_outcome(RozStatus::WorldJoined),
+            WorldHandshakeOutcome::Connected
+        );
+        assert_eq!(world_handshake_outcome(RozStatus::Full), WorldHandshakeOutcome::Full);
+        for status in [
+            RozStatus::Disconnected,
+            RozStatus::Connecting,
+            RozStatus::Waiting,
+            RozStatus::Started,
+            RozStatus::PeerLeft,
+        ] {
+            assert_eq!(status.world_handshake_outcome(), WorldHandshakeOutcome::Failed, "{status}");
+        }
+    }
+
+    #[test]
+    fn wait_world_status_returns_wok_and_full() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream.write_all(b"WELCOME 7\nWOK 7\n").expect("write");
+            stream.flush().expect("flush");
+            tx.send(()).expect("sent");
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+
+        let client = connect(addr);
+        assert_eq!(
+            client.wait_world_status(Duration::from_secs(1)).expect("wok"),
+            RozStatus::WorldJoined
+        );
+        rx.recv_timeout(Duration::from_secs(2)).expect("server wrote");
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |mut stream| {
+            stream.write_all(b"WFULL\n").expect("write");
+            stream.flush().expect("flush");
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+        let client = connect(addr);
+        assert_eq!(
+            client.wait_world_status(Duration::from_secs(1)).expect("full"),
+            RozStatus::Full
+        );
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
+    }
+
+    #[test]
+    fn wait_world_status_times_out_instead_of_waiting_forever() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let addr = spawn_mock(move |_stream| {
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+
+        let client = connect(addr);
+        let started = Instant::now();
+        let error = client
+            .wait_world_status(Duration::from_millis(50))
+            .expect_err("timeout");
+        assert!(error.contains("tiempo de espera"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        let _ = release_tx.send(());
+        client.disconnect().expect("disconnect");
     }
 
     #[test]
