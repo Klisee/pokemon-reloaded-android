@@ -4214,6 +4214,9 @@ impl Game {
                 self.restore_local_battle_team();
                 self.clear_online_battle_state();
             }
+            if reason != "sesion online detenida" {
+                self.interaction_response = Some((reason, false));
+            }
             return true
         }
         if !self.battle_sync_active {
@@ -4247,6 +4250,15 @@ impl Game {
                     "[battle] desincronizacion frame={} local={:#010x} remoto={:#010x}",
                     input.frame, self.battle_local_checksum, input.checksum
                 );
+                let notice = self.reloaded_online.note_battle_desync();
+                if self.battle_snapshot.is_some() {
+                    self.finish_online_battle_guard("desincronizacion");
+                } else {
+                    self.restore_local_battle_team();
+                    self.clear_online_battle_state();
+                }
+                self.interaction_response = Some((notice, false));
+                return true
             }
         }
         let p1_keys = [
@@ -5037,12 +5049,16 @@ impl Game {
         if self.interaction_any_open() {
             return
         }
-        if !matches!(self.room.id, f3r::room::LOADER | f3r::room::BOOT | f3r::room::SELECT)
-            && self.reloaded_online.take_connection_notice()
-        {
-            self.online_notice_open = true;
-            self.online_notice_just_opened = true;
-            return
+        if !matches!(self.room.id, f3r::room::LOADER | f3r::room::BOOT | f3r::room::SELECT) {
+            if self.reloaded_online.take_connection_notice() {
+                self.online_notice_open = true;
+                self.online_notice_just_opened = true;
+                return
+            }
+            if let Some(notice) = self.reloaded_online.take_notice() {
+                self.interaction_response = Some((notice.message, false));
+                return
+            }
         }
         if let Some(request) = self.reloaded_online.take_request() {
             self.interaction_menu_open = false;

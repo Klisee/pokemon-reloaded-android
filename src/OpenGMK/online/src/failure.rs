@@ -32,6 +32,8 @@ pub enum ConnectionFailure {
     Full,
     /// `PEER_LEFT`: the opponent abandoned the session.
     PeerLeft,
+    /// The battle checksums diverged between the two clients.
+    Desync,
     /// The server throttled or rate-limited the connection.
     RateLimited,
     /// A failure that does not match a known category.
@@ -76,6 +78,11 @@ impl ConnectionFailure {
         let lower = reason.to_ascii_lowercase();
         if contains_any(
             &lower,
+            &["desync", "desincroniz", "fuera de sincron", "checksum distinto"],
+        ) {
+            Self::Desync
+        } else if contains_any(
+            &lower,
             &[
                 "version",
                 "versión",
@@ -85,6 +92,7 @@ impl ConnectionFailure {
                 "incompat",
                 "wrong build",
                 "build mismatch",
+                "version mismatch",
                 "actualiza",
             ],
         ) {
@@ -115,7 +123,8 @@ impl ConnectionFailure {
         } else if contains_any(&lower, &["full", "lleno", "llena"]) {
             Self::Full
         } else if contains_any(&lower, &["peer_left", "peer-left", "peer left"])
-            || (lower.contains("rival") && contains_any(&lower, &["salio", "salió", "abandon"]))
+            || (lower.contains("rival")
+                && contains_any(&lower, &["salio", "salió", "abandon", "desconect"]))
         {
             Self::PeerLeft
         } else if contains_any(
@@ -129,6 +138,8 @@ impl ConnectionFailure {
                 "tiempo de conexion",
                 "did not properly respond",
                 "temporarily unavailable",
+                "no responde",
+                "sin respuesta",
             ],
         ) {
             Self::Timeout
@@ -188,6 +199,9 @@ impl ConnectionFailure {
                 "cerró la conexión",
                 "cerro la conexion",
                 "closed the connection",
+                "se perdió la conexión",
+                "se perdio la conexion",
+                "desconect",
             ],
         ) {
             Self::Reset
@@ -213,6 +227,11 @@ impl ConnectionFailure {
         match command {
             "full" | "wfull" => return Some(Self::Full),
             "peer_left" | "peer-left" | "peerleft" => return Some(Self::PeerLeft),
+            "desync" | "desincronizacion" | "desincronización" | "checksum_mismatch" | "checksum-mismatch" => {
+                return Some(Self::Desync)
+            },
+            "timeout" | "timed_out" | "timed-out" | "no_response" | "no-response" | "noresp" | "no_resp"
+            | "sin_respuesta" | "sin-respuesta" => return Some(Self::Timeout),
             "rate" | "rate_limit" | "rate-limit" | "ratelimit" | "limit" | "limited" | "too_fast" | "too-fast"
             | "toomany" | "too_many" | "slow_down" | "slow-down" | "flood" | "throttle" | "busy" => {
                 return Some(Self::RateLimited)
@@ -231,11 +250,24 @@ impl ConnectionFailure {
                 "incompat",
                 "wrong build",
                 "build mismatch",
+                "version mismatch",
                 "actualiza",
             ],
         );
         if version_rejection {
             return Some(Self::Protocol);
+        }
+        if contains_any(&lower, &["peer_left", "peer-left", "peer left"]) {
+            return Some(Self::PeerLeft);
+        }
+        if contains_any(&lower, &["desync", "desincroniz"]) {
+            return Some(Self::Desync);
+        }
+        if contains_any(&lower, &["full", "lleno", "llena"]) {
+            return Some(Self::Full);
+        }
+        if contains_any(&lower, &["no responde", "sin respuesta", "did not properly respond"]) {
+            return Some(Self::Timeout);
         }
         if contains_any(
             &lower,
@@ -264,14 +296,15 @@ impl ConnectionFailure {
     /// Clear Spanish message shown in the online status and session panels.
     pub fn message(self) -> &'static str {
         match self {
-            Self::Timeout => "Se agotó el tiempo de espera al conectar con el servidor.",
+            Self::Timeout => "El servidor no responde; se agotó el tiempo de espera.",
             Self::Refused => "El servidor rechazó la conexión.",
-            Self::Reset => "El servidor reinició la conexión.",
+            Self::Reset => "Se perdió la conexión con el servidor.",
             Self::NoRoute => "No se pudo llegar al servidor: no hay ruta de red.",
             Self::Dns => "No se pudo resolver la dirección del servidor (DNS).",
             Self::Protocol => "La versión del servidor no es compatible; actualiza el juego.",
             Self::Full => "El servidor está lleno; inténtalo más tarde.",
-            Self::PeerLeft => "El rival abandonó la partida.",
+            Self::PeerLeft => "El rival se desconectó de la partida.",
+            Self::Desync => "El combate se desincronizó; la partida online se cerró.",
             Self::RateLimited => "El servidor limitó la conexión; espera un momento antes de reintentar.",
             Self::Other => "No se pudo conectar con el servidor.",
         }
@@ -336,9 +369,14 @@ mod tests {
             ("Temporary failure in name resolution", ConnectionFailure::Dns),
             ("dirección inválida (host): failed to lookup address", ConnectionFailure::Dns),
             ("An existing connection was forcibly closed by the remote host", ConnectionFailure::Reset),
+            ("se perdió la conexión con el servidor", ConnectionFailure::Reset),
             ("versión incompatible", ConnectionFailure::Protocol),
             ("el mundo esta lleno", ConnectionFailure::Full),
             ("el rival abandono la partida", ConnectionFailure::PeerLeft),
+            ("el rival se desconectó de la partida", ConnectionFailure::PeerLeft),
+            ("el servidor no responde", ConnectionFailure::Timeout),
+            ("sin respuesta del servidor", ConnectionFailure::Timeout),
+            ("el combate se desincronizó", ConnectionFailure::Desync),
             ("el servidor limitó la conexión", ConnectionFailure::RateLimited),
         ] {
             assert_eq!(ConnectionFailure::from_reason(reason), failure, "{reason}");
@@ -376,8 +414,24 @@ mod tests {
         assert_eq!(ConnectionFailure::from_server_line(b"FULL"), Some(ConnectionFailure::Full));
         assert_eq!(ConnectionFailure::from_server_line(b"WFULL"), Some(ConnectionFailure::Full));
         assert_eq!(
+            ConnectionFailure::from_server_line(b"ERROR mundo lleno"),
+            Some(ConnectionFailure::Full)
+        );
+        assert_eq!(
             ConnectionFailure::from_server_line(b"PEER_LEFT"),
             Some(ConnectionFailure::PeerLeft)
+        );
+        assert_eq!(
+            ConnectionFailure::from_server_line(b"NO_RESPONSE"),
+            Some(ConnectionFailure::Timeout)
+        );
+        assert_eq!(
+            ConnectionFailure::from_server_line(b"ERROR server no responde"),
+            Some(ConnectionFailure::Timeout)
+        );
+        assert_eq!(
+            ConnectionFailure::from_server_line(b"DESYNC"),
+            Some(ConnectionFailure::Desync)
         );
         assert_eq!(ConnectionFailure::from_server_line(b"WHAT 1"), None);
         assert_eq!(ConnectionFailure::from_server_line(b""), None);
@@ -386,14 +440,15 @@ mod tests {
     #[test]
     fn every_category_has_a_clear_spanish_message() {
         for (failure, expected) in [
-            (ConnectionFailure::Timeout, "tiempo de espera"),
+            (ConnectionFailure::Timeout, "no responde"),
             (ConnectionFailure::Refused, "rechazó"),
-            (ConnectionFailure::Reset, "reinició"),
+            (ConnectionFailure::Reset, "conexión"),
             (ConnectionFailure::NoRoute, "ruta de red"),
             (ConnectionFailure::Dns, "DNS"),
             (ConnectionFailure::Protocol, "versión"),
             (ConnectionFailure::Full, "lleno"),
-            (ConnectionFailure::PeerLeft, "rival"),
+            (ConnectionFailure::PeerLeft, "desconectó"),
+            (ConnectionFailure::Desync, "desincronizó"),
             (ConnectionFailure::RateLimited, "limitó"),
             (ConnectionFailure::Other, "No se pudo conectar"),
         ] {
