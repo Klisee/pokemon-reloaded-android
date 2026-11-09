@@ -9,11 +9,15 @@
 //! - every frame reseeds the RNG with `(epoch mod 65536) * 16384 + (frame mod 16384)`;
 //! - a checksum is exchanged every 30 frames and kept in 64-frame buffers;
 //! - `BYE <epoch> <frame>` ends the battle once the local frame passes it;
-//! - the delay adapts in the 2..=10 range from stalled-frame statistics.
+//! - the delay adapts in the 2..=10 range from stalled-frame statistics;
+//! - the next frame is not advanced until the peer input for it arrives.
 //!
 //! The type is pure state: callers own sampling, simulation and transport.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::Duration,
+};
 
 /// Number of delayed input slots addressed by `frame mod 256`.
 pub const INPUT_SLOTS: usize = 256;
@@ -32,6 +36,46 @@ pub const MIN_DELAY: i32 = 2;
 pub const MAX_DELAY: i32 = 10;
 /// Safety bound for out-of-order remote inputs.
 const MAX_REMOTE_INPUTS: usize = 1024;
+
+/// `NetFrameBegin` treats a peer fetch that took at least this long as a stall.
+pub const STALL_AFTER: Duration = Duration::from_millis(25);
+/// The GML wait loop shows its caption after 25 `net_input_get(f, 20)` attempts.
+pub const WAIT_NOTICE_AFTER: Duration = Duration::from_millis(500);
+/// The GML wait loop allows Escape after attempt 25.
+pub const WAIT_ESCAPE_AFTER: Duration = Duration::from_millis(520);
+/// `NetFrameBegin` gives up after 3000 blocking fetches of up to 20 ms.
+pub const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the waiting side should do at a given elapsed time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitAction {
+    /// Keep pumping without showing anything yet.
+    Wait,
+    /// Show the waiting caption but keep Escape disabled, like attempt 25.
+    Notice,
+    /// Caption is visible and Escape may leave the battle.
+    Escape,
+    /// `NetConnectionLost`: the fetch budget is exhausted.
+    Timeout,
+}
+
+/// `NetFrameBegin` timing thresholds, independent of the transport clock.
+pub fn wait_action(elapsed: Duration) -> WaitAction {
+    if elapsed >= WAIT_TIMEOUT {
+        WaitAction::Timeout
+    } else if elapsed >= WAIT_ESCAPE_AFTER {
+        WaitAction::Escape
+    } else if elapsed >= WAIT_NOTICE_AFTER {
+        WaitAction::Notice
+    } else {
+        WaitAction::Wait
+    }
+}
+
+/// True when a wait of `elapsed` marks the next local word with [`STALL_BIT`].
+pub fn is_stall(elapsed: Duration) -> bool {
+    elapsed >= STALL_AFTER
+}
 
 /// An input line that should be written to the peer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +237,28 @@ impl BattleSync {
     /// True when the peer input for `frame` is waiting in the queue.
     pub fn remote_pending(&self, frame: u32) -> bool {
         self.remote.contains_key(&frame)
+    }
+
+    /// The frame [`begin_frame`](Self::begin_frame) would simulate next.
+    pub fn next_frame(&self) -> u32 {
+        self.frame.wrapping_add(1)
+    }
+
+    /// True when the next frame can run: either its peer word arrived, or a
+    /// received `BYE` already ends the battle before it.
+    pub fn ready(&self) -> bool {
+        let frame = self.next_frame();
+        self.bye_frame.is_some_and(|bye| frame > bye) || self.remote_pending(frame)
+    }
+
+    /// Advance only when [`ready`](Self::ready) is true. While the peer input is
+    /// missing this leaves the frame counter, input ring and queues untouched,
+    /// so the caller can keep redrawing and retry without simulating a frame.
+    pub fn try_begin_frame(&mut self, local_sample: u32) -> Option<FrameStep> {
+        if !self.ready() {
+            return None
+        }
+        Some(self.begin_frame(local_sample))
     }
 
     /// Advance to the next frame and plan its inputs.
@@ -539,6 +605,65 @@ mod tests {
             step = sync.begin_frame(0);
         }
         assert_eq!(sync.delay(), 4);
+    }
+
+    #[test]
+    fn try_begin_frame_waits_without_advancing_or_scheduling() {
+        let mut sync = BattleSync::new(11, 3);
+        assert_eq!(sync.next_frame(), 1);
+        assert!(!sync.ready());
+        assert_eq!(sync.try_begin_frame(0x07), None);
+        assert_eq!(sync.frame(), 0);
+        assert_eq!(sync.next_frame(), 1);
+        assert!(!sync.remote_pending(1));
+
+        sync.push_remote(1, 0x05);
+        assert!(sync.ready());
+        let step = sync.try_begin_frame(0x07).expect("frame 1 is ready");
+        assert_eq!(step.frame, 1);
+        assert!(step.remote_ready);
+        assert_eq!(step.remote_mask, 0x05);
+        assert_eq!(step.local_mask, 0);
+        assert_eq!(step.outgoing, Some(OutgoingInput { frame: 4, mask: 0x07 }));
+        assert_eq!(sync.frame(), 1);
+        assert!(!sync.ready());
+        assert_eq!(sync.try_begin_frame(0), None);
+        assert_eq!(sync.frame(), 1);
+    }
+
+    #[test]
+    fn a_received_bye_lets_the_gate_open_without_an_input_word() {
+        let mut sync = BattleSync::new(4, 2);
+        sync.receive_bye_frame(1);
+        assert!(!sync.ready());
+        sync.push_remote(1, 0);
+        let step = sync.try_begin_frame(0).expect("bye still allows its own frame");
+        assert!(!step.leave);
+        assert_eq!(sync.frame(), 1);
+        assert!(sync.ready());
+        assert!(sync.try_begin_frame(0).expect("bye ends frame 2").leave);
+        assert_eq!(sync.frame(), 2);
+    }
+
+    #[test]
+    fn wait_timing_matches_net_frame_begin_thresholds() {
+        assert_eq!(wait_action(Duration::ZERO), WaitAction::Wait);
+        assert_eq!(wait_action(STALL_AFTER), WaitAction::Wait);
+        assert_eq!(wait_action(WAIT_NOTICE_AFTER - Duration::from_millis(1)), WaitAction::Wait);
+        assert_eq!(wait_action(WAIT_NOTICE_AFTER), WaitAction::Notice);
+        assert_eq!(wait_action(WAIT_ESCAPE_AFTER - Duration::from_millis(1)), WaitAction::Notice);
+        assert_eq!(wait_action(WAIT_ESCAPE_AFTER), WaitAction::Escape);
+        assert_eq!(wait_action(WAIT_TIMEOUT - Duration::from_millis(1)), WaitAction::Escape);
+        assert_eq!(wait_action(WAIT_TIMEOUT), WaitAction::Timeout);
+        assert_eq!(wait_action(Duration::from_secs(120)), WaitAction::Timeout);
+    }
+
+    #[test]
+    fn stall_only_starts_at_twenty_five_milliseconds() {
+        assert!(!is_stall(Duration::ZERO));
+        assert!(!is_stall(STALL_AFTER - Duration::from_millis(1)));
+        assert!(is_stall(STALL_AFTER));
+        assert!(is_stall(STALL_AFTER + Duration::from_millis(1)));
     }
 
     #[test]
