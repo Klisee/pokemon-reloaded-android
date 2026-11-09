@@ -450,6 +450,55 @@ impl crate::reloaded_online::BattleConfigSink for GameBattleConfigSink<'_> {
     }
 }
 
+/// Duration of one canonical game step for a room speed.
+fn step_duration(speed: u32) -> Duration {
+    Duration::from_nanos(1_000_000_000 / speed.max(1) as u64)
+}
+
+/// Result of feeding elapsed wall time to the fixed-step accumulator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StepAdvance {
+    /// A canonical game step is due on this iteration.
+    due: bool,
+    /// Backlog that was dropped because the loop had been paused.
+    discarded: Option<Duration>,
+}
+
+/// Accumulate elapsed time and report whether exactly one game step is due.
+///
+/// At most one step is returned per call: a long pause resumes with one step instead
+/// of replaying the missed frames as a burst. Because the accumulator keeps the
+/// remainder, a render rate that is a multiple of the step rate still produces exactly
+/// one step per logical frame.
+fn advance_step(accumulator: &mut Duration, elapsed: Duration, duration: Duration) -> StepAdvance {
+    *accumulator += elapsed;
+    let mut discarded = None;
+    if *accumulator > duration * 3 {
+        discarded = Some(*accumulator);
+        *accumulator = duration;
+    }
+    let due = *accumulator >= duration;
+    if due {
+        *accumulator -= duration;
+    }
+    StepAdvance { due, discarded }
+}
+
+/// Render pace for one loop iteration.
+///
+/// Zibelan online battles render at most at 60 FPS so interpolation frames cannot make
+/// the battle look faster than the GML step. The battle pace is never allowed below the
+/// room's logical step rate: if a 60 FPS wrapper raises `room_speed` to 60, capping the
+/// render at 30 would starve the accumulator and run the battle at half speed. Outside
+/// a battle the configured pace is returned unchanged.
+fn battle_render_fps(base: Option<u32>, online_battle: bool, step_fps: u32) -> Option<u32> {
+    if online_battle {
+        Some(base.map_or(60, |fps| fps.min(60)).max(step_fps.max(1)))
+    } else {
+        base
+    }
+}
+
 impl Game {
     pub fn launch(
         assets: gm8exe::GameAssets,
@@ -6193,12 +6242,13 @@ impl Game {
         loop {
             // Online battles render at most at 60 FPS, but never above the
             // configured base rate: 30 stays 30, 60 stays 60, 120/uncapped
-            // becomes 60. The world outside the battle is untouched.
-            let paced_fps = if self.battle_sync_active && self.reloaded_online.is_zibelan() {
-                base_paced_fps.map(|fps| fps.min(60)).or(Some(60))
-            } else {
-                base_paced_fps
-            };
+            // becomes 60. Pacing never drops below the room step rate, so a 60 Hz
+            // battle still advances 60 steps per second. Outside battle nothing changes.
+            let paced_fps = battle_render_fps(
+                base_paced_fps,
+                self.battle_sync_active && self.reloaded_online.is_zibelan(),
+                self.room.speed,
+            );
             #[cfg(target_os = "android")]
             if crate::android_main::worker_stop_requested() {
                 self.close_requested = true;
@@ -6249,21 +6299,20 @@ impl Game {
                     std::thread::sleep(Duration::from_millis(16));
                     continue
                 }
-                accumulator += now.duration_since(step_clock);
+                let duration = step_duration(self.room.speed);
+                let advance = advance_step(&mut accumulator, now.duration_since(step_clock), duration);
                 step_clock = now;
-                let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
 
                 // Transitions, a GML `sleep` and a very heavy battle frame can pause the loop. Do
                 // not replay that missing time as a burst of steps: the original runner simply
                 // resumes. Small overshoots are kept so the 30 Hz average stays correct.
-                if accumulator > duration * 3 {
+                if let Some(backlog) = advance.discarded {
                     if log_render {
-                        eprintln!("[render] pausa de {:?}; se descarta el atraso", accumulator);
+                        eprintln!("[render] pausa de {:?}; se descarta el atraso", backlog);
                     }
-                    accumulator = duration;
                 }
 
-                if accumulator >= duration {
+                if advance.due {
                     // This is the canonical frame of the step: draw events run once and are allowed
                     // to change the game. It is presented at the previous position so the next
                     // frames can move smoothly towards the state just computed.
@@ -6279,7 +6328,6 @@ impl Game {
                         return Err(e.into())
                     }
 
-                    accumulator -= duration;
                     self.capture_recording_frame(&mut current_frame_time, self.room.speed);
                     if let Some(SceneChange::End) = self.scene_change {
                         println!("game ending");
@@ -6384,7 +6432,7 @@ impl Game {
 
                 // frame limiter
                 let diff = Instant::now().duration_since(time_now);
-                let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
+                let duration = step_duration(self.room.speed);
                 if let GameClock::SpoofedNanos(t) = &mut self.clock {
                     *t += duration.as_nanos();
                     self.fps = self.room.speed.into();
@@ -6650,7 +6698,7 @@ impl Game {
 
             // frame limiter
             let diff = Instant::now().duration_since(time_now);
-            let duration = Duration::from_nanos(1_000_000_000 / self.room.speed as u64);
+            let duration = step_duration(self.room.speed);
             if let GameClock::SpoofedNanos(t) = &mut self.clock {
                 *t += duration.as_nanos();
             }
@@ -7437,5 +7485,118 @@ impl<T> GetAsset<T> for Vec<Option<T>> {
 
     fn get_asset_mut(&mut self, index: ID) -> Option<&mut T> {
         self.get_mut(usize::try_from(index).ok()?)?.as_mut()
+    }
+}
+
+#[cfg(test)]
+mod battle_timing_tests {
+    use super::*;
+
+    fn render_duration(fps: u32) -> Duration {
+        Duration::from_nanos(1_000_000_000 / fps.max(1) as u64)
+    }
+
+    #[test]
+    fn online_battle_cap_keeps_the_configured_rate_up_to_sixty() {
+        assert_eq!(battle_render_fps(Some(30), true, 30), Some(30));
+        assert_eq!(battle_render_fps(Some(60), true, 30), Some(60));
+        assert_eq!(battle_render_fps(Some(120), true, 30), Some(60));
+        assert_eq!(battle_render_fps(None, true, 30), Some(60));
+
+        assert_eq!(battle_render_fps(Some(30), false, 30), Some(30));
+        assert_eq!(battle_render_fps(Some(120), false, 30), Some(120));
+        assert_eq!(battle_render_fps(None, false, 30), None);
+    }
+
+    #[test]
+    fn battle_cap_never_paces_below_the_room_step_rate() {
+        assert_eq!(battle_render_fps(Some(30), true, 60), Some(60));
+        assert_eq!(battle_render_fps(Some(120), true, 60), Some(60));
+        assert_eq!(battle_render_fps(None, true, 60), Some(60));
+        assert_eq!(battle_render_fps(Some(30), false, 60), Some(30));
+    }
+
+    #[test]
+    fn step_accumulator_yields_exactly_one_step_per_elapsed_frame() {
+        for (step_fps, render_fps) in
+            [(30, 30), (30, 60), (30, 120), (60, 60), (60, 120), (25, 100), (50, 100)]
+        {
+            let duration = step_duration(step_fps);
+            let render = render_duration(render_fps);
+            let mut accumulator = Duration::ZERO;
+            let mut elapsed = Duration::ZERO;
+            let mut steps = 0usize;
+            for _ in 0..(render_fps as usize * 10) {
+                elapsed += render;
+                let advance = advance_step(&mut accumulator, render, duration);
+                if advance.due {
+                    steps += 1;
+                    assert!(advance.discarded.is_none());
+                }
+            }
+
+            // The accumulator may lose at most the nanosecond truncation of one rendered
+            // frame per simulated step, so compare against the elapsed time itself.
+            let expected = (elapsed.as_nanos() / duration.as_nanos()) as usize;
+            assert_eq!(steps, expected, "{step_fps} Hz step at {render_fps} Hz render");
+            let nominal = step_fps as usize * 10;
+            assert!(steps.abs_diff(nominal) <= 1, "steps {steps}, nominal {nominal}");
+        }
+    }
+
+    #[test]
+    fn long_pauses_step_once_and_discard_the_backlog() {
+        let duration = step_duration(30);
+        let mut accumulator = Duration::ZERO;
+        let advance = advance_step(&mut accumulator, duration * 10, duration);
+        assert!(advance.due);
+        assert!(advance.discarded.is_some());
+        assert_eq!(accumulator, Duration::ZERO);
+
+        let next = advance_step(&mut accumulator, Duration::from_millis(1), duration);
+        assert!(!next.due);
+        assert!(next.discarded.is_none());
+    }
+
+    #[test]
+    fn a_zero_room_speed_still_uses_a_safe_step_duration() {
+        assert_eq!(step_duration(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn battle_sync_advances_once_per_step_at_thirty_and_sixty_hertz() {
+        for step_fps in [30u32, 60] {
+            let duration = step_duration(step_fps);
+            let mut accumulator = Duration::ZERO;
+            let mut elapsed = Duration::ZERO;
+            let mut sync = BattleSync::new(7, 2);
+            let mut frame_thirty_at = None;
+
+            for _ in 0..(step_fps as usize * 2) {
+                elapsed += duration;
+                let advance = advance_step(&mut accumulator, duration, duration);
+                if !advance.due {
+                    continue
+                }
+                let step = sync.begin_frame(0);
+                assert_eq!(step.frame, sync.frame());
+                assert_eq!(step.checksum_due, step.frame % 30 == 0);
+                if step.frame == 30 {
+                    frame_thirty_at = Some(elapsed);
+                }
+            }
+
+            assert_eq!(sync.frame(), step_fps * 2);
+            let measured = frame_thirty_at.expect("frame 30 was stepped");
+            let expected = if step_fps == 30 {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_millis(500)
+            };
+            assert!(
+                measured.abs_diff(expected) <= Duration::from_millis(1),
+                "{step_fps} Hz frame 30 took {measured:?}"
+            );
+        }
     }
 }

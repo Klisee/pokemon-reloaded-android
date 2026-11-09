@@ -8,6 +8,9 @@
 //! - local input sampled on frame `f` is applied on frame `f + delay`;
 //! - every frame reseeds the RNG with `(epoch mod 65536) * 16384 + (frame mod 16384)`;
 //! - a checksum is exchanged every 30 frames and kept in 64-frame buffers;
+//! - the state machine advances once per canonical room step (`room_speed`), never per
+//!   rendered frame: 30 frames are 1 s at 30 Hz and 0.5 s at 60 Hz, exactly like the GML
+//!   `f mod 30` test;
 //! - `BYE <epoch> <frame>` ends the battle once the local frame passes it;
 //! - the delay adapts in the 2..=10 range from stalled-frame statistics;
 //! - the next frame is not advanced until the peer input for it arrives.
