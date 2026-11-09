@@ -3446,13 +3446,17 @@ impl Game {
             .next(&self.room.instance_list)
     }
 
-    fn find_object_instance_by_name(&self, name: &[u8]) -> Option<usize> {
-        let object = self
-            .assets
+    fn object_index_by_name(&self, name: &[u8]) -> Option<i32> {
+        self.assets
             .objects
             .iter()
-            .position(|object| object.as_ref().is_some_and(|object| object.name.as_ref() == name))?;
-        self.find_object_instance(object as i32)
+            .position(|object| object.as_ref().is_some_and(|object| object.name.as_ref() == name))
+            .map(|object| object as i32)
+    }
+
+    fn find_object_instance_by_name(&self, name: &[u8]) -> Option<usize> {
+        let object = self.object_index_by_name(name)?;
+        self.find_object_instance(object)
     }
 
     fn set_instance_value(&mut self, handle: usize, name: &[u8], value: gml::Value) {
@@ -4450,19 +4454,25 @@ impl Game {
 
     /// Values read by the GML `NetStateText` companion function.
     fn net_state(&self) -> reloaded_cleanroom::z063_sec::NetState {
-        use reloaded_cleanroom::z063_sec::NET_STATE_PARTY_SLOTS;
+        use reloaded_cleanroom::z063_sec::{net_object_tally, NET_STATE_PARTY_SLOTS};
 
-        let mut object_count = 0i64;
-        let mut object_sum = 0i64;
+        // `with (all) { if (!persistent) { NET_TMP += object_index; NET_TMP2 += 1 } }`
         let mut iter = self.room.instance_list.iter_by_drawing();
-        while let Some(handle) = iter.next(&self.room.instance_list) {
+        let (object_count, object_sum) = net_object_tally(std::iter::from_fn(|| {
+            let handle = iter.next(&self.room.instance_list)?;
             let instance = self.room.instance_list.get(handle);
-            if !instance.persistent.get() {
-                object_count += 1;
-                object_sum += i64::from(instance.object_index.get());
-            }
-        }
+            Some((instance.object_index.get(), instance.persistent.get()))
+        }));
 
+        // `Pokemon1.x`/`Pokemon2.x` are asset names in the GML, not fixed
+        // indices. Resolve the names in the loaded game data and keep the known
+        // index as a fallback for asset packs that omit the name table.
+        let pokemon1_object = self
+            .object_index_by_name(f3r::object::POKEMON_PLAYER_NAME)
+            .unwrap_or(f3r::object::POKEMON_PLAYER);
+        let pokemon2_object = self
+            .object_index_by_name(f3r::object::POKEMON_ENEMY_NAME)
+            .unwrap_or(f3r::object::POKEMON_ENEMY);
         let position = |object: i32| {
             let handle = self.room.instance_list.iter_by_identity(object).next(&self.room.instance_list)?;
             let instance = self.room.instance_list.get(handle);
@@ -4484,8 +4494,8 @@ impl Game {
         reloaded_cleanroom::z063_sec::NetState {
             object_count,
             object_sum,
-            pokemon1: position(f3r::object::POKEMON_PLAYER),
-            pokemon2: position(f3r::object::POKEMON_ENEMY),
+            pokemon1: position(pokemon1_object),
+            pokemon2: position(pokemon2_object),
             actual1: self.global_real(f3r::global::ACTUAL1, 0),
             actual2: self.global_real(f3r::global::ACTUAL2, 0),
             ps1,

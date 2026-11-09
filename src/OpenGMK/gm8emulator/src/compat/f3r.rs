@@ -233,6 +233,9 @@ pub mod object {
     pub const POKEMON_PLAYER: i32 = 0;
     pub const CONTROL: i32 = 3;
     pub const POKEMON_ENEMY: i32 = 4;
+    /// Native object names used by GML `NetStateText` (`Pokemon1`/`Pokemon2`).
+    pub const POKEMON_PLAYER_NAME: &[u8] = b"Pokemon1";
+    pub const POKEMON_ENEMY_NAME: &[u8] = b"Pokemon2";
     pub const TRAINER_PLAYER: i32 = 7;
     pub const TRAINER_ENEMY: i32 = 9;
     pub const PLAYER: i32 = 14;
