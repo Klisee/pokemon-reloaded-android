@@ -258,6 +258,9 @@ pub struct ReloadedOnline {
     pending_request: Option<(u64, String)>,
     battle_active: bool,
     battle_failure: Option<String>,
+    battle_sim_frame: u32,
+    battle_checksums: VecDeque<(u32, u32)>,
+    battle_bye_frame: Option<u32>,
     last_world_room: Option<i32>,
     last_world_key: Option<String>,
     pending_checksums: HashMap<(i32, i32), u32>,
@@ -313,6 +316,9 @@ impl Default for ReloadedOnline {
             pending_request: None,
             battle_active: false,
             battle_failure: None,
+            battle_sim_frame: 0,
+            battle_checksums: VecDeque::new(),
+            battle_bye_frame: None,
             last_world_room: None,
             last_world_key: None,
             pending_checksums: HashMap::new(),
@@ -452,17 +458,75 @@ impl ReloadedOnline {
     }
 
     pub fn begin_battle(&mut self) {
+        self.begin_battle_with_delay(0);
+    }
+
+    /// Start a Zibelan battle and pre-fill `1..=delay` with empty inputs, matching
+    /// `NetBattleBegin`. The JSON backend keeps its original per-input checksum flow.
+    pub fn begin_battle_with_delay(&mut self, delay: i32) {
         self.battle_active = true;
         self.battle_failure = None;
+        self.battle_sim_frame = 0;
+        self.battle_checksums.clear();
+        self.battle_bye_frame = None;
+        self.battle_teams.clear();
+        self.battle_inputs.clear();
+        self.pending_checksums.clear();
+        if self.is_zibelan() {
+            self.send_battle_initial_inputs(delay);
+        }
+    }
+
+    fn send_battle_initial_inputs(&mut self, delay: i32) {
+        let Some(Connection::Ready(Backend::Zibelan(client))) = &self.connection else { return };
+        let epoch = self.battle_epoch;
+        for frame in 1..=delay.max(0) as u32 {
+            let _ = client.input_send(epoch, frame, 0);
+        }
     }
 
     pub fn end_battle(&mut self) {
+        if self.battle_active {
+            self.send_battle_bye(self.battle_sim_frame);
+        }
         self.battle_active = false;
         self.battle_peer = None;
         self.pending_request = None;
         self.battle_teams.clear();
         self.battle_inputs.clear();
+        self.battle_checksums.clear();
+        self.battle_bye_frame = None;
+        self.battle_sim_frame = 0;
         self.pending_checksums.clear();
+    }
+
+    fn send_battle_bye(&self, frame: u32) {
+        let Some(Connection::Ready(Backend::Zibelan(client))) = &self.connection else { return };
+        let payload = format!("BYE\x1f{} {frame}", self.battle_epoch);
+        let _ = client.send_message_bytes(payload.as_bytes());
+    }
+
+    pub fn take_battle_checksum(&mut self) -> Option<(u32, u32)> {
+        self.battle_checksums.pop_front()
+    }
+
+    pub fn take_battle_bye(&mut self) -> Option<u32> {
+        self.battle_bye_frame.take()
+    }
+
+    fn queue_battle_checksum(&mut self, frame: u32, checksum: u32) {
+        if self.battle_checksums.len() >= 64 {
+            self.battle_checksums.pop_front();
+        }
+        self.battle_checksums.push_back((frame, checksum));
+    }
+
+    pub fn set_battle_frame(&mut self, frame: u32) {
+        self.battle_sim_frame = frame;
+    }
+
+    pub fn battle_epoch(&self) -> i32 {
+        self.battle_epoch
     }
 
     fn fail_battle(&mut self, reason: impl Into<String>) {
@@ -480,6 +544,9 @@ impl ReloadedOnline {
         if self.battle_active {
             self.battle_failure = Some("sesion online detenida".into());
         }
+        // Send the battle BYE while the socket is still available; `disconnect`
+        // then sends the plain session BYE.
+        self.end_battle();
         if let Some(connection) = self.connection.take() {
             if let Connection::Ready(Backend::Zibelan(client)) = connection {
                 let _ = client.end_world();
@@ -698,12 +765,34 @@ impl ReloadedOnline {
                 }
             },
             Some(Connection::Ready(Backend::Zibelan(client))) => {
-                let epoch = self.battle_epoch;
-                let result = client.input_send(epoch, frame, mask);
-                if result.is_ok() && frame % 30 == 0 {
-                    let _ = client.checksum_send(epoch, frame, checksum);
-                }
-                result
+                // `NetFrameBegin` sends every scheduled frame as `IN <epoch> <frame> <mask>`.
+                // Checksums travel separately, every 30 frames.
+                client.input_send(self.battle_epoch, frame, mask)
+            },
+            _ => return false,
+        };
+        match result {
+            Ok(()) => {
+                self.battle_peer = Some(target);
+                true
+            },
+            Err(error) => {
+                self.status = error;
+                false
+            },
+        }
+    }
+
+    /// Send the 30-frame checksum as the GML `NetChecksumSend` payload
+    /// (`SUM\x1f<frame>\x1e<checksum>`). The JSON backend already carries it in
+    /// `BattleInput`, so this is a no-op there. Incoming top-level `SUM` lines remain
+    /// accepted for older Zibelan peers.
+    pub fn send_battle_checksum(&mut self, target: u64, frame: u32, checksum: u32) -> bool {
+        let result = match &self.connection {
+            Some(Connection::Ready(Backend::Json(_))) => return true,
+            Some(Connection::Ready(Backend::Zibelan(client))) => {
+                let payload = crate::battle_sync::BattleSync::checksum_payload(frame, checksum);
+                client.send_message_bytes(payload.as_bytes())
             },
             _ => return false,
         };
@@ -1593,6 +1682,9 @@ impl ReloadedOnline {
             },
             RozEvent::Checksum { epoch, frame, checksum } => {
                 let id = self.battle_peer.unwrap_or(0);
+                if epoch == self.battle_epoch && self.battle_active {
+                    self.queue_battle_checksum(frame as u32, checksum as u32);
+                }
                 if let Some(input) = self
                     .battle_inputs
                     .iter_mut()
@@ -1689,6 +1781,25 @@ impl ReloadedOnline {
     }
 
     fn handle_roz_message(&mut self, bytes: &[u8]) {
+        // `NetChecksumSend` and `NetBattleEnd` use `net_send`, so checksums and BYEs
+        // arrive as message payloads: `SUM\x1f<frame>\x1e<checksum>` and
+        // `BYE\x1f<epoch> <frame>`.
+        if let Some(rest) = bytes.strip_prefix(b"SUM\x1f") {
+            if let Some((frame, checksum)) = parse_battle_sum(rest) {
+                if self.battle_active {
+                    self.queue_battle_checksum(frame, checksum);
+                }
+            }
+            return;
+        }
+        if let Some(rest) = bytes.strip_prefix(b"BYE\x1f") {
+            if let Some((epoch, frame)) = parse_battle_bye(rest) {
+                if self.battle_active && epoch == self.battle_epoch {
+                    self.battle_bye_frame = Some(frame);
+                }
+            }
+            return;
+        }
         // Keep the `.TEAM` bytes intact: they are ANSI text and may contain non-UTF-8 names.
         if let Some(rest) = bytes.strip_prefix(b"TEAM\x1f") {
             match parse_zibelan_team(rest) {
@@ -2350,6 +2461,18 @@ fn parse_zibelan_team(mut rest: &[u8]) -> Option<(BattleTeamMeta, Vec<u8>)> {
         },
         rest.to_vec(),
     ))
+}
+
+fn parse_battle_sum(rest: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(rest).ok()?;
+    let (frame, checksum) = text.split_once('\x1e').or_else(|| text.split_once(' '))?;
+    Some((frame.trim().parse().ok()?, checksum.trim().parse().ok()?))
+}
+
+fn parse_battle_bye(rest: &[u8]) -> Option<(i32, u32)> {
+    let text = std::str::from_utf8(rest).ok()?;
+    let mut fields = text.split_whitespace();
+    Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -3662,7 +3785,72 @@ mod tests {
         assert_eq!(next_client_line(&transport), "IN 7 29 5");
         assert!(online.send_battle_input(42, 5, 10, 30, 0xbbbb));
         assert_eq!(next_client_line(&transport), "IN 7 30 5");
-        assert_eq!(next_client_line(&transport), "SUM 7 30 48059");
+        assert!(online.send_battle_checksum(42, 30, 0xbbbb));
+        assert_eq!(next_client_message(&transport), b"SUM\x1f30\x1e48059".to_vec());
+    }
+
+    #[test]
+    fn mock_transport_battle_initial_inputs_and_30_frame_checksums() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        online.set_battle_epoch(7);
+        online.begin_battle_with_delay(3);
+        for frame in 1..=3 {
+            assert_eq!(next_client_line(&transport), format!("IN 7 {frame} 0"));
+        }
+
+        online.set_battle_frame(30);
+        assert!(online.send_battle_checksum(42, 30, 1234));
+        assert_eq!(next_client_message(&transport), b"SUM\x1f30\x1e1234".to_vec());
+    }
+
+    #[test]
+    fn mock_transport_battle_sum_and_bye_messages_are_epoch_scoped() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        online.set_battle_epoch(7);
+        online.begin_battle();
+
+        let sum = b"SUM\x1f30\x1e111";
+        let bye = b"BYE\x1f7 77";
+        let wrong_epoch = b"BYE\x1f8 99";
+        transport.send(
+            format!(
+                "MSG {}\nMSG {}\nMSG {}\n",
+                hex::encode(sum),
+                hex::encode(bye),
+                hex::encode(wrong_epoch)
+            )
+            .as_bytes(),
+        );
+        pump_world(&mut online, |online| {
+            !online.battle_checksums.is_empty() && online.battle_bye_frame.is_some()
+        });
+
+        assert_eq!(online.take_battle_checksum(), Some((30, 111)));
+        assert_eq!(online.take_battle_bye(), Some(77));
+        assert_eq!(online.take_battle_bye(), None);
+    }
+
+    #[test]
+    fn ending_a_zibelan_battle_sends_bye_with_epoch_and_frame() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        online.set_battle_epoch(7);
+        online.begin_battle();
+        online.set_battle_frame(12);
+        online.end_battle();
+        assert_eq!(next_client_message(&transport), b"BYE\x1f7 12".to_vec());
+    }
+
+    #[test]
+    fn stopping_sends_the_battle_bye_before_disconnecting() {
+        let (mut online, mut transport) = mock_duplex_transport();
+        online.set_battle_epoch(7);
+        online.begin_battle();
+        online.set_battle_frame(4);
+        online.stop();
+
+        assert_eq!(next_client_message(&transport), b"BYE\x1f7 4".to_vec());
+        assert_eq!(next_client_line(&transport), "WEND");
+        assert_eq!(next_client_line(&transport), "BYE");
     }
 
     #[test]

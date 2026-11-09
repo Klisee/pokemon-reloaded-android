@@ -36,6 +36,7 @@ pub use view::View;
 
 use crate::{
     action::Tree,
+    battle_sync::BattleSync,
     compat::f3r,
     asset::{
         self,
@@ -232,6 +233,8 @@ pub struct Game {
     pub battle_local_checksum: u32,
     pub battle_desync: bool,
     pub battle_room: Option<i32>,
+    pub battle_sync: Option<BattleSync>,
+    pub battle_key_restore: Vec<(u8, bool)>,
     pub battle_snapshot: Option<online_snapshot::OnlineSnapshot>,
     pub uninit_fields_are_zero: bool,
     pub uninit_args_are_zero: bool,
@@ -1487,6 +1490,8 @@ impl Game {
             battle_local_checksum: 0,
             battle_desync: false,
             battle_room: None,
+            battle_sync: None,
+            battle_key_restore: Vec::new(),
             battle_snapshot: None,
             last_instance_id,
             last_tile_id,
@@ -2800,9 +2805,7 @@ impl Game {
 
         self.reloaded_online.tick(&self.room, &self.assets);
 
-        if self.battle_sync_active {
-            self.battle_frame = self.battle_frame.wrapping_add(1);
-        }
+        self.battle_sync_end_frame();
 
         // Clear inputs for this frame
         self.input.step();
@@ -3716,7 +3719,9 @@ impl Game {
         };
         let modo = self.global_number(f3r::global::MODE_BATTLE_BACK, 0).unwrap_or(0);
         let sala = if host { self.room.id } else { 0 };
-        let delay = self.global_number(f3r::global::NET_DELAY, 0).unwrap_or(2).clamp(2, 12);
+        let delay = crate::battle_sync::initial_delay(
+            self.global_number(f3r::global::NET_DELAY, 0).unwrap_or(2),
+        );
         crate::reloaded_online::BattleTeamMeta { seed, fondo, modo, sala, delay }
     }
 
@@ -3912,6 +3917,7 @@ impl Game {
             return
         };
 
+        self.reloaded_online.set_battle_frame(self.battle_frame);
         match snapshot.restore(self) {
             Ok(()) => eprintln!("[online] batalla cerrada ({reason}); estado restaurado"),
             Err(error) => eprintln!("[online] no se pudo restaurar el estado ({reason}): {error}"),
@@ -3944,6 +3950,8 @@ impl Game {
         self.battle_local_checksum = 0;
         self.battle_desync = false;
         self.battle_room = None;
+        self.battle_sync = None;
+        self.battle_key_restore.clear();
         self.reloaded_online.end_battle();
     }
 
@@ -4089,8 +4097,20 @@ impl Game {
         } else {
             local_meta.seed
         };
-        self.rand.set_seed(seed.max(1));
+        let epoch = seed.max(1);
+        let delay = crate::battle_sync::initial_delay(if host {
+            local_meta.delay
+        } else {
+            remote.meta.delay
+        });
+        self.rand.set_seed(epoch);
         self.reloaded_online.set_battle_epoch(seed);
+        self.reloaded_online.begin_battle_with_delay(delay);
+        self.battle_sync = if self.reloaded_online.is_zibelan() {
+            Some(BattleSync::new(epoch, delay))
+        } else {
+            None
+        };
         let fondo = if host {
             local_meta.fondo
         } else if remote.meta.fondo != 0 {
@@ -4251,6 +4271,9 @@ impl Game {
             }
             return true
         }
+        if self.reloaded_online.is_zibelan() {
+            return self.battle_sync_tick_zibelan()
+        }
         while let Some(input) = self.reloaded_online.take_battle_input() {
             if Some(input.id) != self.battle_opponent {
                 continue;
@@ -4322,6 +4345,195 @@ impl Game {
             );
         }
         true
+    }
+
+    fn battle_sync_tick_zibelan(&mut self) -> bool {
+        if self.battle_sync.is_none() {
+            let epoch = self.reloaded_online.battle_epoch();
+            let delay = crate::battle_sync::initial_delay(
+                self.global_number(f3r::global::NET_DELAY, 0).unwrap_or(2),
+            );
+            self.reloaded_online.begin_battle_with_delay(delay);
+            self.battle_sync = Some(BattleSync::new(epoch, delay));
+        }
+
+        while let Some(input) = self.reloaded_online.take_battle_input() {
+            if Some(input.id) != self.battle_opponent {
+                continue;
+            }
+            let epoch_matches = self
+                .battle_sync
+                .as_ref()
+                .is_some_and(|sync| input.seq as i32 == sync.epoch());
+            if !epoch_matches {
+                continue;
+            }
+            if let Some(sync) = self.battle_sync.as_mut() {
+                sync.push_remote(input.frame, input.mask);
+            }
+            self.battle_remote_frame = input.frame;
+            self.battle_remote_checksum = input.checksum;
+            self.battle_remote_mask = input.mask;
+        }
+
+        let mut checksum_desync = false;
+        while let Some((frame, checksum)) = self.reloaded_online.take_battle_checksum() {
+            self.battle_remote_frame = frame;
+            self.battle_remote_checksum = checksum;
+            if let Some(sync) = self.battle_sync.as_mut() {
+                checksum_desync |= sync.receive_checksum(frame, checksum);
+            }
+        }
+        if checksum_desync && !self.battle_desync {
+            eprintln!("[battle] desincronizacion por checksum remoto");
+        }
+        self.battle_desync |= checksum_desync;
+
+        if let Some(frame) = self.reloaded_online.take_battle_bye() {
+            if let Some(sync) = self.battle_sync.as_mut() {
+                sync.receive_bye_frame(frame);
+            }
+        }
+
+        let p1_keys = [
+            (input::Button::UpArrow as u8, 1u32 << 0),
+            (input::Button::DownArrow as u8, 1u32 << 1),
+            (input::Button::LeftArrow as u8, 1u32 << 2),
+            (input::Button::RightArrow as u8, 1u32 << 3),
+            (input::Button::Z as u8, 1u32 << 4),
+            (input::Button::X as u8, 1u32 << 5),
+            (input::Button::C as u8, 1u32 << 6),
+            (input::Button::V as u8, 1u32 << 7),
+            (input::Button::S as u8, 1u32 << 8),
+            (input::Button::A as u8, 1u32 << 9),
+            (input::Button::M as u8, 1u32 << 10),
+        ];
+        let p2_keys = [
+            (input::Button::U as u8, 1u32 << 0),
+            (input::Button::J as u8, 1u32 << 1),
+            (input::Button::H as u8, 1u32 << 2),
+            (input::Button::K as u8, 1u32 << 3),
+            (input::Button::Q as u8, 1u32 << 4),
+            (input::Button::W as u8, 1u32 << 5),
+            (input::Button::E as u8, 1u32 << 6),
+            (input::Button::R as u8, 1u32 << 7),
+            (input::Button::Y as u8, 1u32 << 8),
+            (input::Button::I as u8, 1u32 << 9),
+            (input::Button::O as u8, 1u32 << 10),
+        ];
+        let (local_keys, remote_keys) = if self.battle_local_p1 {
+            (&p1_keys, &p2_keys)
+        } else {
+            (&p2_keys, &p1_keys)
+        };
+
+        let mut local_sample = 0u32;
+        for (key, bit) in local_keys {
+            if self.input.keyboard_check(*key) {
+                local_sample |= *bit;
+            }
+        }
+
+        let step = match self.battle_sync.as_mut() {
+            Some(sync) => sync.begin_frame(local_sample),
+            None => return true,
+        };
+        if step.leave {
+            if self.battle_snapshot.is_some() {
+                self.finish_online_battle_guard("Tu rival ha abandonado el combate.");
+            } else {
+                self.restore_local_battle_team();
+                self.clear_online_battle_state();
+            }
+            return true
+        }
+
+        // `NetFrameBegin` marks the next input as stalled when it had to wait for
+        // the peer. This emulator never blocks the UI thread, so a missing frame is
+        // the equivalent signal.
+        if !step.remote_ready {
+            if let Some(sync) = self.battle_sync.as_mut() {
+                sync.mark_stall();
+            }
+        }
+
+        if let Some(outgoing) = step.outgoing {
+            self.battle_input_seq = self.battle_input_seq.wrapping_add(1);
+            if let Some(target) = self.battle_opponent {
+                self.reloaded_online.send_battle_input(
+                    target,
+                    outgoing.mask,
+                    self.battle_input_seq,
+                    outgoing.frame,
+                    0,
+                );
+            }
+        }
+        for extra in &step.extra_inputs {
+            if let Some(target) = self.battle_opponent {
+                self.reloaded_online.send_battle_input(target, extra.mask, extra.frame, extra.frame, 0);
+            }
+        }
+
+        // Keep the physical key state to put it back after the battle step; the
+        // synthetic state below only drives the simulated frame.
+        self.battle_key_restore = local_keys
+            .iter()
+            .map(|(key, _)| (*key, self.input.keyboard_check(*key)))
+            .collect();
+        for (key, bit) in local_keys {
+            self.input.set_key_state(*key, step.local_mask & *bit != 0);
+        }
+        for (key, bit) in remote_keys {
+            self.input.set_key_state(*key, step.remote_mask & *bit != 0);
+        }
+
+        self.rand.set_seed(step.seed);
+        self.battle_frame = step.frame;
+        self.reloaded_online.set_battle_frame(step.frame);
+        if step.remote_ready {
+            self.battle_remote_mask = step.remote_mask & crate::battle_sync::INPUT_MASK;
+        }
+        self.battle_local_checksum = 0;
+        true
+    }
+
+    /// Runs after the battle step: sends the 30-frame checksum and restores the
+    /// physical keys that were overridden with the delayed lockstep input.
+    fn battle_sync_end_frame(&mut self) {
+        if !self.battle_sync_active {
+            return
+        }
+        let zibelan = self.reloaded_online.is_zibelan();
+        for (key, state) in std::mem::take(&mut self.battle_key_restore) {
+            self.input.set_key_state(key, state);
+        }
+        if !zibelan {
+            self.battle_frame = self.battle_frame.wrapping_add(1);
+            return
+        }
+
+        let Some(frame) = self.battle_sync.as_ref().map(BattleSync::frame) else {
+            self.battle_frame = self.battle_frame.wrapping_add(1);
+            return
+        };
+        let checksum = self.battle_checksum();
+        self.battle_local_checksum = checksum;
+        let desync = self
+            .battle_sync
+            .as_mut()
+            .is_some_and(|sync| sync.store_checksum(frame, checksum));
+        if desync && !self.battle_desync {
+            eprintln!("[battle] desincronizacion frame={frame} checksum={checksum}");
+        }
+        self.battle_desync |= desync;
+        if frame % crate::battle_sync::CHECKSUM_INTERVAL == 0 {
+            if let Some(target) = self.battle_opponent {
+                self.reloaded_online.send_battle_checksum(target, frame, checksum);
+            }
+        }
+        self.battle_frame = frame;
+        self.reloaded_online.set_battle_frame(frame);
     }
 
     fn local_player_position(&self) -> Option<(f64, f64)> {
