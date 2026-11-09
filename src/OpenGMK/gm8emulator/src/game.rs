@@ -4438,34 +4438,55 @@ impl Game {
         Ok(())
     }
 
-    fn battle_checksum(&self) -> u32 {
-        let mut hash = 2_166_136_261u32;
-        let mut add = |value: i32| {
-            hash ^= value as u32;
-            hash = hash.wrapping_mul(16_777_619);
-        };
-        add(self.room.id);
-        add(self.global_number(f3r::global::BATTLE, 0).unwrap_or(-1));
-        add(self.global_number(f3r::global::BATTLE_TURNOS, 0).unwrap_or(-1));
-        let actual1 = self.global_number(f3r::global::ACTUAL1, 0).unwrap_or(-1);
-        let actual2 = self.global_number(f3r::global::ACTUAL2, 0).unwrap_or(-1);
-        add(actual1 ^ actual2);
-        let pairs: [(&[u8], &[u8]); 6] = [
-            (f3r::global::PKMN1, f3r::global::PKMN2),
-            (f3r::global::NIVEL1, f3r::global::NIVEL2),
-            (f3r::global::PS_1, f3r::global::PS_2),
-            (f3r::global::MAX_PS_1, f3r::global::MAX_PS_2),
-            (f3r::global::PP_1, f3r::global::PP_2),
-            (f3r::global::STD1, f3r::global::STD2),
-        ];
-        for (left, right) in pairs {
-            for index in 0..f3r::format::PARTY_SIZE {
-                let left = self.global_number(left, index as u32).unwrap_or(0);
-                let right = self.global_number(right, index as u32).unwrap_or(0);
-                add(left ^ right);
+    /// Values read by the GML `NetStateText` companion function.
+    fn net_state(&self) -> reloaded_cleanroom::z063_sec::NetState {
+        use reloaded_cleanroom::z063_sec::NET_STATE_PARTY_SLOTS;
+
+        let mut object_count = 0i64;
+        let mut object_sum = 0i64;
+        let mut iter = self.room.instance_list.iter_by_drawing();
+        while let Some(handle) = iter.next(&self.room.instance_list) {
+            let instance = self.room.instance_list.get(handle);
+            if !instance.persistent.get() {
+                object_count += 1;
+                object_sum += i64::from(instance.object_index.get());
             }
         }
-        hash
+
+        let position = |object: i32| {
+            let handle = self.room.instance_list.iter_by_identity(object).next(&self.room.instance_list)?;
+            let instance = self.room.instance_list.get(handle);
+            Some((instance.x.get().into_inner(), instance.y.get().into_inner()))
+        };
+
+        let mut ps1 = [0.0; NET_STATE_PARTY_SLOTS];
+        let mut ps2 = [0.0; NET_STATE_PARTY_SLOTS];
+        let mut pp1 = [0.0; NET_STATE_PARTY_SLOTS];
+        let mut pp2 = [0.0; NET_STATE_PARTY_SLOTS];
+        for index in 0..NET_STATE_PARTY_SLOTS {
+            let slot = index as u32;
+            ps1[index] = self.global_real(f3r::global::PS_1, slot);
+            ps2[index] = self.global_real(f3r::global::PS_2, slot);
+            pp1[index] = self.global_real(f3r::global::PP_1, slot);
+            pp2[index] = self.global_real(f3r::global::PP_2, slot);
+        }
+
+        reloaded_cleanroom::z063_sec::NetState {
+            object_count,
+            object_sum,
+            pokemon1: position(f3r::object::POKEMON_PLAYER),
+            pokemon2: position(f3r::object::POKEMON_ENEMY),
+            actual1: self.global_real(f3r::global::ACTUAL1, 0),
+            actual2: self.global_real(f3r::global::ACTUAL2, 0),
+            ps1,
+            ps2,
+            pp1,
+            pp2,
+        }
+    }
+
+    fn battle_checksum(&self) -> u32 {
+        reloaded_cleanroom::z063_sec::net_checksum(&self.net_state())
     }
 
     fn remap_battle_local_key(&self, vk: u8) -> u8 {

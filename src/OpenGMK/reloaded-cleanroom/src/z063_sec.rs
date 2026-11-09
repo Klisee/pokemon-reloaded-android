@@ -675,6 +675,119 @@ pub fn checksum_text(text: &[u8]) -> u32 {
     checksum as u32
 }
 
+/// Party slots walked by `NetStateText` (`for (i = 0; i <= 5; i += 1)`).
+pub const NET_STATE_PARTY_SLOTS: usize = 6;
+
+/// Snapshot of the values `NetStateText` reads from the running game.
+///
+/// The fields mirror the GML globals and object positions one-to-one so the
+/// string can be reproduced without evaluating any GML:
+///
+/// - `object_count`/`object_sum` are `NET_TMP2`/`NET_TMP` from `with(all)`
+///   over non-persistent instances;
+/// - `pokemon1`/`pokemon2` are the rounded `Pokemon1`/`Pokemon2` positions,
+///   absent when `instance_exists` is false;
+/// - `actual1`/`actual2` index the active party slots;
+/// - `ps1`/`ps2` are `PS_1`/`PS_2` and `pp1`/`pp2` are `PP_1`/`PP_2`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetState {
+    pub object_count: i64,
+    pub object_sum: i64,
+    pub pokemon1: Option<(f64, f64)>,
+    pub pokemon2: Option<(f64, f64)>,
+    pub actual1: f64,
+    pub actual2: f64,
+    pub ps1: [f64; NET_STATE_PARTY_SLOTS],
+    pub ps2: [f64; NET_STATE_PARTY_SLOTS],
+    pub pp1: [f64; NET_STATE_PARTY_SLOTS],
+    pub pp2: [f64; NET_STATE_PARTY_SLOTS],
+}
+
+impl NetState {
+    /// Exact `NetStateText()` string, including its spaces and trailing commas.
+    pub fn text(&self) -> String {
+        net_state_text(self)
+    }
+
+    /// Exact `NetChecksum()` value for this state.
+    pub fn checksum(&self) -> u32 {
+        net_checksum(self)
+    }
+}
+
+/// GML `string()` for a real: integral values print without decimals and other
+/// values use the two-decimal form of the GM8 runner.
+fn gml_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+/// GML `round()`: nearest integer with ties to even (Delphi/IEEE rounding).
+fn gml_round(value: f64) -> f64 {
+    let floor = value.floor();
+    let fraction = value - floor;
+    if fraction < 0.5 {
+        floor
+    } else if fraction > 0.5 {
+        floor + 1.0
+    } else {
+        floor + (floor as i64 & 1) as f64
+    }
+}
+
+fn rounded_number(value: f64) -> String {
+    gml_number(gml_round(value))
+}
+
+fn scaled_number(value: f64) -> String {
+    rounded_number(value * 10.0)
+}
+
+fn active_pp(actual: f64, pp: &[f64; NET_STATE_PARTY_SLOTS]) -> String {
+    let index = gml_round(actual);
+    if !index.is_finite() || index < 0.0 {
+        return scaled_number(0.0)
+    }
+    scaled_number(pp.get(index as usize).copied().unwrap_or(0.0))
+}
+
+/// Reproduce the 0.6.3 `NetStateText()` companion function exactly.
+///
+/// The GML builds `"<count> <sum>"`, appends `P1`/`P2` only when those objects
+/// exist, then `A`, both six-slot `PS` arrays, and the active `PP` pair.
+pub fn net_state_text(state: &NetState) -> String {
+    let mut text = format!("{} {}", state.object_count, state.object_sum);
+    if let Some((x, y)) = state.pokemon1 {
+        text.push_str(&format!(" P1={},{}", rounded_number(x), rounded_number(y)));
+    }
+    if let Some((x, y)) = state.pokemon2 {
+        text.push_str(&format!(" P2={},{}", rounded_number(x), rounded_number(y)));
+    }
+    text.push_str(&format!(" A={},{} PS=", gml_number(state.actual1), gml_number(state.actual2)));
+    for value in state.ps1 {
+        text.push_str(&scaled_number(value));
+        text.push(',');
+    }
+    text.push('/');
+    for value in state.ps2 {
+        text.push_str(&scaled_number(value));
+        text.push(',');
+    }
+    text.push_str(" PP=");
+    text.push_str(&active_pp(state.actual1, &state.pp1));
+    text.push(',');
+    text.push_str(&active_pp(state.actual2, &state.pp2));
+    text
+}
+
+/// Exact `NetChecksum()`: base-31 polynomial over `NetStateText()` mod 1000003.
+pub fn net_checksum(state: &NetState) -> u32 {
+    checksum_text(net_state_text(state).as_bytes())
+}
+
 pub fn validate_checksum(value: i64) -> Result<u32, GuardError> {
     if !(0..=MAX_CHECKSUM).contains(&value) {
         return Err(GuardError::ChecksumOutOfRange);
