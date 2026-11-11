@@ -794,6 +794,7 @@ impl Game {
             .builder()
             .class_name("OpenGMK")
             .visible(false)
+            .maximised(true)
             .size((width as _, height as _))
             .borderless(!window_border && play_type != PlayType::Record)
             .title("Reloaded OpenGMK")
@@ -1709,6 +1710,8 @@ impl Game {
         game.globalvars.clear();
 
         game.window.set_visible(true);
+        #[cfg(not(target_os = "android"))]
+        game.window.set_maximised(true);
 
         Ok(game)
     }
