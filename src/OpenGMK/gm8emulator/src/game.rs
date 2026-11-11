@@ -796,7 +796,7 @@ impl Game {
             .visible(false)
             .size((width as _, height as _))
             .borderless(!window_border && play_type != PlayType::Record)
-            .title(room1_caption.to_owned())
+            .title("Reloaded OpenGMK")
             .resizable(match play_type {
                 PlayType::Normal => settings.allow_resize,
                 PlayType::Record => true,
@@ -6207,24 +6207,9 @@ impl Game {
         self.load_room(self.room.id)
     }
 
-    /// Gets the whole String to be used as the window title, including score and lives if applicable
+    /// Gets the window title. The launcher brands the game window as Reloaded OpenGMK.
     pub fn get_window_title(&self) -> Cow<'_, str> {
-        use std::fmt::Write;
-
-        let show_score = self.score_capt_d && (self.has_set_show_score || self.score > 0);
-        if show_score || self.lives_capt_d {
-            let mut caption = self.decode_str(self.room.caption.as_ref()).into_owned();
-            // write!() on a String never panics
-            if show_score {
-                write!(caption, " {}{}", self.decode_str(self.score_capt.as_ref()), self.score).unwrap();
-            }
-            if self.lives_capt_d {
-                write!(caption, " {}{}", self.decode_str(self.lives_capt.as_ref()), self.lives).unwrap();
-            }
-            caption.into()
-        } else {
-            self.decode_str(self.room.caption.as_ref())
-        }
+        Cow::Borrowed("Reloaded OpenGMK")
     }
 
     // Plays the game normally
