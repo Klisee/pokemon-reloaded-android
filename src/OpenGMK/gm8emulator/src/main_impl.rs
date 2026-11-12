@@ -46,6 +46,12 @@ pub fn run_game(args: Vec<String>) -> i32 {
     opts.optopt("f", "replay-file", "path to savestate file to replay", "FILE");
     opts.optopt("o", "output-file", "output savestate name in replay mode", "FILE.bin");
     opts.optopt("S", "scan-assets", "checks every external asset under DIR and reports failures", "DIR");
+    opts.optopt(
+        "",
+        "ui-assets",
+        "exports the save-slot sprite and Pokemon PNGs to DIR, then exits without opening a window",
+        "DIR",
+    );
     opts.optmulti("a", "game-arg", "argument to pass to the game", "ARG");
     opts.optflagopt("p", "start-save", "Either loads the savestate specified after this parameter or starts at the first frame. If a .gmtas is specified by -f this will start the replay from this savestate instead", "savestate");
 
@@ -185,6 +191,22 @@ pub fn run_game(args: Vec<String>) -> i32 {
 
     let file_path = Path::new(&input);
 
+    // Diagnostic mode: export the launcher's slot art and exit without opening a window.
+    if let Some(dir) = matches.opt_str("ui-assets") {
+        let game_dir = file_path
+            .canonicalize()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."));
+        return match crate::ui_assets::export_all(&game_dir, file_path, Path::new(&dir)) {
+            Ok(()) => EXIT_SUCCESS,
+            Err(error) => {
+                eprintln!("ui-assets: {}", error);
+                EXIT_FAILURE
+            },
+        }
+    }
+
     let mut file = match fs::read(file_path) {
         Ok(data) => data,
         Err(err) => {
@@ -223,6 +245,14 @@ pub fn run_game(args: Vec<String>) -> i32 {
             return EXIT_FAILURE;
         },
     };
+
+    // Leave the launcher's slot art in place before the game runs. Fresh files are skipped, and a
+    // failure here must never stop the game from starting.
+    let game_dir = absolute_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let cache_dir = game_dir.join(crate::ui_assets::CACHE_DIR);
+    if let Err(error) = crate::ui_assets::export_from_assets(&assets, &game_dir, &absolute_path, &cache_dir) {
+        eprintln!("ui-assets: {}", error);
+    }
 
     let encoding = encoding_rs::SHIFT_JIS; // TODO: argument
 

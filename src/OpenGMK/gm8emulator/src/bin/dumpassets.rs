@@ -27,7 +27,13 @@ fn main() {
         let lower = name.to_lowercase();
         if lower.contains("logo") || lower.contains("titulo") || lower.contains("title") {
             if let Some(frame) = sprite.frames.first() {
-                if let Some(image) = image::RgbaImage::from_raw(frame.width, frame.height, frame.data.to_vec()) {
+                // Exe sprite frames are BGRA; RgbaImage expects RGBA (verified against
+                // data/char_custom/*.bmp in the game folder).
+                let mut rgba = frame.data.to_vec();
+                for pixel in rgba.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                if let Some(image) = image::RgbaImage::from_raw(frame.width, frame.height, rgba) {
                     image.save(format!("{out}/sprite_{index}_{name}.png")).ok();
                     println!("sprite {index} {name} -> {}x{}", frame.width, frame.height);
                 }

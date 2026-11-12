@@ -25,6 +25,7 @@ mod reloaded_online;
 mod render;
 mod tile;
 mod types;
+pub mod ui_assets;
 mod util;
 
 #[cfg(target_os = "android")]
