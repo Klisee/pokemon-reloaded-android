@@ -322,6 +322,8 @@ pub struct Game {
     pub window_cursor_gml: i32,
     pub window_icons: bool,
     pub window_inner_size: (u32, u32),
+    /// Reasignación de teclas guardada por el launcher (`controls.conf`), ya traducida a vk.
+    pub key_remap: std::collections::HashMap<u8, u8>,
     pub window_offset_spoof: (i32, i32),
     pub window_is_logical_dpi: bool,
     pub window_sizeable: bool,
@@ -1673,6 +1675,7 @@ impl Game {
             window_offset_spoof: (0, 0),
             window_sizeable: settings.allow_resize,
             window_visible: true,
+            key_remap: std::collections::HashMap::new(),
         };
 
         game.temp_directory = game.encode_str_maybe(temp_directory.to_str().unwrap()).unwrap().into_owned().into();
@@ -2926,7 +2929,67 @@ impl Game {
         self.is_menu_room()
     }
 
+    /// Traduce los nombres de tecla que escribe la pantalla de Controles a códigos vk.
+    fn parse_conf_key(name: &str) -> Option<u8> {
+        use crate::input::Button;
+        let upper = name.trim().to_ascii_uppercase();
+        if upper.len() == 1 {
+            let byte = upper.as_bytes()[0];
+            if byte.is_ascii_uppercase() {
+                return Some(byte);
+            }
+            if byte.is_ascii_digit() {
+                return Some(byte);
+            }
+        }
+        Some(match upper.as_str() {
+            "RETURN" | "ENTER" => Button::Return as u8,
+            "SPACE" => Button::Space as u8,
+            "ESCAPE" => Button::Escape as u8,
+            "TAB" => Button::Tab as u8,
+            "BACKSPACE" => Button::Backspace as u8,
+            "UP" => Button::UpArrow as u8,
+            "DOWN" => Button::DownArrow as u8,
+            "LEFT" => Button::LeftArrow as u8,
+            "RIGHT" => Button::RightArrow as u8,
+            _ => return None,
+        })
+    }
+
+    /// Lee `controls.conf` de la carpeta del juego. El formato es una línea por acción:
+    /// `96=Z` significa "el botón de mando 96 pulsa la tecla Z".
+    fn load_key_remap(&mut self, root: &std::path::Path) {
+        self.key_remap.clear();
+        // El launcher de escritorio escribe el archivo en su carpeta de datos y pasa la ruta por
+        // entorno; si no está, se prueba junto al juego.
+        let path = std::env::var_os("OPENGMK_CONTROLS")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| root.join("controls.conf"));
+        let Ok(text) = std::fs::read_to_string(&path) else { return };
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue
+            }
+            let Some((code, key)) = line.split_once('=') else { continue };
+            let Ok(code) = code.trim().parse::<u8>() else { continue };
+            // El launcher escribe el destino como nombre ("Q") o como vk numérico.
+            let target = match key.trim().parse::<u8>() {
+                Ok(vk) if vk > 0 => Some(vk),
+                _ => Self::parse_conf_key(key),
+            };
+            if let Some(vk) = target {
+                self.key_remap.insert(code, vk);
+            }
+        }
+        if !self.key_remap.is_empty() {
+            eprintln!("[pad] {} reasignaciones cargadas desde {}", self.key_remap.len(), path.display());
+        }
+    }
+
     fn apply_visual_settings(&mut self, root: &std::path::Path) {
+        self.load_key_remap(root);
         let gb = crate::mods::gb_settings(root);
         self.gb_filter_active = gb.is_some();
         self.renderer.set_crt(crate::mods::crt_settings(root));
@@ -6037,7 +6100,10 @@ impl Game {
                             if self.input_latch.swallow_key(true) {
                                 continue
                             }
-                            let vk = self.remap_battle_local_key(input::ramen2vk(key));
+                            let raw = input::ramen2vk(key);
+                            let vk = self.remap_battle_local_key(
+                                self.key_remap.get(&raw).copied().unwrap_or(raw),
+                            );
                             self.input.button_press(vk, true);
                             // Game Maker's `keyboard_string` drops its last character on backspace.
                             // The game's text dialog relies on that instead of handling the key
@@ -6055,7 +6121,10 @@ impl Game {
                             if self.input_latch.swallow_key(false) {
                                 continue
                             }
-                            let vk = self.remap_battle_local_key(input::ramen2vk(key));
+                            let raw = input::ramen2vk(key);
+                            let vk = self.remap_battle_local_key(
+                                self.key_remap.get(&raw).copied().unwrap_or(raw),
+                            );
                             if was_held(vk) {
                                 self.input.button_release(vk, true);
                             } else {
