@@ -48,6 +48,9 @@ serde_with = { version = "3.16.1", features = ["alloc", "macros"], default-featu
 time = { version = "0.3.41", features = ["local-offset", "macros"] }
 
 
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+gilrs = "0.11"
+
 [target.'cfg(all(target_os = "windows"))'.dependencies]
 crc32fast = "1.5"
 libffi = "3.1.0"

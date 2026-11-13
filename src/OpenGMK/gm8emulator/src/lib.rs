@@ -26,6 +26,9 @@ mod render;
 mod tile;
 mod types;
 pub mod ui_assets;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) mod gamepad;
 mod util;
 
 #[cfg(target_os = "android")]

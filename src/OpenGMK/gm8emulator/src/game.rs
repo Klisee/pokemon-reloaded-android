@@ -324,6 +324,12 @@ pub struct Game {
     pub window_inner_size: (u32, u32),
     /// Reasignación de teclas guardada por el launcher (`controls.conf`), ya traducida a vk.
     pub key_remap: std::collections::HashMap<u8, u8>,
+    /// Estado del mando físico (solo escritorio). `None` si no hay ninguno conectado.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub gamepads: Option<crate::gamepad::Gamepads>,
+    /// Qué teclas del mando están pulsadas ahora, para no repetir eventos.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    pub pad_held: std::collections::HashSet<u8>,
     pub window_offset_spoof: (i32, i32),
     pub window_is_logical_dpi: bool,
     pub window_sizeable: bool,
@@ -1676,6 +1682,10 @@ impl Game {
             window_sizeable: settings.allow_resize,
             window_visible: true,
             key_remap: std::collections::HashMap::new(),
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            gamepads: crate::gamepad::Gamepads::new(),
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            pad_held: std::collections::HashSet::new(),
         };
 
         game.temp_directory = game.encode_str_maybe(temp_directory.to_str().unwrap()).unwrap().into_owned().into();
@@ -6072,6 +6082,44 @@ impl Game {
         }
         self.interaction_menu_open = false;
         self.interaction_target = None;
+    }
+
+    /// Pasa los botones del mando a pulsaciones de teclado, respetando el remapeo del launcher.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn process_gamepad_events(&mut self) {
+        use crate::gamepad::{PadAction, PadKey};
+        let Some(pads) = self.gamepads.as_mut() else { return };
+        let actions = pads.poll();
+        for action in actions {
+            let (key, down) = match action {
+                PadAction::Down(key) => (key, true),
+                PadAction::Up(key) => (key, false),
+            };
+            let vk = match key {
+                PadKey::Z => crate::input::Button::Z as u8,
+                PadKey::X => crate::input::Button::X as u8,
+                PadKey::C => crate::input::Button::C as u8,
+                PadKey::V => crate::input::Button::V as u8,
+                PadKey::Return => crate::input::Button::Return as u8,
+                PadKey::Space => crate::input::Button::Space as u8,
+                PadKey::B => crate::input::Button::B as u8,
+                PadKey::M => crate::input::Button::M as u8,
+                PadKey::O => crate::input::Button::O as u8,
+                PadKey::S => crate::input::Button::S as u8,
+                PadKey::E => crate::input::Button::E as u8,
+                PadKey::Up => crate::input::Button::UpArrow as u8,
+                PadKey::Down => crate::input::Button::DownArrow as u8,
+                PadKey::Left => crate::input::Button::LeftArrow as u8,
+                PadKey::Right => crate::input::Button::RightArrow as u8,
+            };
+            if down {
+                if self.pad_held.insert(vk) {
+                    self.input.button_press(vk, true);
+                }
+            } else if self.pad_held.remove(&vk) {
+                self.input.button_release(vk, true);
+            }
+        }
     }
 
     pub fn process_window_events(&mut self) {
