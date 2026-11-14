@@ -1,6 +1,9 @@
 # MODO DE MANTENIMIENTO
 
-Esta aplicación dejara de actualizarse de forma constante y solo lo hará para solucionar bugs concretos o específicos, la aplicación en algún punto de finales de año dejara de recibir soporte de forma completa, este no es el fin, sino el inicio de un proyecto multiplataforma para Windows, Linux, macOS, Android y iOS de nombre **Reloaded OpenGMK** de paso anuncio que el código de Pokémon Reloaded Android queda totalmente limpio de cualquier derivado de scripts GML, pronto habrá mas noticias de **Reloaded OpenGMK**
+Esta aplicación dejara de actualizarse de forma constante y solo lo hará para solucionar bugs concretos o específicos, la aplicación en algún punto de finales de año dejara de recibir soporte de forma completa, este no es el fin, sino el inicio de un proyecto multiplataforma para Windows, Linux, macOS, Android y iOS de nombre [**Reloaded OpenGMK**]([https://github.com/Klisee](https://github.com/Klisee/Reloaded-OpenGMK)) de paso anuncio que el código de Pokémon Reloaded Android queda totalmente limpio de cualquier derivado de scripts GML, pronto habrá mas noticias de [**Reloaded OpenGMK**]([https://github.com/Klisee](https://github.com/Klisee/Reloaded-OpenGMK))
+
+
+
 
 # Pokémon Reloaded en Android
 
